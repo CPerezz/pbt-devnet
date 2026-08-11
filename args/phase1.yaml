@@ -1,0 +1,11 @@
+# Phase 1: steady load with periodic competing-payload reorgs.
+slot_time: "3s"
+slots: 0            # run until the enclave is torn down
+reorg_every: 12     # a 2-deep reorg every 12 slots
+reorg_depth: 2
+probe_every: 8
+hammer_enabled: true
+hammer_interval: "400ms"
+hammer_batch: 4
+hammer_slots_per_tx: 20
+hammer_code_size: 12000
