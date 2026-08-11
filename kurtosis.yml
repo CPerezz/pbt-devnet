@@ -1,0 +1,5 @@
+name: github.com/CPerezz/pbt-devnet
+description: |
+  A two-node all-Geth devnet on the EIP-8297 partitioned binary tree, post-Amsterdam,
+  driven by a differential engine-API driver that requires both nodes to agree on every
+  state root.

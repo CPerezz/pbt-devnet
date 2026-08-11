@@ -1,0 +1,7 @@
+# A baseline run: no load, no chaos. Use this to establish that the pair agrees at
+# all before blaming the tree for anything.
+slot_time: "3s"
+slots: 30
+reorg_every: 0
+probe_every: 5
+hammer_enabled: false
