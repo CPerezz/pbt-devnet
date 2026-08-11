@@ -1,0 +1,8 @@
+/artifacts/
+*.log
+
+# Compiled binaries: `go build ./...` inside a module writes one named after the
+# directory. They are multi-megabyte and must never be committed.
+/driver/driver
+/hammer/hammer
+/gengenesis/gengenesis
