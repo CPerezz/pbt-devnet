@@ -1,17 +1,14 @@
-# Steady load with periodic competing-payload reorgs.
+# Three nodes, added purely in config — nothing in main.star changes.
 #
-# Key names mirror ethpandaops/*-devnets so this can migrate there later:
-# default_ethereum_client_images matches their group_vars/all/images.yaml, and
-# client_sources matches eth-client-docker-image-builder's source/target shape.
-# Both this file and scripts/build-images.sh read it.
+# This is the worked example the README's "Adding a client" section points at: a second
+# entry under default_ethereum_client_images plus one more entry in `nodes` is all it
+# takes. With N nodes each block is validated N-1 times, and a disagreement among three
+# is a 2-1 split that names the odd one out rather than a tie.
 
 ### Execution layer clients
 default_ethereum_client_images:
   geth: pbt-geth:local
 
-# Where each image is built from. scripts/build-images.sh reads this; `path` is a local
-# checkout (what you want while developing against a branch), `repository`/`ref` record
-# the upstream it corresponds to.
 client_sources:
   geth:
     repository: CPerezz/go-ethereum
@@ -25,14 +22,17 @@ nodes:
   - name: geth-b
     client: geth
     extra_flags: ["--cache=3072", "--cache.trie=40", "--gcmode=archive", "--cache.preimages"]
+  - name: geth-c
+    client: geth
+    extra_flags: ["--cache=1024", "--cache.trie=25"]
 
 # Asserted against every node's genesis state root at preflight: the client-agnostic
 # proof that the chain is committing state with the binary tree. Printed by gengenesis.
 expected_genesis_root: "0x7e16e8798b8f3d27d4bea3c13cac4b459fdaa8e0baca8089ce1fb834f2b2820a"
 
 slot_time: "3s"
-slots: 0            # run until the enclave is torn down
-reorg_every: 12     # a 2-deep reorg every 12 slots
+slots: 0
+reorg_every: 12
 reorg_depth: 2
 probe_every: 8
 

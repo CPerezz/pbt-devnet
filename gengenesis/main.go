@@ -131,4 +131,12 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (chainid %d, pbt=true, amsterdamTime=0)\n", *out, *chainID)
+
+	// Compute and print the genesis root as the tree commits it. Feed this to the
+	// driver as --expected-genesis-root (or expected_genesis_root in an args file):
+	// it is the client-agnostic check that a node really is on the binary tree, rather
+	// than silently having fallen back to the merkle-patricia trie.
+	block := genesis.ToBlock()
+	fmt.Fprintf(os.Stderr, "genesis block hash:  %s\n", block.Hash())
+	fmt.Fprintf(os.Stderr, "expected_genesis_root: %s\n", block.Root())
 }

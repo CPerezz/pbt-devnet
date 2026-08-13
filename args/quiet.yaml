@@ -1,5 +1,28 @@
-# A baseline run: no load, no chaos. Use this to establish that the pair agrees at
-# all before blaming the tree for anything.
+# Baseline: no load, no chaos. Establish that the nodes agree at all before blaming the
+# tree for anything.
+
+### Execution layer clients
+default_ethereum_client_images:
+  geth: pbt-geth:local
+
+client_sources:
+  geth:
+    repository: CPerezz/go-ethereum
+    ref: pbt
+    path: ../go-ethereum
+
+nodes:
+  - name: geth-a
+    client: geth
+    extra_flags: ["--cache=512", "--cache.trie=10"]
+  - name: geth-b
+    client: geth
+    extra_flags: ["--cache=3072", "--cache.trie=40", "--gcmode=archive", "--cache.preimages"]
+
+# Asserted against every node's genesis state root at preflight: the client-agnostic
+# proof that the chain is committing state with the binary tree. Printed by gengenesis.
+expected_genesis_root: "0x7e16e8798b8f3d27d4bea3c13cac4b459fdaa8e0baca8089ce1fb834f2b2820a"
+
 slot_time: "3s"
 slots: 30
 reorg_every: 0
