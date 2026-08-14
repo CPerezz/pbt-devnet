@@ -47,6 +47,10 @@ type config struct {
 	reorgEvery   int
 	reorgDepth   int
 	probeEvery   int
+	// expectedGenesisRoot, when set, is asserted against every node's genesis state
+	// root. It is the client-agnostic way to prove the chain really is on the binary
+	// tree; zero means "unchecked".
+	expectedGenesisRoot common.Hash
 }
 
 // elFlag collects one `--el name=engineURL,rpcURL` entry per execution client.
@@ -80,6 +84,7 @@ func main() {
 		feeRecip   = flag.String("fee-recipient", "0x0000000000000000000000000000000000000001", "suggested fee recipient")
 		verbose    = flag.Bool("v", false, "debug logging")
 		selfTest   = flag.Bool("self-test", false, "prove the oracle detects a corrupted state root, then exit")
+		expRoot    = flag.String("expected-genesis-root", "", "assert every node's genesis state root equals this (proves the binary-tree commitment)")
 	)
 	flag.Var(&els, "el", "execution client as name=engineURL,rpcURL (repeatable; at least two)")
 	flag.Parse()
@@ -112,6 +117,12 @@ func main() {
 		reorgEvery:   *reorgEvery,
 		reorgDepth:   *reorgDepth,
 		probeEvery:   *probeEvery,
+	}
+	if *expRoot != "" {
+		if len(*expRoot) != 66 || !strings.HasPrefix(*expRoot, "0x") {
+			fatal("--expected-genesis-root must be a 0x-prefixed 32-byte hash, got %q", *expRoot)
+		}
+		cfg.expectedGenesisRoot = common.HexToHash(*expRoot)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -264,20 +275,22 @@ func (d *Driver) preflight(ctx context.Context) error {
 		return fmt.Errorf("genesis state root is the empty MPT root — genesis has no alloc, or pbt is off")
 	}
 
-	// Positive proof of the commitment: on the binary tree, account dumping is
-	// refused outright ("account dumping is not supported for the binary tree").
-	// An error here is the success case; a successful dump means MPT.
-	for _, n := range d.nodes {
-		var sink any
-		err := n.RPC(ctx, "debug_dumpBlock", &sink, "0x0")
-		switch {
-		case err == nil:
-			return fmt.Errorf("%s served debug_dumpBlock, so it is NOT on the binary tree", n.Name)
-		case strings.Contains(err.Error(), "binary tree"):
-			slog.Info("confirmed on the binary tree", "node", n.Name)
-		default:
-			slog.Warn("inconclusive tree probe; continuing", "node", n.Name, "err", err)
+	// Positive proof of the commitment, portable across clients: the genesis state
+	// root must equal the expected binary-tree root.
+	//
+	// This replaces an earlier probe that called debug_dumpBlock and treated an error
+	// as success, on the grounds that this geth branch refuses account dumping on the
+	// tree. That inferred a property of the tree from one client's error string, and it
+	// hard-failed any client that happens to serve the method — a barrier that had
+	// nothing to do with whether the client implements PBT.
+	if d.cfg.expectedGenesisRoot != (common.Hash{}) {
+		if genesis[0].StateRoot != d.cfg.expectedGenesisRoot {
+			return fmt.Errorf("genesis state root is %s, expected %s — the nodes are not committing state with the binary tree (is \"pbt\": true set?)",
+				genesis[0].StateRoot, d.cfg.expectedGenesisRoot)
 		}
+		slog.Info("confirmed the binary-tree commitment", "genesis_state_root", genesis[0].StateRoot)
+	} else {
+		slog.Warn("no --expected-genesis-root given: the nodes agree with each other, but nothing checks they are on the binary tree at all")
 	}
 
 	// Start from wherever the nodes already are, not from genesis, so the driver can

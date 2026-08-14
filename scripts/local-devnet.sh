@@ -4,6 +4,9 @@
 # This is the fast iteration loop. Kurtosis adds container and image plumbing that is
 # noise while you are changing the driver; main.star runs the same thing in an enclave.
 #
+# Geth-only by design: it launches $PBT_GETH binaries directly. Multi-client runs go
+# through Kurtosis, where each client is an image rather than a local binary.
+#
 # Usage:
 #   scripts/local-devnet.sh start            # PBT_NODES=2 by default
 #   PBT_NODES=3 scripts/local-devnet.sh start
@@ -95,8 +98,16 @@ rpc_args() {
 driver() {
   shift || true
   mapfile -t ELS < <(el_args)
+  # Same expected root the Kurtosis args file uses, so both paths make the same
+  # binary-tree assertion from one source of truth.
+  local root=""
+  if command -v yq >/dev/null 2>&1; then
+    root="$(yq -r '.expected_genesis_root // ""' "$ROOT/args/devnet.yaml" 2>/dev/null || true)"
+  fi
+  local extra=()
+  [[ -n "$root" && "$root" != "null" ]] && extra=(--expected-genesis-root "$root")
   PBT_ARTIFACT_DIR="${PBT_ARTIFACT_DIR:-$RUN/artifacts}" \
-    "$DRIVER" "${ELS[@]}" --jwt "$RUN/jwtsecret" "$@"
+    "$DRIVER" "${ELS[@]}" --jwt "$RUN/jwtsecret" "${extra[@]}" "$@"
 }
 
 hammer() {

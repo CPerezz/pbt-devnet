@@ -26,6 +26,7 @@ import (
 	"math/big"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -151,7 +152,7 @@ func main() {
 		for i := 0; i < *batch; i++ {
 			s := senders[(round*(*batch)+i)%len(senders)]
 
-			tx, err := buildTx(ctx, clients[0], kind, s, gasFeeCap, big.NewInt(*gasTipCap), big.NewInt(*chainID), *slots, sharedCode)
+			tx, err := buildTx(ctx, clients, kind, s, gasFeeCap, big.NewInt(*gasTipCap), big.NewInt(*chainID), *slots, sharedCode)
 			if err != nil {
 				slog.Warn("build failed", "workload", kind, "err", err)
 				continue
@@ -257,7 +258,40 @@ func refreshFeeCap(ctx context.Context, cl *ethclient.Client, current *big.Int, 
 	return current
 }
 
-func buildTx(ctx context.Context, cl *ethclient.Client, kind string, s *sender, gasFeeCap, gasTipCap, chainID *big.Int, slots int, sharedCode []byte) (*types.Transaction, error) {
+// estimateEverywhere asks every client to price the same call and returns the largest
+// answer. A disagreement is logged as a finding: on a chain where gas has a state
+// dimension, two implementations pricing one call differently is a consensus-relevant
+// difference, not a rounding detail.
+func estimateEverywhere(ctx context.Context, clients []*ethclient.Client, call ethereum.CallMsg) (uint64, error) {
+	var (
+		best  uint64
+		first uint64
+		have  bool
+		errs  []string
+	)
+	for i, cl := range clients {
+		g, err := cl.EstimateGas(ctx, call)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("client %d: %v", i, err))
+			continue
+		}
+		if !have {
+			first, have = g, true
+		} else if g != first {
+			slog.Error("FINDING: clients disagree on gas for the same call",
+				"client_0", first, "client_"+fmt.Sprint(i), g, "to", call.To, "data_len", len(call.Data))
+		}
+		if g > best {
+			best = g
+		}
+	}
+	if !have {
+		return 0, fmt.Errorf("no client could estimate gas: %s", strings.Join(errs, "; "))
+	}
+	return best, nil
+}
+
+func buildTx(ctx context.Context, clients []*ethclient.Client, kind string, s *sender, gasFeeCap, gasTipCap, chainID *big.Int, slots int, sharedCode []byte) (*types.Transaction, error) {
 	var (
 		to   *common.Address
 		data []byte
@@ -296,16 +330,23 @@ func buildTx(ctx context.Context, cl *ethclient.Client, kind string, s *sender, 
 	// account costs far more than the classic 21k (measured, see README), so a
 	// hardcoded limit sends every transaction out-of-gas — where it still lands in a
 	// block, still burns the whole limit, and looks like load while testing nothing.
-	gas, err := cl.EstimateGas(ctx, ethereum.CallMsg{
+	//
+	// Every client is asked, not just the first. With heterogeneous clients an estimate
+	// from one is not valid for another, and on a two-dimensional gas model a
+	// disagreement about the cost of the same call is itself a divergence worth
+	// reporting. The largest estimate is used so the transaction is executable
+	// everywhere.
+	call := ethereum.CallMsg{
 		From:      s.addr,
 		To:        to,
 		Value:     val,
 		Data:      data,
 		GasFeeCap: gasFeeCap,
 		GasTipCap: gasTipCap,
-	})
+	}
+	gas, err := estimateEverywhere(ctx, clients, call)
 	if err != nil {
-		return nil, fmt.Errorf("estimate gas: %w", err)
+		return nil, err
 	}
 	// 1% only. A wide margin would paper over exactly what we want to see: if the
 	// estimate does not match execution, that gap is a finding about the gas model,

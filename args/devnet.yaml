@@ -1,0 +1,55 @@
+# The devnet config. Key names mirror ethpandaops/*-devnets so this can migrate there:
+# default_ethereum_client_images matches their group_vars/all/images.yaml, client_sources
+# matches eth-client-docker-image-builder's source/target shape. Both main.star (via
+# Kurtosis, which parses this YAML into a dict) and scripts/build-images.sh (via yq)
+# read this file.
+
+### Execution layer clients
+default_ethereum_client_images:
+  geth: pbt-geth:local
+  # besu: pbt-besu:local          # needs a PBT-capable besu; see "Clients" in the README
+
+# Where each image is built from. `path` is a local checkout, which is what you want
+# while developing against a branch; repository/ref record the upstream it corresponds to.
+client_sources:
+  geth:
+    repository: CPerezz/go-ethereum
+    ref: pbt
+    path: ../go-ethereum
+  # besu:
+  #   repository: besu-eth/besu
+  #   ref: main
+  #   path: ../besu
+
+# At least two nodes. Asymmetry is the point: instances of one binary with one config
+# agree by construction, so these are pushed down different paths through the same tree
+# and required to produce identical roots. Adding a node needs nothing but this list.
+nodes:
+  - name: geth-a
+    client: geth
+    extra_flags: ["--cache=512", "--cache.trie=10"]
+  - name: geth-b
+    client: geth
+    extra_flags: ["--cache=3072", "--cache.trie=40", "--gcmode=archive", "--cache.preimages"]
+  # - name: geth-c
+  #   client: geth
+  #   extra_flags: ["--cache=1024", "--cache.trie=25"]
+  # - name: besu-a
+  #   client: besu
+
+# Asserted against every node's genesis state root at preflight: the client-agnostic
+# proof that the chain is committing state with the binary tree. Printed by gengenesis.
+expected_genesis_root: "0x7e16e8798b8f3d27d4bea3c13cac4b459fdaa8e0baca8089ce1fb834f2b2820a"
+
+slot_time: "3s"
+slots: 0            # run until the enclave is torn down
+reorg_every: 12     # a 2-deep competing-payload reorg every 12 slots; 0 disables
+reorg_depth: 2
+probe_every: 8
+
+# Set hammer_enabled: false for a quiet baseline with no load.
+hammer_enabled: true
+hammer_interval: "400ms"
+hammer_batch: 4
+hammer_slots_per_tx: 20
+hammer_code_size: 12000
