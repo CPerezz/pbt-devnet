@@ -18,7 +18,7 @@ type, because flags are logic rather than config.
 
 Run:
   scripts/build-images.sh
-  kurtosis run . --enclave pbt --args-file args/phase1.yaml
+  kurtosis run . --enclave pbt --args-file args/devnet.yaml
 """
 
 GENESIS_DIR = "/network-configs"

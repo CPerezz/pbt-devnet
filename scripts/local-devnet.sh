@@ -98,11 +98,11 @@ rpc_args() {
 driver() {
   shift || true
   mapfile -t ELS < <(el_args)
-  # Same expected root the Kurtosis args files use, so both paths make the same
+  # Same expected root the Kurtosis args file uses, so both paths make the same
   # binary-tree assertion from one source of truth.
   local root=""
   if command -v yq >/dev/null 2>&1; then
-    root="$(yq -r '.expected_genesis_root // ""' "$ROOT/args/phase1.yaml" 2>/dev/null || true)"
+    root="$(yq -r '.expected_genesis_root // ""' "$ROOT/args/devnet.yaml" 2>/dev/null || true)"
   fi
   local extra=()
   [[ -n "$root" && "$root" != "null" ]] && extra=(--expected-genesis-root "$root")

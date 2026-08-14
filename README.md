@@ -11,17 +11,33 @@ to the payload's, so a `VALID` from a node that did not build the block *is* the
 assertion. Rationale for the rest is in
 [PR #1](https://github.com/CPerezz/pbt-devnet/pull/1).
 
-Clients are declared in the args file; `main.star` only knows *how* to launch each client type.
+```
+                  ┌──────────────────────────────────────┐
+                  │ pbtdriver   (stands in for the CL)   │
+                  │  FCUv4(attrs)  ──►  proposer         │  proposer rotates each slot
+                  │  getPayloadV6  ◄──  proposer         │
+                  │  newPayloadV5  ──►  ALL nodes        │  ◄── the oracle
+                  │  FCUv4(head)   ──►  ALL nodes        │
+                  └───┬──────────────┬──────────────┬────┘
+                ┌─────▼─────┐  ┌─────▼─────┐  ┌─────▼─────┐
+                │  geth-a   │  │  geth-b   │  │  besu-a   │   unpeered
+                │  pruning  │  │  archive  │  │           │   asymmetric config
+                └─────▲─────┘  └─────▲─────┘  └─────▲─────┘
+                ┌─────┴──────────────┴──────────────┴─────┐
+                │ pbthammer  →  every RPC                  │
+                └──────────────────────────────────────────┘
+```
+
+Clients and nodes are declared in `args/devnet.yaml`; `main.star` only knows *how* to launch each
+client type. Only EIP-1559 transactions are sent today.
 
 ## Run
 
 ```bash
 brew install kurtosis-tech/tap/kurtosis-cli          # + Docker running, + yq
-scripts/build-images.sh                              # builds every client in client_sources, + driver + hammer
+scripts/build-images.sh                              # every client in client_sources, + driver + hammer
 
-kurtosis run . --enclave pbt --args-file args/phase1.yaml       # load + reorgs
-kurtosis run . --enclave pbt --args-file args/quiet.yaml        # baseline, no load
-kurtosis run . --enclave pbt --args-file args/three-nodes.yaml  # 3 nodes, config-only
+kurtosis run . --enclave pbt --args-file args/devnet.yaml
 
 kurtosis service logs pbt pbtdriver -f               # the oracle
 kurtosis port print  pbt geth-a rpc
@@ -54,13 +70,22 @@ Regenerate genesis. It also prints the root to paste into `expected_genesis_root
 cd gengenesis && go build -o /tmp/gengenesis . && /tmp/gengenesis --out ../genesis/genesis.json --gaslimit 200000000
 ```
 
+## Clients
+
+geth (`CPerezz/go-ethereum@pbt`) is the only client wired up today. Besu's EIP-8297 work lives in
+[`besu-eth/besu-stateless`](https://github.com/besu-eth/besu-stateless/tree/feat/partitioned-binary-trie),
+which is a trie library rather than a node — no engine API, CLI or genesis parsing — so it cannot
+join yet; `besu-eth/besu` is already Amsterdam-capable but has no PBT. The `besu-a` node above and
+the commented entries in `args/devnet.yaml` are the shape it will take. Until a second
+implementation runs, all nodes are the same binary, which can be shown consistent but never
+correct.
+
 ## Adding a client
 
-Two edits. In the args file, give it an image, a source and a node entry:
+Two edits. In `args/devnet.yaml`, give it an image, a source and a node entry:
 
 ```yaml
 default_ethereum_client_images:
-  geth: pbt-geth:local
   myclient: pbt-myclient:local
 
 client_sources:
@@ -85,7 +110,7 @@ CLIENTS = {
 
 Genesis is mounted at `/network-configs`, the JWT at `/jwt/jwtsecret`. An unknown client fails with
 the supported list, and at least two nodes are required. Another instance of a client already in
-`CLIENTS` needs only the args file — see `args/three-nodes.yaml`.
+`CLIENTS` needs only the args file.
 
 **Required of any client:**
 
@@ -100,32 +125,7 @@ the supported list, and at least two nodes are required. Another instance of a c
 **Optional** — absent gives one `ORACLE DEGRADED` warning and the run continues: `eth_getProof`,
 `eth_getBlockReceipts`, `debug_getBadBlocks`, `debug_executionWitness`.
 
-## Gotchas
-
-- **Run `--self-test` before trusting any result.** It corrupts one byte of a real payload's state
-  root and recomputes a matching block hash, forcing the node through the root comparison. Until
-  it prints `invalid merkle root`, "0 findings" is indistinguishable from a broken harness.
-- **Set `expected_genesis_root`.** Without it the nodes are only checked against each other, not
-  against the binary tree — they could all be on the merkle-patricia trie and agree.
-- **Gas is two-dimensional**: `StateGas = bytes_of_new_state × 1530`, so a fresh account costs
-  207,391 and a fresh storage slot 111,234 while a transfer to an *existing* account is still
-  21,000. Gas is estimated per transaction on every client; a hardcoded pre-Amsterdam limit fills
-  blocks with out-of-gas transactions that burn the full limit and revert every write.
-  **Check receipt `status`, not throughput.** A gas disagreement between clients is a finding.
-- **Watch `txpool_status`**: non-zero `queued` means transactions are being dropped, not executed.
-- Only `eth_getProof` reads the tree per key. `debug_dumpBlock`, `debug_accountRange` and
-  `debug_storageRangeAt` are refused on PBT, `debug_getModifiedAccountsByNumber` has no PBT guard
-  and misleads, `debug_stateSize` never initialises. And a wrong *tree* representation is invisible
-  to execution — code comes from the kv code table keyed by keccak — so assert via `eth_getProof`
-  and root agreement, never `eth_getCode` alone.
-- geth: `--state.scheme=path` (hashdb refused), `--syncmode=full` (snap sync refused), never
-  `--dev` or `--vmwitnessstats`.
-
-## Coverage
-
-`fanout` (fresh accounts) · `storage` (spread slots) · `codedup` (shared code-zone leaves) ·
-`destruct` (factory deploys code then destroys it in-tx).
-
-Missing: 7702 delegation lifecycle, storage zeroization, call/SLOAD, EXTCODESIZE/COPY, legacy and
-access-list transactions. **Only EIP-1559 is sent today.** Blobs are out of scope — blob data never
-enters the state tree. No unit tests; verification is empirical.
+Gas here is two-dimensional (`StateGas = bytes_of_new_state × 1530`), so a fresh account costs
+207,391 and a fresh storage slot 111,234 while a transfer to an *existing* account is still 21,000.
+Gas is estimated per transaction on every client; a disagreement between clients is reported as a
+finding.

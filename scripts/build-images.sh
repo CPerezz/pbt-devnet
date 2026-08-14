@@ -9,11 +9,11 @@
 # Because these are local tags with no registry behind them, run kurtosis WITHOUT
 # `--image-download always` — that would try to pull them and fail.
 #
-# Usage: scripts/build-images.sh [args-file]        (default: args/phase1.yaml)
+# Usage: scripts/build-images.sh [args-file]        (default: args/devnet.yaml)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARGS="${1:-$ROOT/args/phase1.yaml}"
+ARGS="${1:-$ROOT/args/devnet.yaml}"
 PLATFORM="${PBT_PLATFORM:-linux/arm64}"
 
 [[ -f "$ARGS" ]] || { echo "no args file at $ARGS" >&2; exit 1; }
