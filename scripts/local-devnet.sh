@@ -7,10 +7,11 @@
 # Geth-only by design: it launches $PBT_GETH binaries directly. Multi-client runs go
 # through Kurtosis, where each client is an image rather than a local binary.
 #
+# `make dev` drives this; the commands below are the same thing by hand.
+#
 # Usage:
 #   scripts/local-devnet.sh start            # PBT_NODES=2 by default
 #   PBT_NODES=3 scripts/local-devnet.sh start
-#   scripts/local-devnet.sh driver --self-test
 #   scripts/local-devnet.sh driver --slot-time 3s --slots 20 --reorg-every 6
 #   scripts/local-devnet.sh hammer --for 120s
 #   scripts/local-devnet.sh logs 60
@@ -19,10 +20,22 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN="${PBT_RUN_DIR:-/tmp/pbt-local}"
-GETH="${PBT_GETH:-/tmp/pbtgeth}"
-DRIVER="${PBT_DRIVER:-/tmp/pbtdriver}"
-HAMMER="${PBT_HAMMER:-/tmp/pbthammer}"
+# Binaries live in the repo's own bin/, which is what `make bin` populates.
+GETH="${PBT_GETH:-$ROOT/bin/pbtgeth}"
+DRIVER="${PBT_DRIVER:-$ROOT/bin/pbtdriver}"
+HAMMER="${PBT_HAMMER:-$ROOT/bin/pbthammer}"
 NODES="${PBT_NODES:-2}"
+
+# bash 3.2 is still /bin/bash on macOS and has no mapfile, so collect lines by hand.
+# Usage: collect ARRAYNAME command...
+collect() {
+  local __name="$1"; shift
+  local __line
+  eval "$__name=()"
+  while IFS= read -r __line; do
+    eval "$__name+=(\"\$__line\")"
+  done < <("$@")
+}
 
 # Node i gets its own port block so any number of clients can coexist.
 http_port() { echo $((8545 + $1 * 100)); }
@@ -62,19 +75,21 @@ profile_flags() {
 }
 
 start() {
-  [[ -x "$GETH"   ]] || { echo "no geth at $GETH"     >&2; exit 1; }
-  [[ -x "$DRIVER" ]] || { echo "no driver at $DRIVER" >&2; exit 1; }
+  [[ -x "$GETH"   ]] || { echo "no geth at $GETH (build one: go build -o $GETH ./cmd/geth)" >&2; exit 1; }
+  [[ -x "$DRIVER" ]] || { echo "no driver at $DRIVER (run: make bin)" >&2; exit 1; }
   (( NODES >= 2 )) || { echo "PBT_NODES must be >= 2 (need someone to disagree)" >&2; exit 1; }
 
+  # Starting wipes the chain anyway, so stop whatever is running rather than racing it.
+  stop >/dev/null
   rm -rf "$RUN"
   mkdir -p "$RUN/artifacts"
   openssl rand -hex 32 > "$RUN/jwtsecret"
   cp "$ROOT/genesis/genesis.json" "$RUN/genesis.json"
 
-  mapfile -t COMMON < <(common_flags)
+  collect COMMON common_flags
   for i in $(seq 0 $((NODES - 1))); do
     mkdir -p "$RUN/n$i"
-    mapfile -t PROFILE < <(profile_flags "$i")
+    collect PROFILE profile_flags "$i"
     "$GETH" --datadir "$RUN/n$i" "${COMMON[@]}" "${PROFILE[@]}" \
       --http.port="$(http_port "$i")" --authrpc.port="$(auth_port "$i")" --port="$(p2p_port "$i")" \
       > "$RUN/n$i.log" 2>&1 &
@@ -97,7 +112,7 @@ rpc_args() {
 
 driver() {
   shift || true
-  mapfile -t ELS < <(el_args)
+  collect ELS el_args
   # Same expected root the Kurtosis args file uses, so both paths make the same
   # binary-tree assertion from one source of truth.
   local root=""
@@ -112,14 +127,22 @@ driver() {
 
 hammer() {
   shift || true
-  [[ -x "$HAMMER" ]] || { echo "no hammer at $HAMMER" >&2; exit 1; }
-  mapfile -t RPCS < <(rpc_args)
+  [[ -x "$HAMMER" ]] || { echo "no hammer at $HAMMER (run: make bin)" >&2; exit 1; }
+  collect RPCS rpc_args
   "$HAMMER" "${RPCS[@]}" "$@"
 }
 
 stop() {
   pkill -f "$GETH --datadir $RUN" 2>/dev/null || true
   pkill -f "$HAMMER" 2>/dev/null || true
+  # Wait for them to actually exit. SIGTERM only starts geth's shutdown; `start` then
+  # removes $RUN, and a node still flushing its datadir makes that fail with
+  # "Directory not empty" — which used to leave the whole devnet not running at all.
+  for _ in $(seq 1 60); do
+    pgrep -f "$GETH --datadir $RUN" >/dev/null 2>&1 || break
+    sleep 0.25
+  done
+  pkill -9 -f "$GETH --datadir $RUN" 2>/dev/null || true
   echo stopped
 }
 

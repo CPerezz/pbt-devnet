@@ -47,6 +47,10 @@ type config struct {
 	reorgEvery   int
 	reorgDepth   int
 	probeEvery   int
+	// verifyOracle runs the self-test before the slot loop. On by default: "0 findings"
+	// from an oracle nobody proved is indistinguishable from "0 findings" from a broken
+	// one, so every run earns the right to be believed before it starts.
+	verifyOracle bool
 	// expectedGenesisRoot, when set, is asserted against every node's genesis state
 	// root. It is the client-agnostic way to prove the chain really is on the binary
 	// tree; zero means "unchecked".
@@ -83,7 +87,8 @@ func main() {
 		probeEvery = flag.Int("probe-every", 16, "run the deeper cross-node probes every N slots")
 		feeRecip   = flag.String("fee-recipient", "0x0000000000000000000000000000000000000001", "suggested fee recipient")
 		verbose    = flag.Bool("v", false, "debug logging")
-		selfTest   = flag.Bool("self-test", false, "prove the oracle detects a corrupted state root, then exit")
+		verifyOrac = flag.Bool("verify-oracle", true, "prove the oracle detects a corrupted state root before starting the slot loop")
+		selfTest   = flag.Bool("self-test", false, "run only that proof, then exit")
 		expRoot    = flag.String("expected-genesis-root", "", "assert every node's genesis state root equals this (proves the binary-tree commitment)")
 	)
 	flag.Var(&els, "el", "execution client as name=engineURL,rpcURL (repeatable; at least two)")
@@ -117,6 +122,7 @@ func main() {
 		reorgEvery:   *reorgEvery,
 		reorgDepth:   *reorgDepth,
 		probeEvery:   *probeEvery,
+		verifyOracle: *verifyOrac,
 	}
 	if *expRoot != "" {
 		if len(*expRoot) != 66 || !strings.HasPrefix(*expRoot, "0x") {
@@ -134,12 +140,8 @@ func main() {
 		if err := d.preflight(ctx); err != nil {
 			fatal("%v", err)
 		}
-		before := d.findings
-		if err := d.selfTest(ctx); err != nil {
+		if err := d.proveOracle(ctx); err != nil {
 			fatal("%v", err)
-		}
-		if d.findings > before {
-			fatal("self-test found %d real divergence(s) on a chain that should be healthy", d.findings-before)
 		}
 		return
 	}
@@ -180,6 +182,11 @@ type Driver struct {
 func (d *Driver) Run(ctx context.Context) error {
 	if err := d.preflight(ctx); err != nil {
 		return err
+	}
+	if d.cfg.verifyOracle {
+		if err := d.proveOracle(ctx); err != nil {
+			return err
+		}
 	}
 
 	ticker := time.NewTicker(d.cfg.slotTime)
@@ -232,6 +239,24 @@ func (d *Driver) Run(ctx context.Context) error {
 	if d.findings > 0 {
 		return fmt.Errorf("%d findings", d.findings)
 	}
+	return nil
+}
+
+// proveOracle runs the self-test on a chain that should be healthy, and leaves the
+// harness able to report real findings afterwards.
+func (d *Driver) proveOracle(ctx context.Context) error {
+	before := d.findings
+	if err := d.selfTest(ctx); err != nil {
+		return err
+	}
+	if d.findings > before {
+		return fmt.Errorf("self-test found %d real divergence(s) on a chain that should be healthy",
+			d.findings-before)
+	}
+	// The self-test deliberately left a rejected block behind on every non-builder.
+	// Oracle 2 reports blocks rejected *during* the run, so without re-baselining here
+	// the first slot of the real loop reports our own planted block as a finding.
+	d.baselineBadBlocks(ctx)
 	return nil
 }
 
