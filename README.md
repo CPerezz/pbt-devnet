@@ -29,46 +29,34 @@ assertion. Rationale for the rest is in
 ```
 
 Clients and nodes are declared in `args/devnet.yaml`; `main.star` only knows *how* to launch each
-client type. Only EIP-1559 transactions are sent today.
+client type.
 
 ## Run
 
-```bash
-brew install kurtosis-tech/tap/kurtosis-cli          # + Docker running, + yq
-scripts/build-images.sh                              # every client in client_sources, + driver + hammer
-
-kurtosis run . --enclave pbt --args-file args/devnet.yaml
-
-kurtosis service logs pbt pbtdriver -f               # the oracle
-kurtosis port print  pbt geth-a rpc
-kurtosis service stop pbt geth-a && kurtosis service start pbt geth-a   # chaos
-kurtosis enclave dump pbt ./dump
-kurtosis enclave rm -f pbt
-```
-
-Do not pass `--image-download always`; these are local tags with no registry.
-
-Container-free loop (geth-only, `PBT_NODES` defaults to 2):
+Needs Docker running, `kurtosis`, and `yq`. `make check` says which of those is missing.
 
 ```bash
-scripts/local-devnet.sh start
-scripts/local-devnet.sh driver --self-test           # run this first, always
-scripts/local-devnet.sh driver --slot-time 3s --slots 20 --reorg-every 6
-scripts/local-devnet.sh hammer --interval 400ms --batch 4 --for 120s
-scripts/local-devnet.sh logs 60
-scripts/local-devnet.sh stop
+make up      # build the images, start the devnet, follow the driver
+make down    # stop and remove it
 ```
 
-Driver: `--el name=engine,rpc` (repeatable, ≥2), `--expected-genesis-root`, `--slot-time`,
-`--slots`, `--reorg-every`, `--reorg-depth`, `--probe-every`, `--self-test`, `-v`.
-Hammer: `--rpc` (repeatable), `--only fanout|storage|codedup|destruct`, `--interval`, `--batch`,
-`--slots-per-tx`, `--code-size`, `--for`.
+`make up` first proves the oracle works by corrupting a state root on purpose and requiring every
+other node to reject it, then runs the slot loop with reorgs and the full transaction mix. Watch
+for lines beginning `FINDING`; there should be none. Ctrl-C detaches without stopping anything.
 
-Regenerate genesis. It also prints the root to paste into `expected_genesis_root`:
+Bare `make` lists every target.
 
-```bash
-cd gengenesis && go build -o /tmp/gengenesis . && /tmp/gengenesis --out ../genesis/genesis.json --gaslimit 200000000
-```
+## Workloads
+
+The hammer sends eleven shapes, round-robin in equal measure, chosen for what EIP-8297 changed
+rather than for throughput: fresh accounts, scattered storage, code shared between accounts,
+self-destructing children, 7702 delegate/re-delegate/clear, storage zeroization (zero is an
+*absence* on this tree, so it deletes), `SLOAD` through a `CALL`, `EXTCODESIZE`/`EXTCODECOPY` over
+a large contract, legacy and access-list envelopes, and a transaction that reverts after writing.
+
+They generate traffic; the assertion is the driver's. So they catch a *divergence* between clients,
+not an implementation that is uniformly wrong — with one client, agreement is all there is to check.
+The revert workload is expected to produce `status=0` receipts; everything else should be `status=1`.
 
 ## Clients
 
@@ -125,7 +113,39 @@ the supported list, and at least two nodes are required. Another instance of a c
 **Optional** — absent gives one `ORACLE DEGRADED` warning and the run continues: `eth_getProof`,
 `eth_getBlockReceipts`, `debug_getBadBlocks`, `debug_executionWitness`.
 
+## Reference
+
+Everything below is optional. Behaviour is tuned in `args/devnet.yaml`; the flags each binary
+accepts are in `bin/pbtdriver --help` and `bin/pbthammer --help`.
+
+```bash
+make logs                      # re-attach to the driver
+make build                     # images only
+make genesis                   # regenerate genesis, print the root for the args file
+make bin                       # driver + hammer as host binaries in bin/
+make up ARGS=args/mine.yaml    # a different config, or ENCLAVE=... for a second devnet
+```
+
+```bash
+kurtosis port print pbt geth-a rpc
+kurtosis service stop pbt geth-a && kurtosis service start pbt geth-a   # chaos
+kurtosis enclave dump pbt ./dump
+```
+
+Do not pass `--image-download always`; these are local tags with no registry.
+
+Container-free loop, for iterating on the driver without images. Needs a geth binary at
+`bin/pbtgeth`; `make dev` prints the command to build one.
+
+```bash
+make dev                                             # start nodes, then the driver
+scripts/local-devnet.sh hammer --for 120s            # load, in another shell
+scripts/local-devnet.sh logs 60                      # node logs
+scripts/local-devnet.sh stop
+```
+
 Gas here is two-dimensional (`StateGas = bytes_of_new_state × 1530`), so a fresh account costs
 207,391 and a fresh storage slot 111,234 while a transfer to an *existing* account is still 21,000.
 Gas is estimated per transaction on every client; a disagreement between clients is reported as a
-finding.
+finding. Nothing is ever hardcoded — including the reverting workload, which is priced from an
+identical non-reverting twin, because `eth_estimateGas` cannot price a call that always reverts.
