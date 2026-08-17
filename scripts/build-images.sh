@@ -64,8 +64,9 @@ while IFS=$'\t' read -r client image path repository ref; do
   fi
 
   echo "==> $client -> $image"
-  local at="$(git -C "$src" rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout')"
-  local on="$(git -C "$src" branch --show-current 2>/dev/null || true)"
+  # No `local` here: this is a loop body, not a function, and bash refuses it there.
+  at="$(git -C "$src" rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout')"
+  on="$(git -C "$src" branch --show-current 2>/dev/null || true)"
   [[ -n "$on" ]] && at="$at on $on"
   echo "    source:  $src ($at)"
   echo "    upstream: ${repository:-?} @ ${ref:-?}"

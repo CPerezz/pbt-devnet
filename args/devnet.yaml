@@ -47,6 +47,11 @@ reorg_every: 12     # a 2-deep competing-payload reorg every 12 slots; 0 disable
 reorg_depth: 2
 probe_every: 8
 
+# Before the slot loop, corrupt a state root on purpose and require every non-builder to
+# reject it. Costs ~2 slots at startup and is what makes a later "0 findings" mean
+# something. Set false only to time a run without it.
+verify_oracle: true
+
 # Set hammer_enabled: false for a quiet baseline with no load.
 hammer_enabled: true
 hammer_interval: "400ms"

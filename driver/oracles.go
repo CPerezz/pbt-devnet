@@ -122,7 +122,8 @@ func (d *Driver) assertNoBadBlocks(ctx context.Context) error {
 }
 
 // baselineBadBlocks records what each node already considers bad, so only new
-// rejections count as findings.
+// rejections count as findings. Called at preflight and again after the self-test,
+// which plants a rejected block of its own.
 func (d *Driver) baselineBadBlocks(ctx context.Context) {
 	d.knownBad = make([]map[common.Hash]bool, len(d.nodes))
 	for i, n := range d.nodes {
@@ -136,7 +137,7 @@ func (d *Driver) baselineBadBlocks(ctx context.Context) {
 			d.knownBad[i][bb.Hash] = true
 		}
 		if len(bad) > 0 {
-			slog.Warn("node already holds rejected blocks from before this run; they will not be reported",
+			slog.Info("baselined blocks this node already rejected; they will not be reported as findings",
 				"node", n.Name, "count", len(bad))
 		}
 	}

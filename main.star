@@ -16,9 +16,7 @@ Nodes come from the args file, not from this file. To add an execution client se
 "Adding a client" in the README; what lives here is only HOW to launch each client
 type, because flags are logic rather than config.
 
-Run:
-  scripts/build-images.sh
-  kurtosis run . --enclave pbt --args-file args/devnet.yaml
+Run `make up`, which builds the images and then invokes this.
 """
 
 GENESIS_DIR = "/network-configs"
@@ -51,6 +49,9 @@ DEFAULTS = {
     "reorg_every": 12,    # competing-payload reorg every N slots; 0 disables
     "reorg_depth": 2,
     "probe_every": 8,
+    # Prove the oracle detects a corrupted state root before trusting a clean run.
+    # Costs about two slots at startup.
+    "verify_oracle": True,
     "hammer_enabled": True,
     "hammer_interval": "400ms",
     "hammer_batch": 4,
@@ -174,6 +175,8 @@ def run(plan, args={}):
     ]
     if cfg["expected_genesis_root"] != "":
         driver_cmd += ["--expected-genesis-root", cfg["expected_genesis_root"]]
+    if not cfg["verify_oracle"]:
+        driver_cmd += ["--verify-oracle=false"]
 
     plan.add_service(
         name="pbtdriver",
@@ -195,7 +198,7 @@ def run(plan, args={}):
             name="pbthammer",
             config=ServiceConfig(image=cfg["hammer_image"], cmd=hammer_cmd),
         )
-        plan.print("started pbthammer: fanout / storage / codedup / destruct")
+        plan.print("started pbthammer: 11 workloads, round-robin (see README)")
 
     plan.print("")
     plan.print("  kurtosis service logs <enclave> pbtdriver -f     # the oracle")
