@@ -3,23 +3,59 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// majorityTip returns the highest block every majority client agrees on, which is the
-// branch the heal is expected to keep.
+// majorityTip returns a block the majority agrees on and that is far enough back to be
+// settled, which is the branch the heal is expected to keep.
+//
+// The margin matters. Sampling the actual tip picks a block that is seconds old and
+// barely attested, and normal fork choice can still replace it when the minority rejoins
+// -- which is ordinary tip churn, not the doomed branch winning.
 func majorityTip(ctx context.Context, majority []*el) (uint64, common.Hash) {
 	n, err := lowestHead(ctx, majority)
-	if err != nil || n == 0 {
+	if err != nil || n <= tipMargin {
 		return 0, common.Hash{}
 	}
+	n -= tipMargin
 	same, seen := agreed(ctx, majority, n)
 	if !same {
 		return 0, common.Hash{}
 	}
 	return n, seen[majority[0].name]
+}
+
+// tipMargin is how far below the majority's head the survival check anchors itself.
+const tipMargin = 4
+
+// awaitHeight waits for every client to have SOME block at n. A client that has just
+// rejoined is still catching up, and "has not got there yet" is not "disagrees".
+func awaitHeight(ctx context.Context, els []*el, n uint64, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		missing := false
+		for _, e := range els {
+			if e.hashAt(ctx, n) == (common.Hash{}) {
+				missing = true
+				break
+			}
+		}
+		if !missing {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 // runScenario splits the network, puts the scenario's state on the minority branch,
@@ -161,12 +197,25 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 	// The intended branch has to be the one that won. If the doomed branch survived
 	// instead, every state assertion below would be inverted, so say so and stop.
 	if wantHash != (common.Hash{}) {
-		if same, seen := agreed(ctx, c.els, wantHeight); !same || seen[majority[0].name] != wantHash {
+		if !awaitHeight(ctx, c.els, wantHeight, 2*time.Minute) {
+			res.Outcome = "inconclusive"
+			res.Detail = fmt.Sprintf("not every client reached block %d after the heal", wantHeight)
+			return res
+		}
+		_, seen := agreed(ctx, c.els, wantHeight)
+		var wrong []string
+		for name, h := range seen {
+			if h != wantHash {
+				wrong = append(wrong, fmt.Sprintf("%s=%s", name, short(h)))
+			}
+		}
+		if len(wrong) > 0 {
+			sort.Strings(wrong)
 			res.Outcome = "FINDING"
 			res.Detail = fmt.Sprintf(
-				"the majority branch did not survive: block %d was %s on the majority before the heal, %s after",
-				wantHeight, short(wantHash), short(seen[majority[0].name]))
-			c.log.Error("wrong branch survived", "name", sc.name, "height", wantHeight)
+				"the majority branch did not survive: block %d was %s on the majority before the heal; after: %s",
+				wantHeight, short(wantHash), strings.Join(wrong, " "))
+			c.log.Error("wrong branch survived", "name", sc.name, "height", wantHeight, "want", short(wantHash))
 			return res
 		}
 		res.Survivor = fmt.Sprintf("majority block %d %s", wantHeight, short(wantHash))
