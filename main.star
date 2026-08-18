@@ -57,11 +57,13 @@ DEFAULT_HAMMER = {
 DEFAULT_CHAOS = {
     "enabled": True,
     "image": "pbt-chaos:local",
-    # Periodic one-block reorgs, produced by delaying whichever node proposes next.
+    # Periodic one-block reorgs, produced by isolating whichever node proposes next for
+    # a single slot: it builds a block nobody else receives, then has to unwind it.
     "latency": True,
     "latency_min_blocks": 15,
     "latency_max_blocks": 30,
-    "latency_delay": "3s",
+    # Empty means one slot, which is what this wants in almost every case.
+    "isolate_for": "",
     # Default depth for `make scenario` when none is given.
     "depth": 10,
     "senders": 2,
@@ -227,12 +229,14 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
         "--depth", str(cfg["depth"]),
         "--latency-min-blocks", str(cfg["latency_min_blocks"]),
         "--latency-max-blocks", str(cfg["latency_max_blocks"]),
-        "--latency-delay", cfg["latency_delay"],
+
         # Mapping a proposer's validator index back to a participant needs the range
         # size. 128 is ethereum-package's own default, so this agrees when unset.
         "--validators-per-node", str(args.get("network_params", {}).get("num_validator_keys_per_node", 128)),
         "--slot-seconds", "{0}s".format(args.get("network_params", {}).get("seconds_per_slot", 12)),
     ]
+    if cfg["isolate_for"] != "":
+        cmd += ["--isolate-for", cfg["isolate_for"]]
     if not cfg["latency"]:
         cmd += ["--latency=false"]
 
