@@ -51,33 +51,33 @@ func getBlockByHash(ctx context.Context, n *Node, hash common.Hash) (*rpcBlock, 
 
 // assertHeadsAgree is oracle 3: every node must sit on the same head, at the
 // expected height, with the same state root.
-func (d *Driver) assertHeadsAgree(ctx context.Context, want common.Hash, wantNum uint64) error {
-	heads := make([]*rpcBlock, len(d.nodes))
-	for i, n := range d.nodes {
+func (m *Monitor) assertHeadsAgree(ctx context.Context, want common.Hash, wantNum uint64) error {
+	heads := make([]*rpcBlock, len(m.nodes))
+	for i, n := range m.nodes {
 		blk, err := getBlock(ctx, n, "latest")
 		if err != nil {
 			return err
 		}
 		heads[i] = blk
 	}
-	for i := 1; i < len(d.nodes); i++ {
+	for i := 1; i < len(m.nodes); i++ {
 		if heads[i].Hash != heads[0].Hash {
 			return fmt.Errorf("head divergence: %s=%s@%d (root %s) vs %s=%s@%d (root %s)",
-				d.nodes[0].Name, heads[0].Hash, heads[0].Number, heads[0].StateRoot,
-				d.nodes[i].Name, heads[i].Hash, heads[i].Number, heads[i].StateRoot)
+				m.nodes[0].Name, heads[0].Hash, heads[0].Number, heads[0].StateRoot,
+				m.nodes[i].Name, heads[i].Hash, heads[i].Number, heads[i].StateRoot)
 		}
 		if heads[i].StateRoot != heads[0].StateRoot {
 			// Should be unreachable while the hashes match, since the hash commits to
 			// the root. If it ever fires, block hashing itself is wrong.
 			return fmt.Errorf("same head %s but different state roots: %s=%s %s=%s",
-				heads[0].Hash, d.nodes[0].Name, heads[0].StateRoot, d.nodes[i].Name, heads[i].StateRoot)
+				heads[0].Hash, m.nodes[0].Name, heads[0].StateRoot, m.nodes[i].Name, heads[i].StateRoot)
 		}
 	}
 	if heads[0].Hash != want || uint64(heads[0].Number) != wantNum {
 		return fmt.Errorf("head is %s at %d, expected %s at %d",
 			heads[0].Hash, heads[0].Number, want, wantNum)
 	}
-	return d.assertNoBadBlocks(ctx)
+	return m.assertNoBadBlocks(ctx)
 }
 
 // badBlock mirrors geth's BadBlockArgs. The RLP is the reason this oracle matters:
@@ -92,26 +92,26 @@ type badBlock struct {
 // geth persists bad blocks to disk, so a datadir that has already seen a rejection
 // (a previous run, or --self-test, which plants one on purpose) would otherwise fail
 // every subsequent run for a divergence that is over.
-func (d *Driver) assertNoBadBlocks(ctx context.Context) error {
-	for i, n := range d.nodes {
+func (m *Monitor) assertNoBadBlocks(ctx context.Context) error {
+	for i, n := range m.nodes {
 		var bad []badBlock
 		if err := n.RPC(ctx, "debug_getBadBlocks", &bad); err != nil {
 			// Loud, not Debug: an oracle that has quietly stopped running is how a
 			// harness ends up reporting a clean run it never actually checked.
-			d.degrade(n.Name, "debug_getBadBlocks", err)
+			m.degrade(n.Name, "debug_getBadBlocks", err)
 			continue
 		}
 		var fresh []badBlock
 		for _, bb := range bad {
-			if !d.knownBad[i][bb.Hash] {
+			if !m.knownBad[i][bb.Hash] {
 				fresh = append(fresh, bb)
 			}
 		}
 		if len(fresh) > 0 {
 			for _, bb := range fresh {
-				d.knownBad[i][bb.Hash] = true // report it once, not every slot
-				d.saveArtifact(fmt.Sprintf("badblock-%s-%s.rlp", n.Name, bb.Hash.Hex()[:10]), bb.RLP)
-				d.saveArtifact(fmt.Sprintf("badblock-%s-%s.json", n.Name, bb.Hash.Hex()[:10]), bb.Blk)
+				m.knownBad[i][bb.Hash] = true // report it once, not every slot
+				m.saveArtifact(fmt.Sprintf("badblock-%s-%s.rlp", n.Name, bb.Hash.Hex()[:10]), bb.RLP)
+				m.saveArtifact(fmt.Sprintf("badblock-%s-%s.json", n.Name, bb.Hash.Hex()[:10]), bb.Blk)
 			}
 			return fmt.Errorf("%s rejected %d new block(s) this run, first %s",
 				n.Name, len(fresh), fresh[0].Hash)
@@ -123,17 +123,17 @@ func (d *Driver) assertNoBadBlocks(ctx context.Context) error {
 // baselineBadBlocks records what each node already considers bad, so only new
 // rejections count as findings. Called at preflight and again after the self-test,
 // which plants a rejected block of its own.
-func (d *Driver) baselineBadBlocks(ctx context.Context) {
-	d.knownBad = make([]map[common.Hash]bool, len(d.nodes))
-	for i, n := range d.nodes {
-		d.knownBad[i] = map[common.Hash]bool{}
+func (m *Monitor) baselineBadBlocks(ctx context.Context) {
+	m.knownBad = make([]map[common.Hash]bool, len(m.nodes))
+	for i, n := range m.nodes {
+		m.knownBad[i] = map[common.Hash]bool{}
 		var bad []badBlock
 		if err := n.RPC(ctx, "debug_getBadBlocks", &bad); err != nil {
-			d.degrade(n.Name, "debug_getBadBlocks (baseline)", err)
+			m.degrade(n.Name, "debug_getBadBlocks (baseline)", err)
 			continue
 		}
 		for _, bb := range bad {
-			d.knownBad[i][bb.Hash] = true
+			m.knownBad[i][bb.Hash] = true
 		}
 		if len(bad) > 0 {
 			slog.Info("baselined blocks this node already rejected; they will not be reported as findings",
@@ -149,18 +149,18 @@ func (d *Driver) baselineBadBlocks(ctx context.Context) {
 // There is deliberately no debug_stateSize check: its tracker waits for snapshot
 // generation to finish, and the binary tree has no generator and cannot have one, so
 // it never initialises. A check that always skips itself is worse than no check.
-func (d *Driver) probe(ctx context.Context) error {
+func (m *Monitor) probe(ctx context.Context) error {
 	var problems []string
 
 	// Prove the accounts the load actually created, not a fixed list. Anything the
 	// hammer wrote lives at a random or CREATE-derived address, so a hardcoded set
 	// would prove state nothing ever touched.
-	for _, target := range d.proofTargets(ctx) {
-		proofs := make([]json.RawMessage, len(d.nodes))
+	for _, target := range m.proofTargets(ctx) {
+		proofs := make([]json.RawMessage, len(m.nodes))
 		ok := true
-		for i, n := range d.nodes {
+		for i, n := range m.nodes {
 			if err := n.RPC(ctx, "eth_getProof", &proofs[i], target.addr, target.slots, "latest"); err != nil {
-				d.degrade(n.Name, "eth_getProof", err)
+				m.degrade(n.Name, "eth_getProof", err)
 				ok = false
 				break
 			}
@@ -168,14 +168,14 @@ func (d *Driver) probe(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		for i := 1; i < len(d.nodes); i++ {
+		for i := 1; i < len(m.nodes); i++ {
 			if jsonEqual(proofs[0], proofs[i]) {
 				continue
 			}
 			problems = append(problems, fmt.Sprintf("eth_getProof for %s differs between %s and %s",
-				target.addr, d.nodes[0].Name, d.nodes[i].Name))
-			d.saveArtifact(fmt.Sprintf("proof-%s-%s.json", d.nodes[0].Name, target.addr[:10]), proofs[0])
-			d.saveArtifact(fmt.Sprintf("proof-%s-%s.json", d.nodes[i].Name, target.addr[:10]), proofs[i])
+				target.addr, m.nodes[0].Name, m.nodes[i].Name))
+			m.saveArtifact(fmt.Sprintf("proof-%s-%s.json", m.nodes[0].Name, target.addr[:10]), proofs[0])
+			m.saveArtifact(fmt.Sprintf("proof-%s-%s.json", m.nodes[i].Name, target.addr[:10]), proofs[i])
 		}
 	}
 
@@ -192,7 +192,7 @@ type proofTarget struct {
 
 // proofTargets samples addresses out of the most recent block, so the proofs cover
 // state the current load created, plus the system contracts the tree special-cases.
-func (d *Driver) proofTargets(ctx context.Context) []proofTarget {
+func (m *Monitor) proofTargets(ctx context.Context) []proofTarget {
 	targets := []proofTarget{
 		{addr: "0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02", slots: []string{zeroSlot}}, // beacon roots
 		{addr: "0x0000F90827F1C53a10cb7A02335B175320002935", slots: []string{zeroSlot}}, // history storage
@@ -204,7 +204,7 @@ func (d *Driver) proofTargets(ctx context.Context) []proofTarget {
 			To   string `json:"to"`
 		} `json:"transactions"`
 	}
-	if err := d.nodes[0].RPC(ctx, "eth_getBlockByNumber", &blk, "latest", true); err != nil {
+	if err := m.nodes[0].RPC(ctx, "eth_getBlockByNumber", &blk, "latest", true); err != nil {
 		slog.Warn("cannot sample proof targets from the head block", "err", err)
 		return targets
 	}
@@ -226,7 +226,7 @@ func (d *Driver) proofTargets(ctx context.Context) []proofTarget {
 	var receipts []struct {
 		ContractAddress string `json:"contractAddress"`
 	}
-	if err := d.nodes[0].RPC(ctx, "eth_getBlockReceipts", &receipts, "latest"); err != nil {
+	if err := m.nodes[0].RPC(ctx, "eth_getBlockReceipts", &receipts, "latest"); err != nil {
 		slog.Warn("cannot read block receipts for proof targets", "err", err)
 		return targets
 	}
@@ -245,15 +245,15 @@ func (d *Driver) proofTargets(ctx context.Context) []proofTarget {
 
 // awaitFirstBlock waits for the consensus clients to produce block 1. The self-test
 // needs a real parent to build on; genesis has no state history behind it.
-func (d *Driver) awaitFirstBlock(ctx context.Context) error {
+func (m *Monitor) awaitFirstBlock(ctx context.Context) error {
 	deadline := time.Now().Add(5 * time.Minute)
 	logged := false
 	for {
-		blk, err := getBlock(ctx, d.nodes[0], "latest")
+		blk, err := getBlock(ctx, m.nodes[0], "latest")
 		if err == nil && blk.Number > 0 {
-			d.head = blk.Hash
-			d.headNum = uint64(blk.Number)
-			d.headTime = uint64(blk.Timestamp)
+			m.head = blk.Hash
+			m.headNum = uint64(blk.Number)
+			m.headTime = uint64(blk.Timestamp)
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -280,18 +280,18 @@ const zeroSlot = "0x000000000000000000000000000000000000000000000000000000000000
 // Without this, "0 findings" is indistinguishable from a broken oracle, and every
 // clean run is unfalsifiable. It runs against a healthy chain and leaves it healthy:
 // the corrupted payload is never made canonical.
-func (d *Driver) selfTest(ctx context.Context) error {
+func (m *Monitor) selfTest(ctx context.Context) error {
 	slog.Info("self-test: manufacturing a divergence to prove the oracle detects it")
 
 	// Wait for the consensus clients to produce a first block. Corrupting genesis
 	// would prove nothing: the payload needs a real parent whose state the importers
 	// already hold.
-	if err := d.awaitFirstBlock(ctx); err != nil {
+	if err := m.awaitFirstBlock(ctx); err != nil {
 		return err
 	}
 
-	proposer := d.nodes[0]
-	env, err := d.buildPayload(ctx, 1, proposer, d.head, d.headTime+12, d.cfg.feeRecipient)
+	proposer := m.nodes[0]
+	env, err := m.buildPayload(ctx, 1, proposer, m.head, m.headTime+12, m.cfg.feeRecipient)
 	if err != nil {
 		return fmt.Errorf("self-test could not build a payload: %w", err)
 	}
@@ -321,7 +321,7 @@ func (d *Driver) selfTest(ctx context.Context) error {
 
 	// EVERY node other than the builder must refuse it. One node accepting a corrupted
 	// root is enough to make the whole harness meaningless.
-	for _, other := range d.nodes[1:] {
+	for _, other := range m.nodes[1:] {
 		var status engine.PayloadStatusV1
 		err = other.Engine(ctx, "engine_newPayloadV5", &status,
 			&bad, []common.Hash{}, &beaconRoot, []hexutil.Bytes{})
@@ -343,7 +343,7 @@ func (d *Driver) selfTest(ctx context.Context) error {
 
 	// Now prove the evidence path runs at all. It has otherwise never executed,
 	// because it only fires on a finding.
-	if err := d.captureDivergence(ctx, d.head); err != nil {
+	if err := m.captureDivergence(ctx, m.head); err != nil {
 		return fmt.Errorf("self-test: evidence capture failed: %w", err)
 	}
 	slog.Info("self-test passed: divergence detected and evidence captured")
@@ -352,24 +352,24 @@ func (d *Driver) selfTest(ctx context.Context) error {
 
 // captureDivergence grabs everything that helps debug a finding, before the nodes are
 // torn down: bad blocks with RLP, and every client's head.
-func (d *Driver) captureDivergence(ctx context.Context, disputed common.Hash) error {
+func (m *Monitor) captureDivergence(ctx context.Context, disputed common.Hash) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	if disputed == (common.Hash{}) {
-		disputed = d.head // nothing was in flight; fall back to the head
+		disputed = m.head // nothing was in flight; fall back to the head
 	}
 
-	for _, n := range d.nodes {
+	for _, n := range m.nodes {
 		var bad []badBlock
 		if err := n.RPC(ctx, "debug_getBadBlocks", &bad); err == nil {
 			for _, bb := range bad {
-				d.saveArtifact(fmt.Sprintf("badblock-%s-%s.rlp", n.Name, bb.Hash.Hex()[:10]), bb.RLP)
-				d.saveArtifact(fmt.Sprintf("badblock-%s-%s.json", n.Name, bb.Hash.Hex()[:10]), bb.Blk)
+				m.saveArtifact(fmt.Sprintf("badblock-%s-%s.rlp", n.Name, bb.Hash.Hex()[:10]), bb.RLP)
+				m.saveArtifact(fmt.Sprintf("badblock-%s-%s.json", n.Name, bb.Hash.Hex()[:10]), bb.Blk)
 			}
 		}
 		if blk, err := getBlock(ctx, n, "latest"); err == nil {
 			blob, _ := json.MarshalIndent(blk, "", "  ")
-			d.saveArtifact(fmt.Sprintf("head-%s.json", n.Name), blob)
+			m.saveArtifact(fmt.Sprintf("head-%s.json", n.Name), blob)
 		}
 	}
 
@@ -388,7 +388,7 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func (d *Driver) saveArtifact(name string, blob []byte) {
+func (m *Monitor) saveArtifact(name string, blob []byte) {
 	if len(blob) == 0 {
 		return
 	}

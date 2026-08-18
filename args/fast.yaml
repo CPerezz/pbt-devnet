@@ -8,10 +8,14 @@
 # four minutes in, so a run does not need to be long — it needs to be quiet.
 
 participants:
-  # One geth and one besu. Two is the minimum that can disagree. The reference config's
-  # second geth exists to tell "besu is wrong" from "we are wrong"; while chasing a
-  # peering problem that distinction is not what is being tested, and dropping it halves
-  # both startup time and log volume.
+  # One geth and one besu. Two is the minimum that can disagree. The reference config runs
+  # four — two of each client, with the pairs configured differently — to tell "besu is
+  # wrong" from "we are wrong", and to keep a majority that can still finalize while one
+  # node is partitioned. Neither distinction is what a peering repro tests, and dropping
+  # them halves startup time and log volume.
+  #
+  # Note the consequence: with two nodes a partition leaves the majority at 1/2, which
+  # cannot finalize. Use args/devnet.yaml for anything involving scenarios.
   - el_type: geth
     el_image: pbt-geth:local
     cl_type: lighthouse

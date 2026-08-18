@@ -19,7 +19,7 @@
 //	accesslist  type 1, populated list           -> repriced access-list accounting
 //	revert      write slots, then REVERT         -> intra-transaction rollback of tree writes
 //
-// Every workload only generates traffic. The assertion is the driver's: each block one
+// Every workload only generates traffic. The assertion is the monitor's: each block one
 // node builds must be accepted by all the others, so a shape that makes two nodes compute
 // different roots shows up there. That means these workloads catch a divergence, not a
 // uniformly wrong implementation — with one client, agreement is all there is to check.
@@ -348,7 +348,7 @@ func (w *world) deployTargets(ctx context.Context, clients []*ethclient.Client, 
 	for i, sp := range specs {
 		rcpt, err := waitReceipt(ctx, clients[0], hashes[i], deadline)
 		if err != nil {
-			return fmt.Errorf("%s (%s): %w — is the driver producing blocks?", sp.name, hashes[i], err)
+			return fmt.Errorf("%s (%s): %w — are the consensus clients producing blocks?", sp.name, hashes[i], err)
 		}
 		if rcpt.Status != types.ReceiptStatusSuccessful {
 			return fmt.Errorf("%s deployment reverted (tx %s, gas used %d)", sp.name, hashes[i], rcpt.GasUsed)

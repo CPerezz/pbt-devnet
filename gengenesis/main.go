@@ -134,8 +134,9 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (chainid %d, binaryTrieTime=0, amsterdamTime=0)\n", *out, *chainID)
 
-	// Compute and print the genesis root as the tree commits it. Feed this to the
-	// driver as --expected-genesis-root (or expected_genesis_root in an args file):
+	// Compute and print the genesis root as the tree commits it. Feed it to the monitor
+	// as pbt_monitor.expected_genesis_root in the args file, which is the only positive
+	// proof the clients are committing state with the binary tree at all:
 	// it is the client-agnostic check that a node really is on the binary tree, rather
 	// than silently having fallen back to the merkle-patricia trie.
 	block := genesis.ToBlock()

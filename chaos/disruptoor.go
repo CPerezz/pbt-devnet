@@ -16,7 +16,7 @@ import (
 //
 // A group matching no container is rejected with 500 and the whole state rolls back, so
 // a disruption either applies or fails loudly. What the API cannot tell us is whether it
-// had any EFFECT; that is what the verification in scenario.go and latency.go is for.
+// had any EFFECT; that is what the verification in scenario.go and isolate.go is for.
 type disruptoor struct {
 	base string
 	hc   *http.Client

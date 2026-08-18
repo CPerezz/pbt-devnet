@@ -32,7 +32,7 @@ print(int(b.get("number","0x0"),16), b.get("stateRoot","?"))' 2>/dev/null || ech
 done
 
 # Heads legitimately differ by a block or two, so this compares roots only as a hint.
-# scripts/compare-roots.sh is the real check: it compares the SAME block number.
+# scripts/verify.py (make verify) is the real check: it compares the SAME block number.
 uniq_roots=$(printf '%s' "$roots" | grep -v '^$' | sort -u | wc -l | tr -d ' ')
 if [[ "$uniq_roots" == "1" ]]; then
   echo "all clients on the same root"
