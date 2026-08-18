@@ -60,6 +60,9 @@ status: ## show every execution client's head and state root
 verify: ## compare every client at the same block number (BLOCKS=100)
 	@scripts/verify.py $(ENCLAVE) --blocks $(BLOCKS) --wait
 
+proposals: ## who was due to propose each slot, and who missed
+	@scripts/proposals.py $(ENCLAVE)
+
 diagnose: ## where did the chain split, and what were the peers doing then
 	@scripts/diagnose.py $(ENCLAVE)
 
