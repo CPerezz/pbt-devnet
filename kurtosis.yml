@@ -1,5 +1,6 @@
 name: github.com/CPerezz/pbt-devnet
 description: |
-  A two-node all-Geth devnet on the EIP-8297 partitioned binary tree, post-Amsterdam,
-  driven by a differential engine-API driver that requires both nodes to agree on every
-  state root.
+  A mixed geth/besu devnet on the EIP-8297 partitioned binary tree, post-Amsterdam, driven
+  by real consensus clients. Composes ethpandaops/ethereum-package and adds a differential
+  monitor that requires every execution client to agree on every state root, plus a
+  transaction generator aimed at what the binary tree changed.

@@ -1,84 +1,63 @@
 #!/usr/bin/env bash
-# Build the images the Kurtosis package expects: one per execution client listed in an
-# args file's client_sources, plus the driver and the hammer.
+# Build the local images the Kurtosis package expects.
 #
-# Client images are built here rather than by Kurtosis's ImageBuildSpec because each
-# client's source tree lives outside this package, and Kurtosis requires a build context
-# inside the package directory.
+# Source checkouts are given by environment variable rather than read from the args file:
+# that file is now ethpandaops/ethereum-package's own schema, and it fails on any key it
+# does not recognise, so build configuration cannot live there.
+#
+# Besu is deliberately absent — it is a two-stage Gradle build rather than a docker build,
+# so it has its own script. Run `make besu` once, then `make up`.
 #
 # Because these are local tags with no registry behind them, run kurtosis WITHOUT
 # `--image-download always` — that would try to pull them and fail.
 #
-# Usage: scripts/build-images.sh [args-file]        (default: args/devnet.yaml)
+# Usage: scripts/build-images.sh [args-file]      (the args file is only echoed, for context)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARGS="${1:-$ROOT/args/devnet.yaml}"
 PLATFORM="${PBT_PLATFORM:-linux/arm64}"
 
-[[ -f "$ARGS" ]] || { echo "no args file at $ARGS" >&2; exit 1; }
+# Where the forks live. Defaults assume they sit beside this repo.
+GETH_SRC="${PBT_GETH_SRC:-$ROOT/../go-ethereum}"
+EGG_SRC="${PBT_EGG_SRC:-$ROOT/../egg-pbt}"
 
-# Read the YAML with whatever is available. yq is nicest; PyYAML is the common fallback.
-# Emits one "client<TAB>image<TAB>path<TAB>repository<TAB>ref" line per client.
-read_clients() {
-  if command -v yq >/dev/null 2>&1; then
-    yq -r '
-      .client_sources as $s | .default_ethereum_client_images as $i |
-      ($s | keys[]) as $c |
-      [$c, ($i[$c] // ""), ($s[$c].path // ""), ($s[$c].repository // ""), ($s[$c].ref // "")]
-      | @tsv' "$ARGS"
-  elif python3 -c 'import yaml' >/dev/null 2>&1; then
-    python3 - "$ARGS" <<'PY'
-import sys, yaml
-d = yaml.safe_load(open(sys.argv[1])) or {}
-srcs = d.get("client_sources") or {}
-imgs = d.get("default_ethereum_client_images") or {}
-for c, s in srcs.items():
-    s = s or {}
-    print("\t".join([c, imgs.get(c, ""), s.get("path", ""), s.get("repository", ""), s.get("ref", "")]))
-PY
-  else
-    echo "need either 'yq' or python3 with PyYAML to read $ARGS" >&2
-    echo "  brew install yq     # or: pip3 install pyyaml" >&2
-    exit 1
-  fi
-}
-
-echo "==> args file: $ARGS"
 echo "==> platform:  $PLATFORM"
+echo "==> args file: $ARGS"
 echo
 
-built=0
-while IFS=$'\t' read -r client image path repository ref; do
-  [[ -n "$client" ]] || continue
-  if [[ -z "$image" ]]; then
-    echo "!! $client has no entry in default_ethereum_client_images; skipping" >&2
-    continue
-  fi
-  src="$path"
-  [[ "$src" = /* ]] || src="$ROOT/$src"
-  if [[ ! -d "$src" ]]; then
-    echo "!! $client: no checkout at $src" >&2
-    echo "   clone ${repository:-<repository>} at ref ${ref:-<ref>} and point client_sources[$client].path at it" >&2
+# provenance prints what a checkout actually is, because "it built" and "it built the thing
+# you meant" are different claims — especially with several PBT branches in flight.
+provenance() {
+  local dir=$1
+  local at on
+  at="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout')"
+  on="$(git -C "$dir" branch --show-current 2>/dev/null || true)"
+  [[ -n "$on" ]] && at="$at on $on"
+  echo "$at"
+}
+
+build_from() {
+  local name=$1 image=$2 dir=$3 note=$4
+  if [[ ! -d "$dir" ]]; then
+    echo "!! $name: no checkout at $dir" >&2
+    echo "   $note" >&2
     exit 1
   fi
-
-  echo "==> $client -> $image"
-  # No `local` here: this is a loop body, not a function, and bash refuses it there.
-  at="$(git -C "$src" rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout')"
-  on="$(git -C "$src" branch --show-current 2>/dev/null || true)"
-  [[ -n "$on" ]] && at="$at on $on"
-  echo "    source:  $src ($at)"
-  echo "    upstream: ${repository:-?} @ ${ref:-?}"
-  # A .dockerignore in the client checkout is what keeps the build context from including
-  # untracked build artifacts and nested worktrees.
-  [[ -f "$src/.dockerignore" ]] || echo "    WARNING: no .dockerignore in $src — build context may be huge" >&2
-  docker build --platform "$PLATFORM" -t "$image" "$src"
-  built=$((built + 1))
+  echo "==> $name -> $image"
+  echo "    source: $dir ($(provenance "$dir"))"
+  # A .dockerignore in the checkout is what keeps build artifacts and nested worktrees out
+  # of the build context.
+  [[ -f "$dir/.dockerignore" ]] || echo "    WARNING: no .dockerignore in $dir — context may be huge" >&2
+  docker build --platform "$PLATFORM" -t "$image" "$dir"
   echo
-done < <(read_clients)
+}
 
-[[ "$built" -gt 0 ]] || { echo "no client images built — is client_sources empty?" >&2; exit 1; }
+build_from "geth (EIP-8297)" "pbt-geth:local" "$GETH_SRC" \
+  "clone CPerezz/go-ethereum at branch pbt, or set PBT_GETH_SRC"
+
+build_from "genesis generator" "pbt-egg:local" "$EGG_SRC" \
+  "clone CPerezz/ethereum-genesis-generator at branch pbt, or set PBT_EGG_SRC"
 
 echo "==> pbt-driver:local"
 docker build --platform "$PLATFORM" -t pbt-driver:local "$ROOT/driver"
@@ -86,5 +65,9 @@ echo "==> pbt-hammer:local"
 docker build --platform "$PLATFORM" -t pbt-hammer:local "$ROOT/hammer"
 
 echo
-echo "done ($built client image(s)). next:"
-echo "  kurtosis run $ROOT --enclave pbt --args-file $ARGS"
+if docker image inspect besu-pbt:local >/dev/null 2>&1; then
+  echo "done. besu-pbt:local is present."
+else
+  echo "done — but besu-pbt:local is MISSING, and args/devnet.yaml expects it."
+  echo "  run 'make besu' (two Gradle stages, needs JDK 25), or drop the besu participant."
+fi
