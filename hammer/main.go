@@ -49,8 +49,10 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// The standard local-development keys, matching the genesis alloc.
-var devKeys = []string{
+// fallbackKeys are the standard local-development keys. They are only useful on a genesis
+// that funds them; under Kurtosis the sender keys are passed in with --key, taken from
+// whatever accounts the network actually prefunded.
+var fallbackKeys = []string{
 	"ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
 	"59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
 	"5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
@@ -76,18 +78,20 @@ type sender struct {
 
 func main() {
 	var (
-		rpcURLs   multiFlag
-		chainID   = flag.Int64("chainid", 1337, "chain id")
-		rate      = flag.Duration("interval", 400*time.Millisecond, "time between batches")
-		batch     = flag.Int("batch", 4, "transactions per batch")
-		slots     = flag.Int("slots-per-tx", 24, "storage slots written per storage tx")
-		codeSize  = flag.Int("code-size", 12_000, "runtime code size for the codedup and extcode targets")
-		only      = flag.String("only", "", "run only this workload")
-		duration  = flag.Duration("for", 0, "stop after this long (0 = run forever)")
-		gasTipCap = flag.Int64("tip", 1_000_000_000, "max priority fee per gas, wei")
-		startWait = flag.Duration("startup-timeout", 4*time.Minute, "how long to wait for the startup targets to be mined")
+		rpcURLs    multiFlag
+		senderKeys multiFlag
+		chainID    = flag.Int64("chainid", 0, "chain id (0 = ask the node)")
+		rate       = flag.Duration("interval", 400*time.Millisecond, "time between batches")
+		batch      = flag.Int("batch", 4, "transactions per batch")
+		slots      = flag.Int("slots-per-tx", 24, "storage slots written per storage tx")
+		codeSize   = flag.Int("code-size", 12_000, "runtime code size for the codedup and extcode targets")
+		only       = flag.String("only", "", "run only this workload")
+		duration   = flag.Duration("for", 0, "stop after this long (0 = run forever)")
+		gasTipCap  = flag.Int64("tip", 1_000_000_000, "max priority fee per gas, wei")
+		startWait  = flag.Duration("startup-timeout", 4*time.Minute, "how long to wait for the startup targets to be mined")
 	)
 	flag.Var(&rpcURLs, "rpc", "execution rpc endpoint (repeatable; every tx is sent to all of them)")
+	flag.Var(&senderKeys, "key", "hex private key to send from (repeatable; defaults to the standard dev keys)")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -113,9 +117,27 @@ func main() {
 		slog.Info("connected", "rpc", u)
 	}
 
-	signer := types.LatestSignerForChainID(big.NewInt(*chainID))
-	senders := make([]*sender, 0, len(devKeys))
-	for _, hexKey := range devKeys {
+	// The chain id comes from the node unless pinned. Under Kurtosis the genesis generator
+	// picks it, so a hardcoded default would sign transactions no node accepts.
+	chain := big.NewInt(*chainID)
+	if *chainID == 0 {
+		got, err := chainIDWhenReady(ctx, clients[0])
+		if err != nil {
+			fatal("could not read the chain id: %v", err)
+		}
+		chain = got
+		slog.Info("chain id from node", "chainid", chain)
+	}
+
+	keys := []string(senderKeys)
+	if len(keys) == 0 {
+		keys = fallbackKeys
+		slog.Info("no --key given, using the standard dev keys", "count", len(keys))
+	}
+
+	signer := types.LatestSignerForChainID(chain)
+	senders := make([]*sender, 0, len(keys))
+	for _, hexKey := range keys {
 		key, err := crypto.HexToECDSA(hexKey)
 		if err != nil {
 			fatal("bad dev key: %v", err)
@@ -159,7 +181,7 @@ func main() {
 	// instead of re-deploying a target per transaction.
 	env := &world{
 		signer:    signer,
-		chainID:   big.NewInt(*chainID),
+		chainID:   chain,
 		gasTipCap: big.NewInt(*gasTipCap),
 		gasFeeCap: gasFeeCap,
 		slots:     *slots,
@@ -382,6 +404,22 @@ func broadcast(ctx context.Context, clients []*ethclient.Client, tx *types.Trans
 		accepted = true
 	}
 	return accepted
+}
+
+// chainIDWhenReady polls until the node answers, for the same reason as nonceWhenReady:
+// the generator is started alongside the nodes it drives and will lose the race otherwise.
+func chainIDWhenReady(ctx context.Context, cl *ethclient.Client) (*big.Int, error) {
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		id, err := cl.ChainID(ctx)
+		if err == nil {
+			return id, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 // nonceWhenReady polls until the node answers, so the generator can be started at

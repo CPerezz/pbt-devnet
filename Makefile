@@ -18,24 +18,34 @@ help:
 	@echo ""
 	@echo "  ENCLAVE=$(ENCLAVE)  ARGS=$(ARGS)"
 
-up: check build ## build the images and start the devnet, then follow the driver
+up: check build ## build the images and start the devnet, then follow the monitor
 	@kurtosis enclave rm -f $(ENCLAVE) >/dev/null 2>&1 || true
-	kurtosis run . --enclave $(ENCLAVE) --args-file $(ARGS)
+	@# --privileged is for disruptoor only: it enters other containers' network namespaces
+	@# to apply partitions and latency, so it needs NET_ADMIN, the docker socket and the
+	@# host PID namespace. Kurtosis gates all three behind one per-run opt-in. Drop
+	@# disruptoor from additional_services and this flag goes with it.
+	kurtosis run . --enclave $(ENCLAVE) --args-file $(ARGS) --privileged
 	@echo ""
 	@echo "==> following pbtdriver. Ctrl-C detaches; the devnet keeps running."
 	@echo "    'make down' stops it. Watch for lines beginning FINDING."
 	@# Ctrl-C is how you leave this, so a non-zero exit here is the normal case.
-	@kurtosis service logs $(ENCLAVE) pbtdriver -f || true
+	@kurtosis service logs $(ENCLAVE) pbtmonitor -f || true
 
 down: ## stop and remove the devnet (both the enclave and any host-mode run)
 	-@kurtosis enclave rm -f $(ENCLAVE)
 	-@scripts/local-devnet.sh stop 2>/dev/null
 
 logs: ## re-attach to the driver
-	kurtosis service logs $(ENCLAVE) pbtdriver -f
+	kurtosis service logs $(ENCLAVE) pbtmonitor -f
 
-build: ## build every client image in the args file, plus the driver and hammer
+build: ## build the geth image, the genesis generator, the monitor and the hammer
 	scripts/build-images.sh $(ARGS)
+
+besu: ## build besu-pbt:local (two Gradle stages, then the image; needs JDK 25)
+	scripts/build-besu.sh
+
+besu-image: ## rebuild besu-pbt:local from an existing build/install/besu
+	scripts/build-besu.sh --skip-gradle
 
 bin: ## build the driver and hammer as host binaries into bin/
 	@mkdir -p bin

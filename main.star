@@ -1,205 +1,157 @@
 """
-A multi-client PBT (EIP-8297) devnet.
+A mixed-client PBT (EIP-8297) devnet, driven by real consensus clients.
 
-There is deliberately no consensus client. On this chain the genesis state root is the
-binary-tree root, so the genesis block hash differs from what the standard CL genesis
-tooling computes from genesis.json under merkle-patricia rules — a real CL would embed
-a hash the EL never produces. Removing it also hands the driver full control of
-timestamps, competing payloads and restart timing.
+This composes ethpandaops/ethereum-package rather than launching clients itself: that
+package already knows how to run geth, besu and lighthouse together, wire the engine API,
+generate genesis and hand out validator keys. What it does not know is the binary tree, and
+that gap is closed with two forks and one config value, with no patch to the package:
 
-What replaces it is a better oracle anyway: engine_newPayloadV5 makes each importing
-node re-execute the block and compare its own computed root against the root the
-payload commits to. A VALID from a node that did NOT build the block is therefore the
-state-root assertion, delivered every block.
+  * pbt-egg:local  — a fork of ethereum-genesis-generator that emits the tree keys AND
+    bundles a fork of eth-beacon-genesis whose go.mod replaces go-ethereum with the
+    EIP-8297 branch. Without it the consensus genesis embeds a merkle-patricia block hash
+    the execution layer will never produce, and the chain never starts. Reached through the
+    supported `ethereum_genesis_generator_params.image` hook.
+  * network_params.network stays "kurtosis". This is load-bearing: both el launchers pick
+    full sync only for that network name, and the binary tree refuses snap sync outright.
+    A custom network name silently gets --syncmode=snap and the engine API dies.
 
-Nodes come from the args file, not from this file. To add an execution client see
-"Adding a client" in the README; what lives here is only HOW to launch each client
-type, because flags are logic rather than config.
+On top of the network this adds two services of our own:
 
-Run `make up`, which builds the images and then invokes this.
+  pbthammer  transaction load shaped at what the tree changed, not at throughput
+  pbtmonitor watches every execution client for state-root divergence, and proves its own
+             oracle by feeding a corrupted payload through the engine API
+
+Both are optional and independently switchable, so `kurtosis run` with load disabled is a
+quiet baseline.
+
+Run `make up`.
 """
 
-GENESIS_DIR = "/network-configs"
-JWT_PATH = "/jwt/jwtsecret"
+ethereum_package = import_module("github.com/ethpandaops/ethereum-package/main.star")
 
-# Shared port vocabulary: the IDs are the same for every client, so the driver and
-# hammer command builders never branch on client type; only the numbers are per-client.
-RPC_PORT_ID = "rpc"
-ENGINE_PORT_ID = "engine-rpc"
-P2P_PORT_ID = "p2p"
+# Our own args keys. ethereum-package sanity-checks its input and fails on anything it does
+# not recognise, so these are removed before its args are handed over.
+OURS = [
+    "pbt_hammer",
+    "pbt_monitor",
+]
 
-DEFAULTS = {
-    "driver_image": "pbt-driver:local",
-    "hammer_image": "pbt-hammer:local",
-    "default_ethereum_client_images": {"geth": "pbt-geth:local"},
-    "nodes": [
-        # Asymmetry is the point: instances of one binary with one config are close to
-        # deterministic and would agree by construction, so these two are pushed down
-        # different paths through the same tree and required to produce identical roots.
-        {"name": "geth-a", "client": "geth", "extra_flags": ["--cache=512", "--cache.trie=10"]},
-        {"name": "geth-b", "client": "geth", "extra_flags": [
-            "--cache=3072", "--cache.trie=40", "--gcmode=archive", "--cache.preimages"]},
-    ],
-    # Asserted against every node's genesis state root at preflight — the
-    # client-agnostic proof that the chain really is on the binary tree. Printed by
-    # gengenesis; empty means unchecked.
-    "expected_genesis_root": "",
-    "slot_time": "3s",
-    "slots": 0,           # 0 = run until stopped
-    "reorg_every": 12,    # competing-payload reorg every N slots; 0 disables
-    "reorg_depth": 2,
-    "probe_every": 8,
-    # Prove the oracle detects a corrupted state root before trusting a clean run.
-    # Costs about two slots at startup.
+DEFAULT_HAMMER = {
+    "enabled": True,
+    "image": "pbt-hammer:local",
+    "interval": "400ms",
+    "batch": 4,
+    "slots_per_tx": 20,
+    "code_size": 12000,
+    # How many of the package's prefunded accounts to send from. They come with private
+    # keys, so the hammer needs no premine of its own.
+    "senders": 6,
+    "only": "",
+}
+
+DEFAULT_MONITOR = {
+    "enabled": True,
+    "image": "pbt-driver:local",
     "verify_oracle": True,
-    "hammer_enabled": True,
-    "hammer_interval": "400ms",
-    "hammer_batch": 4,
-    "hammer_slots_per_tx": 20,
-    "hammer_code_size": 12000,
+    "probe_every": 8,
 }
 
-CLIENT_TYPE = struct(geth="geth")
+# ethereum-package uploads the engine API secret under this fixed artifact name, so the
+# monitor can mount the same one the clients use and speak the engine API itself.
+JWT_ARTIFACT = "jwt_file"
+JWT_MOUNT_DIR = "/jwt"
+JWT_PATH = JWT_MOUNT_DIR + "/jwtsecret"
 
 
-def _geth_flags(ports, genesis_path):
-    """Three of these are not negotiable for geth on the binary tree:
-    --state.scheme=path (hashdb is refused), --syncmode=full (pathdb refuses snap
-    sync), and --override.genesis (PBT comes only from genesis JSON; there is no
-    --override.pbt). Never --vmwitnessstats (refused) or --dev (cannot be PBT).
-    """
-    return [
-        "--override.genesis=" + genesis_path,
-        "--state.scheme=path",
-        "--syncmode=full",
-        "--state.size-tracking",
-        "--authrpc.jwtsecret=" + JWT_PATH,
-        "--authrpc.addr=0.0.0.0",
-        "--authrpc.port={0}".format(ports.engine),
-        "--authrpc.vhosts=*",
-        "--http",
-        "--http.addr=0.0.0.0",
-        "--http.port={0}".format(ports.rpc),
-        "--http.vhosts=*",
-        "--http.corsdomain=*",
-        "--http.api=eth,net,web3,debug,txpool",
-        "--rpc.allow-unprotected-txs",
-        "--port={0}".format(ports.p2p),
-        "--nodiscover",
-        "--maxpeers=1",
-        "--verbosity=3",
-    ]
-
-
-# How to launch each client type. Adding a client means one entry here plus an image in
-# the args file; nothing else in this file changes.
-#
-# genesis_file is per-client on purpose. Every EL reads one shared geth-format
-# genesis.json today (geth --override.genesis, besu --genesis-file, nethermind
-# --Init.ChainSpecPath), but the bare-metal devnets do ship besu.json and
-# chainspec.json separately, so the filename is not hard-wired.
-CLIENTS = {
-    CLIENT_TYPE.geth: struct(
-        flags=_geth_flags,
-        genesis_file="genesis.json",
-        ports=struct(rpc=8545, engine=8551, p2p=30303),
-    ),
-}
-
-
-def _resolve(cfg, node):
-    """Turn one args entry into a launchable node, or fail with a usable message."""
-    client = node.get("client", CLIENT_TYPE.geth)
-    if client not in CLIENTS:
-        fail("unsupported client '{0}', need one of '{1}'".format(
-            client, ",".join(sorted(CLIENTS.keys()))))
-    spec = CLIENTS[client]
-
-    images = cfg["default_ethereum_client_images"]
-    if client not in images:
-        fail("no image for client '{0}': add it to default_ethereum_client_images".format(client))
-
-    genesis_path = GENESIS_DIR + "/" + spec.genesis_file
-    return struct(
-        name=node["name"],
-        client=client,
-        image=node.get("image", images[client]),
-        ports=spec.ports,
-        cmd=spec.flags(spec.ports, genesis_path) + node.get("extra_flags", []),
-    )
+def _merge(defaults, overrides):
+    out = dict(defaults)
+    for k in overrides:
+        out[k] = overrides[k]
+    return out
 
 
 def run(plan, args={}):
-    cfg = dict(DEFAULTS)
+    hammer = _merge(DEFAULT_HAMMER, args.get("pbt_hammer", {}))
+    monitor = _merge(DEFAULT_MONITOR, args.get("pbt_monitor", {}))
+
+    upstream_args = {}
     for k in args:
-        cfg[k] = args[k]
+        if k not in OURS:
+            upstream_args[k] = args[k]
 
-    nodes = [_resolve(cfg, n) for n in cfg["nodes"]]
-    if len(nodes) < 2:
-        fail("need at least two nodes: one node has nobody to disagree with")
+    net = ethereum_package.run(plan, upstream_args)
 
-    genesis = plan.upload_files(src="./genesis/genesis.json", name="pbt-genesis")
-    jwt = plan.upload_files(src="./static/jwtsecret", name="pbt-jwt")
+    # Execution clients only. all_participants includes the consensus side too, and a
+    # participant can legitimately have no execution client.
+    els = []
+    for p in net.all_participants:
+        if p.el_context != None:
+            els.append(p.el_context)
+    # Only the monitor needs a second opinion. A single-node run is legitimate for
+    # debugging one client in isolation, which is exactly when you least want the package
+    # refusing to start.
+    if monitor["enabled"] and len(els) < 2:
+        fail("pbt_monitor needs at least two execution clients: one node has nobody to " +
+             "disagree with. Set pbt_monitor.enabled: false to run a single node.")
 
-    for node in nodes:
-        plan.add_service(
-            name=node.name,
-            config=ServiceConfig(
-                image=node.image,
-                ports={
-                    RPC_PORT_ID: PortSpec(number=node.ports.rpc, transport_protocol="TCP", application_protocol="http"),
-                    ENGINE_PORT_ID: PortSpec(number=node.ports.engine, transport_protocol="TCP", application_protocol="http", wait=None),
-                    P2P_PORT_ID: PortSpec(number=node.ports.p2p, transport_protocol="TCP", application_protocol="", wait=None),
-                },
-                files={GENESIS_DIR: genesis, "/jwt": jwt},
-                cmd=node.cmd,
-            ),
-        )
-        plan.print("started {0} [{1}] {2}".format(node.name, node.client, node.image))
+    plan.print("execution clients under test:")
+    for el in els:
+        plan.print("  {0} [{1}] {2}".format(el.service_name, el.client_name, el.rpc_http_url))
 
-    # The nodes are intentionally unpeered. The hammer submits every transaction to
-    # every RPC directly, so all pools see the same load without devp2p gossip, and the
-    # driver stays the single source of canonical blocks.
+    if monitor["enabled"]:
+        _launch_monitor(plan, monitor, els)
+    if hammer["enabled"]:
+        _launch_hammer(plan, hammer, els, net.pre_funded_accounts)
 
-    driver_cmd = []
-    for node in nodes:
-        driver_cmd += ["--el", "{0}=http://{1}:{2},http://{1}:{3}".format(
-            node.name, node.name, node.ports.engine, node.ports.rpc)]
-    driver_cmd += [
-        "--jwt", JWT_PATH,
-        "--slot-time", cfg["slot_time"],
-        "--slots", str(cfg["slots"]),
-        "--reorg-every", str(cfg["reorg_every"]),
-        "--reorg-depth", str(cfg["reorg_depth"]),
-        "--probe-every", str(cfg["probe_every"]),
-    ]
-    if cfg["expected_genesis_root"] != "":
-        driver_cmd += ["--expected-genesis-root", cfg["expected_genesis_root"]]
+    return net
+
+
+def _launch_monitor(plan, cfg, els):
+    cmd = []
+    for el in els:
+        # name=engineURL,rpcURL — the monitor needs the engine API for its self-test, and
+        # the plain RPC to follow heads.
+        cmd += ["--el", "{0}=http://{1}:{2},{3}".format(
+            el.service_name, el.ip_addr, el.engine_rpc_port_num, el.rpc_http_url)]
+    cmd += ["--jwt", JWT_PATH, "--probe-every", str(cfg["probe_every"])]
     if not cfg["verify_oracle"]:
-        driver_cmd += ["--verify-oracle=false"]
+        cmd += ["--verify-oracle=false"]
 
     plan.add_service(
-        name="pbtdriver",
-        config=ServiceConfig(image=cfg["driver_image"], files={"/jwt": jwt}, cmd=driver_cmd),
+        name="pbtmonitor",
+        config=ServiceConfig(
+            image=cfg["image"],
+            files={JWT_MOUNT_DIR: JWT_ARTIFACT},
+            cmd=cmd,
+        ),
     )
-    plan.print("started pbtdriver: FCUv4 -> getPayloadV6 -> newPayloadV5 to every node")
+    plan.print("started pbtmonitor: watching {0} execution clients for root divergence".format(len(els)))
 
-    if cfg["hammer_enabled"]:
-        hammer_cmd = []
-        for node in nodes:
-            hammer_cmd += ["--rpc", "http://{0}:{1}".format(node.name, node.ports.rpc)]
-        hammer_cmd += [
-            "--interval", cfg["hammer_interval"],
-            "--batch", str(cfg["hammer_batch"]),
-            "--slots-per-tx", str(cfg["hammer_slots_per_tx"]),
-            "--code-size", str(cfg["hammer_code_size"]),
-        ]
-        plan.add_service(
-            name="pbthammer",
-            config=ServiceConfig(image=cfg["hammer_image"], cmd=hammer_cmd),
-        )
-        plan.print("started pbthammer: 11 workloads, round-robin (see README)")
 
-    plan.print("")
-    plan.print("  kurtosis service logs <enclave> pbtdriver -f     # the oracle")
-    plan.print("  kurtosis port print <enclave> {0} rpc".format(nodes[0].name))
+def _launch_hammer(plan, cfg, els, prefunded):
+    cmd = []
+    for el in els:
+        cmd += ["--rpc", el.rpc_http_url]
+    # Send from the package's own prefunded accounts. Passing keys in beats pre-funding our
+    # own addresses through the genesis generator: these are guaranteed funded on whatever
+    # network the package just built, whatever its chain id or alloc.
+    n = cfg["senders"]
+    if n > len(prefunded):
+        fail("asked for {0} senders but the network only prefunds {1} accounts".format(
+            n, len(prefunded)))
+    for acct in prefunded[:n]:
+        cmd += ["--key", acct.private_key]
+    cmd += [
+        "--interval", cfg["interval"],
+        "--batch", str(cfg["batch"]),
+        "--slots-per-tx", str(cfg["slots_per_tx"]),
+        "--code-size", str(cfg["code_size"]),
+    ]
+    if cfg["only"] != "":
+        cmd += ["--only", cfg["only"]]
+
+    plan.add_service(
+        name="pbthammer",
+        config=ServiceConfig(image=cfg["image"], cmd=cmd),
+    )
+    plan.print("started pbthammer: 11 workloads, round-robin, from {0} prefunded accounts".format(n))

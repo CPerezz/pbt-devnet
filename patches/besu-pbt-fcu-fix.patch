@@ -1,0 +1,48 @@
+diff --git a/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/mainnet/staterootcommitter/BinaryStateRootCommitter.java b/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/mainnet/staterootcommitter/BinaryStateRootCommitter.java
+index 642b463..9fa69dd 100644
+--- a/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/mainnet/staterootcommitter/BinaryStateRootCommitter.java
++++ b/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/mainnet/staterootcommitter/BinaryStateRootCommitter.java
+@@ -127,7 +127,20 @@ public class BinaryStateRootCommitter implements StateRootCommitter {
+       if (!storageFrozen) {
+         stateTrie.commit(
+             (location, hash, value) ->
+-                writes.add(updater -> updater.putTrieNode(location, hash, value)));
++                writes.add(
++                    updater -> {
++                      // The partitioned binary trie signals "the node at this location is
++                      // gone" by storing a null hash and value (CommitVisitor.visit for
++                      // EmptyTrieNode), which is how a collapsed subtree clears the bytes a
++                      // previous commit wrote at that path. Updater.putTrieNode cannot take
++                      // that: it starts with nodeHash.equals(EMPTY_TRIE_NODE_HASH) and
++                      // throws NullPointerException. Route deletions to removeTrieNode.
++                      if (hash == null || value == null) {
++                        updater.removeTrieNode(location);
++                      } else {
++                        updater.putTrieNode(location, hash, value);
++                      }
++                    }));
+       }
+       writeSink.addAll(writes);
+       System.out.println(
+diff --git a/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/trie/pathbased/bonsai/provider/BonsaiWorldStateProvider.java b/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/trie/pathbased/bonsai/provider/BonsaiWorldStateProvider.java
+index 25209e7..47948a9 100644
+--- a/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/trie/pathbased/bonsai/provider/BonsaiWorldStateProvider.java
++++ b/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/trie/pathbased/bonsai/provider/BonsaiWorldStateProvider.java
+@@ -328,11 +328,15 @@ public class BonsaiWorldStateProvider implements WorldStateArchive {
+           throw re;
+         } catch (final Exception e) {
+           pathBasedUpdater.reset();
+-          LOG.atDebug()
++          // Was .addArgument(e) against a two-placeholder message, so the exception never
++          // rendered and every rolling failure looked like a bare "it failed". Log it as the
++          // cause instead, and at WARN: this path makes forkchoiceUpdated return INVALID,
++          // which stalls the chain.
++          LOG.atWarn()
+               .setMessage("State rolling failed on {} for block hash {}")
+               .addArgument(mutableState.getWorldStateStorage().getClass().getSimpleName())
+               .addArgument(blockHash)
+-              .addArgument(e)
++              .setCause(e)
+               .log();
+           return Optional.empty();
+         }

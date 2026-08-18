@@ -1,60 +1,89 @@
-# The devnet config. Key names mirror ethpandaops/*-devnets so this can migrate there:
-# default_ethereum_client_images matches their group_vars/all/images.yaml, client_sources
-# matches eth-client-docker-image-builder's source/target shape. Both main.star (via
-# Kurtosis, which parses this YAML into a dict) and scripts/build-images.sh (via yq)
-# read this file.
+# Config for the PBT devnet. Everything except the two pbt_* blocks at the bottom is
+# ethpandaops/ethereum-package's own schema — it sanity-checks its input and fails on any
+# key it does not recognise, so consult its README rather than inventing fields here.
 
-### Execution layer clients
-default_ethereum_client_images:
-  geth: pbt-geth:local
-  # besu: pbt-besu:local          # needs a PBT-capable besu; see "Clients" in the README
+participants:
+  # Two geth nodes with deliberately different configs. Instances of one binary with one
+  # config agree by construction and prove nothing; these are pushed down different paths
+  # through the same tree and required to produce identical roots.
+  - el_type: geth
+    el_image: pbt-geth:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    # Part of the full-sync condition in geth_launcher.star. The binary tree refuses snap
+    # sync outright, so this is not a preference.
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--state.size-tracking"]
 
-# Where each image is built from. `path` is a local checkout, which is what you want
-# while developing against a branch; repository/ref record the upstream it corresponds to.
-client_sources:
-  geth:
-    repository: CPerezz/go-ethereum
-    ref: pbt
-    path: ../go-ethereum
-  # besu:
-  #   repository: besu-eth/besu
-  #   ref: main
-  #   path: ../besu
+  - el_type: geth
+    el_image: pbt-geth:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_storage_type: archive
+    # The archive branch of geth_launcher.star emits --gcmode=archive and NO --syncmode at
+    # all, so geth would fall back to snap. Because the launcher passes nothing here, this
+    # is an addition rather than a conflicting duplicate.
+    el_extra_params: ["--syncmode=full"]
 
-# At least two nodes. Asymmetry is the point: instances of one binary with one config
-# agree by construction, so these are pushed down different paths through the same tree
-# and required to produce identical roots. Adding a node needs nothing but this list.
-nodes:
-  - name: geth-a
-    client: geth
-    extra_flags: ["--cache=512", "--cache.trie=10"]
-  - name: geth-b
-    client: geth
-    extra_flags: ["--cache=3072", "--cache.trie=40", "--gcmode=archive", "--cache.preimages"]
-  # - name: geth-c
-  #   client: geth
-  #   extra_flags: ["--cache=1024", "--cache.trie=25"]
-  # - name: besu-a
-  #   client: besu
+  # The second implementation, and the whole point: geth agreeing with geth shows
+  # consistency, geth agreeing with besu shows correctness.
+  - el_type: besu
+    el_image: besu-pbt:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    # Besu's switch for the tree. Must NOT be combined with el_storage_type: archive —
+    # that makes besu_launcher.star append --data-storage-format=FOREST, which contradicts
+    # BINARY.
+    el_extra_params: ["--data-storage-format=BINARY"]
 
-# Asserted against every node's genesis state root at preflight: the client-agnostic
-# proof that the chain is committing state with the binary tree. Printed by gengenesis.
-expected_genesis_root: "0x7e16e8798b8f3d27d4bea3c13cac4b459fdaa8e0baca8089ce1fb834f2b2820a"
+network_params:
+  # Load-bearing, and its effect is indirect. Both el launchers choose full sync only when
+  # the network is named "kurtosis"; any custom name silently yields --syncmode=snap /
+  # --sync-mode=SNAP, which the binary tree refuses, and the engine API then goes quiet.
+  network: "kurtosis"
+  preset: minimal
+  seconds_per_slot: 6
+  genesis_delay: 20
+  # PBT is a property of the chain from genesis and requires Amsterdam, so the execution
+  # layer is Amsterdam at block 0 — which forces the consensus layer to be Gloas at slot 0.
+  fulu_fork_epoch: 0
+  gloas_fork_epoch: 0
 
-slot_time: "3s"
-slots: 0            # run until the enclave is torn down
-reorg_every: 12     # a 2-deep competing-payload reorg every 12 slots; 0 disables
-reorg_depth: 2
-probe_every: 8
+ethereum_genesis_generator_params:
+  # Fork of ethereum-genesis-generator: emits geth's "pbt": true and besu's
+  # "binaryTrieTime" into one genesis.json, and bundles a fork of eth-beacon-genesis that
+  # derives the consensus genesis from the binary-tree block hash instead of a
+  # merkle-patricia one. Build with scripts/build-images.sh.
+  image: pbt-egg:local
+  extra_env:
+    PBT: "true"
 
-# Before the slot loop, corrupt a state root on purpose and require every non-builder to
-# reject it. Costs ~2 slots at startup and is what makes a later "0 findings" mean
-# something. Set false only to time a run without it.
-verify_oracle: true
+# Deliberately NO builder. buildoor wires one shared builder to participant 0's execution
+# client, so every payload on the chain would be built by that one node and the others would
+# only ever import — which is precisely the half of each client this harness exists to
+# compare. Without it each proposer builds locally through its own engine API, so geth and
+# besu both propose and both validate.
+#
+additional_services:
+  - dora
+  - disruptoor
 
-# Set hammer_enabled: false for a quiet baseline with no load.
-hammer_enabled: true
-hammer_interval: "400ms"
-hammer_batch: 4
-hammer_slots_per_tx: 20
-hammer_code_size: 12000
+### Everything below is ours, not ethereum-package's.
+
+pbt_hammer:
+  enabled: true
+  interval: "400ms"
+  batch: 4
+  slots_per_tx: 20
+  code_size: 12000
+  senders: 6
+  # only: zeroize        # restrict to one workload; see the README for the list
+
+pbt_monitor:
+  enabled: true
+  # Corrupt a state root on purpose at startup and require every other client to reject it.
+  # Without it a later "0 findings" is indistinguishable from a broken oracle.
+  verify_oracle: true
+  probe_every: 8
