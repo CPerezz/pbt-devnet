@@ -36,6 +36,7 @@ ethereum_package = import_module("github.com/ethpandaops/ethereum-package/main.s
 OURS = [
     "pbt_hammer",
     "pbt_monitor",
+    "pbt_chaos",
 ]
 
 DEFAULT_HAMMER = {
@@ -51,6 +52,21 @@ DEFAULT_HAMMER = {
     "only": "",
 }
 
+# pbtchaos owns disruptoor state exclusively: it is the only thing that PUTs, which is
+# what lets it guarantee no two disruptions overlap.
+DEFAULT_CHAOS = {
+    "enabled": True,
+    "image": "pbt-chaos:local",
+    # Periodic one-block reorgs, produced by delaying whichever node proposes next.
+    "latency": True,
+    "latency_min_blocks": 15,
+    "latency_max_blocks": 30,
+    "latency_delay": "3s",
+    # Default depth for `make scenario` when none is given.
+    "depth": 10,
+    "senders": 2,
+}
+
 DEFAULT_MONITOR = {
     "enabled": True,
     "image": "pbt-monitor:local",
@@ -61,6 +77,12 @@ DEFAULT_MONITOR = {
 
 # ethereum-package uploads the engine API secret under this fixed artifact name, so the
 # monitor can mount the same one the clients use and speak the engine API itself.
+# disruptoor's own listen port, from ethereum-package's launcher. pbtchaos speaks the
+# native API on it rather than the friendlier start-up config.
+DISRUPTOOR_SERVICE = "disruptoor"
+DISRUPTOOR_PORT = 7700
+CHAOS_API_PORT = 7800
+
 JWT_ARTIFACT = "jwt_file"
 JWT_MOUNT_DIR = "/jwt"
 JWT_PATH = JWT_MOUNT_DIR + "/jwtsecret"
@@ -76,6 +98,7 @@ def _merge(defaults, overrides):
 def run(plan, args={}):
     hammer = _merge(DEFAULT_HAMMER, args.get("pbt_hammer", {}))
     monitor = _merge(DEFAULT_MONITOR, args.get("pbt_monitor", {}))
+    chaos = _merge(DEFAULT_CHAOS, args.get("pbt_chaos", {}))
 
     upstream_args = {}
     for k in args:
@@ -105,6 +128,8 @@ def run(plan, args={}):
         _launch_monitor(plan, monitor, els)
     if hammer["enabled"]:
         _launch_hammer(plan, hammer, els, net.pre_funded_accounts)
+    if chaos["enabled"]:
+        _launch_chaos(plan, chaos, args, net, els, hammer["senders"])
 
     return net
 
@@ -164,3 +189,60 @@ def _launch_hammer(plan, cfg, els, prefunded):
         config=ServiceConfig(image=cfg["image"], cmd=cmd),
     )
     plan.print("started pbthammer: 11 workloads, round-robin, from {0} prefunded accounts".format(n))
+
+
+def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
+    # disruptoor is what applies the partitions and the shaping. Without it pbtchaos has
+    # nothing to drive, and a missing selector target is the one failure that looks like
+    # success, so refuse rather than start a no-op.
+    services = args.get("additional_services", [])
+    if DISRUPTOOR_SERVICE not in services:
+        fail("pbt_chaos needs the '{0}' additional service; add it to additional_services "
+             "or set pbt_chaos.enabled: false".format(DISRUPTOOR_SERVICE))
+
+    disruptoor = plan.get_service(name=DISRUPTOOR_SERVICE)
+    cmd = ["--disruptoor", "http://{0}:{1}".format(disruptoor.ip_address, DISRUPTOOR_PORT)]
+    for el in els:
+        cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
+    # Proposer duties come from the consensus layer, so latency forks can target the node
+    # that is about to build rather than a node at random.
+    for p in net.all_participants:
+        if p.cl_context != None:
+            cmd += ["--cl", "{0}={1}".format(p.cl_context.beacon_service_name, p.cl_context.beacon_http_url)]
+
+    # Take the accounts just below the hammer's slice. spamoor spends the low indices and
+    # the hammer takes the top; sharing one account means both pick the same nonce and
+    # every send after the first is rejected as underpriced.
+    prefunded = net.pre_funded_accounts
+    n = cfg["senders"]
+    end = len(prefunded) - hammer_senders
+    if end - n < 0:
+        fail("not enough prefunded accounts for pbt_chaos: need {0} below the hammer's {1}".format(
+            n, hammer_senders))
+    for acct in prefunded[end - n:end]:
+        cmd += ["--key", acct.private_key]
+
+    cmd += [
+        "--listen", ":{0}".format(CHAOS_API_PORT),
+        "--depth", str(cfg["depth"]),
+        "--latency-min-blocks", str(cfg["latency_min_blocks"]),
+        "--latency-max-blocks", str(cfg["latency_max_blocks"]),
+        "--latency-delay", cfg["latency_delay"],
+        # Mapping a proposer's validator index back to a participant needs the range
+        # size. 128 is ethereum-package's own default, so this agrees when unset.
+        "--validators-per-node", str(args.get("network_params", {}).get("num_validator_keys_per_node", 128)),
+        "--slot-seconds", "{0}s".format(args.get("network_params", {}).get("seconds_per_slot", 12)),
+    ]
+    if not cfg["latency"]:
+        cmd += ["--latency=false"]
+
+    plan.add_service(
+        name="pbtchaos",
+        config=ServiceConfig(
+            image=cfg["image"],
+            cmd=cmd,
+            ports={"http": PortSpec(number=CHAOS_API_PORT, transport_protocol="TCP", application_protocol="http")},
+        ),
+    )
+    plan.print("started pbtchaos: latency forks every {0}-{1} blocks; scenarios on POST /scenario/<name>".format(
+        cfg["latency_min_blocks"], cfg["latency_max_blocks"]))
