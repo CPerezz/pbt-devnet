@@ -297,6 +297,23 @@ check requires Amsterdam scheduled with `binaryTrieTime` no earlier than `amster
   [#6](https://github.com/CPerezz/pbt-devnet/issues/6). Teku follows the specification; lighthouse
   does not; no single `genesis.ssz` satisfies both. This devnet targets lighthouse.
 
+## Solved: besu appeared to orphan most of its blocks
+
+Dora showed besu forking off constantly, and measuring bore it out: besu missed 27 of 29
+proposal slots, 93%, against 0% for both geth nodes. That number was an artifact of the
+harness. Every reorg scenario chose its minority as the *last* participant, which was always
+besu, so besu spent the run partitioned — and the miss rate was measured by asking a majority
+node whether besu's slots had blocks. A partitioned node's blocks do not reach the node being
+asked, so this measured the partition, not the proposer.
+
+Measured over a window with nothing applied, the picture is flat: geth-1 missed 1 of 9 (the
+slot an isolation fork had targeted), geth-2 0 of 15, besu 1 of 7 (slot 1, at startup). All
+three published at the same rate and about 30ms into their slot.
+
+Two changes came out of it. The minority now rotates, so no client is permanently the doomed
+one. And `make proposals` does this attribution properly, refusing to report a clean number
+while disruptoor has any state applied.
+
 ## Solved: `preset: minimal` silently splits the devnet
 
 Recorded because the symptom is so misleading. Under `preset: minimal` the consensus clients peer
