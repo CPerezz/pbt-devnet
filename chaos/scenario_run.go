@@ -4,7 +4,23 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
+
+// majorityTip returns the highest block every majority client agrees on, which is the
+// branch the heal is expected to keep.
+func majorityTip(ctx context.Context, majority []*el) (uint64, common.Hash) {
+	n, err := lowestHead(ctx, majority)
+	if err != nil || n == 0 {
+		return 0, common.Hash{}
+	}
+	same, seen := agreed(ctx, majority, n)
+	if !same {
+		return 0, common.Hash{}
+	}
+	return n, seen[majority[0].name]
+}
 
 // runScenario splits the network, puts the scenario's state on the minority branch,
 // holds it for depth blocks, heals, and then asks every client about that state.
@@ -14,7 +30,7 @@ import (
 // the clients have not reconverged the scenario reports "inconclusive" rather than a
 // finding. A disagreement measured across a network that never healed says nothing
 // about anyone's reorg handling.
-func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64) result {
+func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, minorityPick int) result {
 	res := result{Name: sc.name, Started: time.Now().UTC().Format(time.RFC3339), Depth: depth}
 
 	if len(c.els) < 2 {
@@ -28,29 +44,41 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64) res
 		return res
 	}
 
-	// The LAST participant is the minority. On the default devnet that is besu, which
-	// makes the second implementation the one that has to unwind its own branch.
-	minority := c.els[len(c.els)-1]
-	majority := c.els[:len(c.els)-1]
-	minorityNode := len(c.els)
-	majorityNodes := make([]int, 0, len(majority))
-	for i := range majority {
-		majorityNodes = append(majorityNodes, i+1)
+	// Which node gets stranded rotates every run, so reorgs land on both client types
+	// rather than always on whichever participant happens to be last. Pinning it to the
+	// last participant is how besu came to look like it was orphaining a third of its
+	// blocks: it was simply the minority every single time.
+	//
+	// With two of each client this also produces the most interesting case on its own --
+	// one besu on the doomed branch while the other stays in the majority, so trie-log
+	// rollback is measured against a client that never left the chain.
+	idx := minorityPick
+	if idx < 1 || idx > len(c.els) {
+		idx = c.nextMinority()
+	}
+	minority := c.els[idx-1]
+	minorityNode := idx
+	majority := make([]*el, 0, len(c.els)-1)
+	majorityNodes := make([]int, 0, len(c.els)-1)
+	for i, e := range c.els {
+		if i+1 != idx {
+			majority = append(majority, e)
+			majorityNodes = append(majorityNodes, i+1)
+		}
 	}
 
 	r := &run{c: c, minority: minority, majority: majority}
 
+	// Each run takes its own pair of keys. A transaction that gets reorged out stays
+	// valid and re-enters the pool, so a key reused by the next scenario reads a nonce
+	// that goes stale underneath it -- which showed up as scenarios passing and failing
+	// in strict alternation.
+	majKey, minKey := c.keysFor()
 	var err error
-	if r.viaMaj, err = newSender(ctx, c.keys[0], majority[0]); err != nil {
+	if r.viaMaj, err = newSender(ctx, majKey, majority[0]); err != nil {
 		res.Outcome = "error"
 		res.Detail = err.Error()
 		return res
-	}
-	// A second key, so the doomed transactions never share a nonce sequence with the
-	// setup ones -- the two branches would otherwise fight over the same nonces.
-	minKey := c.keys[0]
-	if len(c.keys) > 1 {
-		minKey = c.keys[1]
 	}
 	if r.viaMin, err = newSender(ctx, minKey, minority); err != nil {
 		res.Outcome = "error"
@@ -58,6 +86,8 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64) res
 		return res
 	}
 
+	res.Minority = minority.name
+	c.countMinority(minority.name)
 	c.log.Info("scenario starting", "name", sc.name, "depth", depth,
 		"minority", minority.name, "majority", len(majority))
 
@@ -97,12 +127,18 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64) res
 		c.log.Warn("did not reach the requested depth", "err", err)
 	}
 
+	// Record the branch that is MEANT to survive, before healing, so survival is checked
+	// against a hash taken while the two branches still existed separately. Without this
+	// a scenario only ever checked state, and would read its assertions the wrong way
+	// round if the minority's branch happened to win.
+	wantHeight, wantHash := majorityTip(ctx, majority)
+
 	if err := c.d.clear(); err != nil {
 		res.Outcome = "error"
 		res.Detail = "heal: " + err.Error()
 		return res
 	}
-	c.log.Info("healed", "name", sc.name)
+	c.log.Info("healed", "name", sc.name, "expect_height", wantHeight, "expect_hash", short(wantHash))
 
 	if applyErr != nil {
 		res.Outcome = "inconclusive"
@@ -121,6 +157,20 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64) res
 	}
 	res.Reorged = true
 	c.log.Info("reconverged", "name", sc.name, "height", height)
+
+	// The intended branch has to be the one that won. If the doomed branch survived
+	// instead, every state assertion below would be inverted, so say so and stop.
+	if wantHash != (common.Hash{}) {
+		if same, seen := agreed(ctx, c.els, wantHeight); !same || seen[majority[0].name] != wantHash {
+			res.Outcome = "FINDING"
+			res.Detail = fmt.Sprintf(
+				"the majority branch did not survive: block %d was %s on the majority before the heal, %s after",
+				wantHeight, short(wantHash), short(seen[majority[0].name]))
+			c.log.Error("wrong branch survived", "name", sc.name, "height", wantHeight)
+			return res
+		}
+		res.Survivor = fmt.Sprintf("majority block %d %s", wantHeight, short(wantHash))
+	}
 
 	note, err := sc.verify(ctx, r)
 	if err != nil {

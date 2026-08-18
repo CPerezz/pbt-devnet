@@ -95,6 +95,7 @@ func (c *chaos) latencyFork(ctx context.Context) result {
 	if ev.detected {
 		res.Reorged = true
 		res.Outcome = "reorged"
+		c.countReorg(ev.client)
 		res.Detail = fmt.Sprintf("isolated node %d at slot %d; %s saw block %d change %s -> %s",
 			node, slot, ev.client, ev.height, short(ev.before), short(ev.after))
 		c.log.Info("reorg observed", "client", ev.client, "height", ev.height,

@@ -48,7 +48,7 @@ DEFAULT_HAMMER = {
     "code_size": 12000,
     # How many of the package's prefunded accounts to send from. They come with private
     # keys, so the hammer needs no premine of its own.
-    "senders": 6,
+    "senders": 4,
     "only": "",
 }
 
@@ -66,7 +66,11 @@ DEFAULT_CHAOS = {
     "isolate_for": "",
     # Default depth for `make scenario` when none is given.
     "depth": 10,
-    "senders": 2,
+    # A pair of keys per scenario run, rotated so no two consecutive runs share a nonce
+    # sequence: a reorged-out transaction stays valid and re-enters the pool, and a reused
+    # key then reads a nonce that goes stale underneath it. Four gives two distinct pairs,
+    # which is what back-to-back scenarios need.
+    "senders": 4,
 }
 
 DEFAULT_MONITOR = {
@@ -81,6 +85,10 @@ DEFAULT_MONITOR = {
 # monitor can mount the same one the clients use and speak the engine API itself.
 # disruptoor's own listen port, from ethereum-package's launcher. pbtchaos speaks the
 # native API on it rather than the friendlier start-up config.
+# Prefunded accounts other services claim upstream, and will not negotiate over.
+SPAMOOR_ACCOUNT = 13
+ASSERTOOR_ACCOUNT = 9
+
 DISRUPTOOR_SERVICE = "disruptoor"
 DISRUPTOOR_PORT = 7700
 CHAOS_API_PORT = 7800
@@ -221,6 +229,13 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
     if end - n < 0:
         fail("not enough prefunded accounts for pbt_chaos: need {0} below the hammer's {1}".format(
             n, hammer_senders))
+    # ethereum-package hands specific indices to other services: spamoor takes 13 and
+    # assertoor takes 9, both hardcoded upstream. Sharing one with them means both pick the
+    # same nonce and every send after the first is rejected as underpriced -- silently, and
+    # only under load.
+    if end - n <= SPAMOOR_ACCOUNT:
+        fail(("pbt_chaos would take prefunded account {0}, but spamoor hardcodes {1}. " +
+              "Lower pbt_hammer.senders or pbt_chaos.senders.").format(end - n, SPAMOOR_ACCOUNT))
     for acct in prefunded[end - n:end]:
         cmd += ["--key", acct.private_key]
 

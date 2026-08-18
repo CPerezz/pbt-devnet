@@ -65,6 +65,49 @@ type chaos struct {
 	running string
 	queued  []string
 	history []result
+
+	// Coverage, so "we are not always reorging the same client" is a number rather than
+	// an impression.
+	turn         int            // rotates the minority and the sender keys
+	reorgsBy     map[string]int // client -> reorgs observed on it
+	minorityRuns map[string]int // client -> scenarios run with it as the doomed branch
+}
+
+// nextMinority advances the rotation and returns a 1-based node index.
+func (c *chaos) nextMinority() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	idx := c.turn%len(c.els) + 1
+	c.turn++
+	return idx
+}
+
+// keysFor hands each run its own majority/minority pair, walking the key pool so no two
+// consecutive scenarios share a nonce sequence.
+func (c *chaos) keysFor() (string, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.keys) == 1 {
+		return c.keys[0], c.keys[0]
+	}
+	a := c.turn * 2 % len(c.keys)
+	b := (c.turn*2 + 1) % len(c.keys)
+	if a == b {
+		b = (b + 1) % len(c.keys)
+	}
+	return c.keys[a], c.keys[b]
+}
+
+func (c *chaos) countMinority(client string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.minorityRuns[client]++
+}
+
+func (c *chaos) countReorg(client string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reorgsBy[client]++
 }
 
 type job struct {
@@ -73,12 +116,14 @@ type job struct {
 }
 
 type result struct {
-	Name    string `json:"name"`
-	Started string `json:"started"`
-	Outcome string `json:"outcome"`
-	Detail  string `json:"detail"`
-	Reorged bool   `json:"reorged"`
-	Depth   uint64 `json:"depth,omitempty"`
+	Name     string `json:"name"`
+	Started  string `json:"started"`
+	Outcome  string `json:"outcome"`
+	Detail   string `json:"detail"`
+	Reorged  bool   `json:"reorged"`
+	Depth    uint64 `json:"depth,omitempty"`
+	Minority string `json:"minority,omitempty"`
+	Survivor string `json:"survivor,omitempty"`
 }
 
 func main() {
@@ -149,7 +194,9 @@ func main() {
 
 	c := &chaos{
 		d: d, els: elc, cls: clc, keys: keys, log: log,
-		jobs: make(chan job, 16),
+		jobs:         make(chan job, 16),
+		reorgsBy:     map[string]int{},
+		minorityRuns: map[string]int{},
 		cfg: config{
 			slotSeconds:    *slotSeconds,
 			validatorsPer:  *validatorsPer,
@@ -240,9 +287,11 @@ func (c *chaos) serve(ctx context.Context, addr string) {
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		c.mu.Lock()
 		body := map[string]any{
-			"running": c.running,
-			"queued":  c.queued,
-			"history": c.history,
+			"running":       c.running,
+			"queued":        c.queued,
+			"history":       c.history,
+			"reorgs_by":     c.reorgsBy,
+			"minority_runs": c.minorityRuns,
 		}
 		c.mu.Unlock()
 		parts, shaping, err := c.d.state()
@@ -269,9 +318,20 @@ func (c *chaos) serve(ctx context.Context, addr string) {
 			}
 			depth = parsed
 		}
+		// Optional: pin the doomed node instead of taking the next in the rotation.
+		minority := 0
+		if v := r.URL.Query().Get("minority"); v != "" {
+			parsed, err := strconv.Atoi(v)
+			if err != nil || parsed < 1 || parsed > len(c.els) {
+				writeJSON(w, http.StatusBadRequest, map[string]any{
+					"error": fmt.Sprintf("minority must be 1..%d, got %q", len(c.els), v)})
+				return
+			}
+			minority = parsed
+		}
 		err := c.submit(job{
 			name: name,
-			run:  func(ctx context.Context) result { return c.runScenario(ctx, sc, depth) },
+			run:  func(ctx context.Context) result { return c.runScenario(ctx, sc, depth, minority) },
 		})
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
