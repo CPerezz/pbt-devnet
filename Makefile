@@ -66,6 +66,9 @@ split: ## partition the network by hand: majority | last participant (el and cl)
 heal: ## remove every partition and shaping rule
 	@scripts/chaos.sh $(ENCLAVE) heal
 
+repeer: ## restart any consensus client left with no peers after a partition
+	@scripts/repeer.sh $(ENCLAVE)
+
 chaos-status: ## what pbtchaos is doing now, what is queued, and recent results
 	@scripts/chaos.sh $(ENCLAVE) status
 
