@@ -86,14 +86,14 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64) res
 
 	applyErr := sc.apply(ctx, r)
 	if applyErr != nil {
-		// Worth continuing to the heal regardless: leaving the network split is worse
-		// than an incomplete scenario.
-		c.log.Error("scenario transactions failed on the minority", "name", sc.name, "err", applyErr)
-	}
-
-	// Measure depth on the majority: the minority builds slowly while partitioned, so
-	// waiting on the slowest client would stretch a depth-10 scenario indefinitely.
-	if err := waitBlocks(ctx, majority, depth); err != nil {
+		// Heal at once. Holding the split for the full depth when the doomed state was
+		// never written keeps the minority orphaned for minutes and verifies nothing --
+		// it just looks like the devnet is broken.
+		c.log.Error("scenario transactions failed on the minority; healing early",
+			"name", sc.name, "err", applyErr)
+	} else if err := waitBlocks(ctx, majority, depth); err != nil {
+		// Measure depth on the majority: the minority builds slowly while partitioned,
+		// so waiting on the slowest client would stretch a depth-10 scenario forever.
 		c.log.Warn("did not reach the requested depth", "err", err)
 	}
 
