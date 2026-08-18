@@ -6,6 +6,8 @@
 ENCLAVE ?= pbt
 BLOCKS  ?= 100
 ARGS    ?= args/devnet.yaml
+NAME    ?= code-shared
+DEPTH   ?= 10
 
 .DEFAULT_GOAL := help
 .PHONY: help up down logs build besu besu-image bin genesis check
@@ -58,14 +60,17 @@ verify: ## compare every client at the same block number (BLOCKS=100)
 diagnose: ## where did the chain split, and what were the peers doing then
 	@scripts/diagnose.py $(ENCLAVE)
 
-split: ## partition the network: participants 1,2 | 3  (el and cl)
+split: ## partition the network by hand: majority | last participant (el and cl)
 	@scripts/chaos.sh $(ENCLAVE) split
 
 heal: ## remove every partition and shaping rule
 	@scripts/chaos.sh $(ENCLAVE) heal
 
-chaos: ## split, hold, heal, and report whether the branches actually diverged
-	@scripts/chaos.sh $(ENCLAVE) cycle
+chaos-status: ## what pbtchaos is doing now, what is queued, and recent results
+	@scripts/chaos.sh $(ENCLAVE) status
+
+scenario: ## run one reorg scenario (NAME=code-shared DEPTH=20)
+	@scripts/chaos.sh $(ENCLAVE) scenario $(NAME) $(DEPTH)
 
 build: ## build the geth image, the genesis generator, the monitor and the hammer
 	scripts/build-images.sh $(ARGS)
@@ -76,11 +81,12 @@ besu: ## build besu-pbt:local (two Gradle stages, then the image; needs JDK 25)
 besu-image: ## rebuild besu-pbt:local from an existing build/install/besu
 	scripts/build-besu.sh --skip-gradle
 
-bin: ## build the driver and hammer as host binaries into bin/
+bin: ## build the monitor, hammer and chaos daemon as host binaries into bin/
 	@mkdir -p bin
 	cd monitor && go build -o ../bin/pbtmonitor .
 	cd hammer  && go build -o ../bin/pbthammer .
-	@echo "==> bin/pbtmonitor bin/pbthammer"
+	cd chaos   && go build -o ../bin/pbtchaos .
+	@echo "==> bin/pbtmonitor bin/pbthammer bin/pbtchaos"
 
 genesis: ## regenerate genesis/genesis.json and print the root to paste into the args file
 	@mkdir -p bin

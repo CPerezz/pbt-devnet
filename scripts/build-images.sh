@@ -63,6 +63,10 @@ echo "==> pbt-monitor:local"
 docker build --platform "$PLATFORM" -t pbt-monitor:local "$ROOT/monitor"
 echo "==> pbt-hammer:local"
 docker build --platform "$PLATFORM" -t pbt-hammer:local "$ROOT/hammer"
+# pbtchaos shares txkit with the hammer through a go.mod replace, so its build context
+# is the repository root rather than chaos/.
+echo "==> pbt-chaos:local"
+docker build --platform "$PLATFORM" -t pbt-chaos:local -f "$ROOT/chaos/Dockerfile" "$ROOT"
 
 echo
 if docker image inspect besu-pbt:local >/dev/null 2>&1; then
