@@ -30,9 +30,15 @@ case "$ACTION" in
   scenario)
     name="${3:-}"
     depth="${4:-}"
-    [[ -z "$name" ]] && { echo "usage: $0 <enclave> scenario <name> [depth]" >&2; exit 1; }
+    minority="${5:-}"
+    [[ -z "$name" ]] && { echo "usage: $0 <enclave> scenario <name> [depth] [minority-node]" >&2; exit 1; }
     api=$(url "$ENCLAVE" pbtchaos http) || { echo "pbtchaos is not running in '$ENCLAVE'" >&2; exit 1; }
-    q=""; [[ -n "$depth" ]] && q="?depth=$depth"
+    # Without a minority the daemon takes the next node in its rotation, which is what
+    # spreads reorgs across both client types.
+    q=""
+    [[ -n "$depth" ]] && q="depth=$depth"
+    [[ -n "$minority" ]] && q="${q:+$q&}minority=$minority"
+    [[ -n "$q" ]] && q="?$q"
     curl -fsS -X POST "$api/scenario/$name$q" | pretty
     echo "queued. watch it with: make chaos-status, or kurtosis service logs $ENCLAVE pbtchaos -f"
     ;;
@@ -63,7 +69,7 @@ case "$ACTION" in
     echo "==> healed. Check reconvergence with scripts/diagnose.py $ENCLAVE"
     ;;
   *)
-    echo "usage: $0 <enclave> status|scenario <name> [depth]|split|heal" >&2
+    echo "usage: $0 <enclave> status|scenario <name> [depth] [minority-node]|split|heal" >&2
     exit 1
     ;;
 esac

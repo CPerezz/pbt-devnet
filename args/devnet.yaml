@@ -168,7 +168,7 @@ pbt_hammer:
   batch: 4
   slots_per_tx: 20
   code_size: 12000
-  senders: 6
+  senders: 4
   # only: zeroize        # restrict to one workload; see the README for the list
 
 pbt_monitor:
