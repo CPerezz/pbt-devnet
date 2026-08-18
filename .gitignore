@@ -3,7 +3,8 @@
 
 # Compiled binaries: `go build ./...` inside a module writes one named after the
 # directory. They are multi-megabyte and must never be committed.
-/driver/driver
+/monitor/monitor
+/chaos/chaos
 /hammer/hammer
 /gengenesis/gengenesis
 /bin/
