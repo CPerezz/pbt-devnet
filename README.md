@@ -217,27 +217,36 @@ check requires Amsterdam scheduled with `binaryTrieTime` no earlier than `amster
   [#6](https://github.com/CPerezz/pbt-devnet/issues/6). Teku follows the specification; lighthouse
   does not; no single `genesis.ssz` satisfies both. This devnet targets lighthouse.
 
+## Solved: `preset: minimal` silently splits the devnet
+
+Recorded because the symptom is so misleading. Under `preset: minimal` the consensus clients peer
+normally, run for about three and a half minutes, then lose **every** peer within the same second
+and never reconnect. Each then computes its own proposer schedule and drives its own execution
+client down its own chain, so the devnet quietly becomes N separate chains that each look
+completely healthy — every service `RUNNING`, blocks advancing, validators active.
+
+Isolated to one variable:
+
+| preset | nodes | result |
+|---|---|---|
+| minimal | 3 | diverges at block **35**, peers 2 → 0 after 3m30s |
+| minimal | 2 | diverges at block **35**, peers 1 → 0 after 3m36s |
+| mainnet | 2 | 67+ blocks agreeing, peers stable |
+| mainnet | 3 | **100/100 blocks agreeing, peers stable** |
+
+Block 35 exactly, at both node counts, so it is deterministic rather than a race. The mechanism
+inside lighthouse is not identified — the ethpandaops `glamsterdam-devnet-8` images are built for
+mainnet-preset devnets, and the working reference setups use that preset. Both args files now pin
+`preset: mainnet` with a comment saying why.
+
+`make diagnose` is the tool that found it: it prints the first divergent block next to the moment
+each consensus client's peer count fell, and the two sitting at the same instant is the whole
+finding.
+
 ## Known issues
 
-- **The consensus clients do not peer, so the devnet runs as three separate chains.** This is the
-  current blocker and it is not yet explained. `/eth/v1/node/peer_count` reports `connected: 0` on
-  every beacon node from startup, with no chaos applied, so each lighthouse drives its own
-  execution client down its own chain from the shared genesis. `make verify` reports it correctly;
-  `make status` will show three different roots.
-
-  What is known: the execution clients agree perfectly for the first ~35 blocks and then diverge
-  permanently, which is consistent with peering never being established rather than being lost.
-  An earlier note here blamed a partition smoke test — that was wrong, a clean run with zero
-  disruptoor events shows the same thing.
-
-  The leading hypothesis is data-availability sampling. `fulu_fork_epoch: 0` puts the chain in
-  PeerDAS from genesis, and on a three-node devnet a non-supernode may never obtain or reconstruct
-  the data columns it needs. Karim's working setup sets `supernode: true` on every participant and
-  uses `PRESET_BASE: mainnet` rather than `preset: minimal`; this one sets neither. Those are the
-  two things to try first.
-
-  Until it is resolved, treat cross-client agreement as verified only over the first ~35 blocks,
-  and treat `make chaos` as destructive.
+- **`make chaos` is destructive.** Consensus clients have not been observed to re-peer after a
+  partition heals, so a split leaves the devnet in pieces. `make down && make up` afterwards.
 - `make up` does not rebuild besu. Run `make besu` after changing the besu checkout.
 - Do not pass `--image-download always`; these are local tags with no registry behind them.
 

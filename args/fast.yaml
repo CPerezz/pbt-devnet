@@ -28,7 +28,21 @@ participants:
 
 network_params:
   network: "kurtosis"
-  preset: minimal
+  # mainnet, NOT minimal. This is load-bearing and the failure it prevents is ugly.
+  #
+  # Under preset: minimal the consensus clients peer normally, run for about three and a
+  # half minutes, then lose every peer within the same second and never reconnect. Each
+  # one then computes its own proposer schedule and drives its own execution client down
+  # its own chain, so the devnet silently becomes N separate chains that each look healthy.
+  # Measured: divergence at block 35 exactly, with both two and three participants, so it
+  # is deterministic and not a race or a node-count effect. Under mainnet the same config
+  # runs past block 67 with peers stable.
+  #
+  # The mechanism inside lighthouse is not identified; the ethpandaops glamsterdam-devnet-8
+  # images are built for mainnet-preset devnets and that is what the working reference
+  # setups use. `make diagnose` shows the signature: a first-divergence block sitting
+  # exactly where the peer count fell to zero.
+  preset: mainnet
   seconds_per_slot: 6
   genesis_delay: 20
   fulu_fork_epoch: 0
@@ -43,13 +57,18 @@ ethereum_genesis_generator_params:
 # No spamoor, assertoor or forky: every extra service is more log to read and more
 # traffic between the thing being measured and the measurement.
 additional_services:
-  - dora        # 36000
-  - disruptoor  # 36002
+  - dora        # 37000
+  - disruptoor  # 37002
 
 port_publisher:
   additional_services:
+    # A different range from args/devnet.yaml on purpose. Published ports are bound on the
+    # host, so two enclaves sharing a public_port_start cannot both run — the second dies
+    # with "port is already allocated" from Docker, several layers below anything that
+    # mentions Kurtosis. Keeping the debug profile on its own range means you can leave a
+    # long run up while iterating.
     enabled: true
-    public_port_start: 36000
+    public_port_start: 37000
 
 ### Ours.
 
