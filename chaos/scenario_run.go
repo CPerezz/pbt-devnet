@@ -112,9 +112,10 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64) res
 
 	height, ok := c.waitAgreement(ctx, 4*time.Minute)
 	if !ok {
+		n, _ := lowestHead(ctx, c.els)
 		res.Outcome = "inconclusive"
 		res.Detail = "clients did not reconverge within 4m of the heal, so any state difference " +
-			"reflects an unhealed network rather than reorg handling"
+			"reflects an unhealed network rather than reorg handling; " + c.describeDisagreement(ctx, n)
 		c.log.Warn("no reconvergence after heal", "name", sc.name)
 		return res
 	}

@@ -114,6 +114,7 @@ var scenarios = map[string]*scenario{
 			return nil
 		},
 		apply: func(ctx context.Context, r *run) error {
+			var last common.Hash
 			for i := 0; i < 3; i++ {
 				key, err := crypto.GenerateKey()
 				if err != nil {
@@ -130,16 +131,15 @@ var scenarios = map[string]*scenario{
 				if err != nil {
 					return err
 				}
-				h, _, err := r.viaMin.send(ctx, r.minority, txReq{to: &authority, auth: []types.SetCodeAuthorization{auth}})
+				last, _, err = r.viaMin.send(ctx, r.minority, txReq{to: &authority, auth: []types.SetCodeAuthorization{auth}})
 				if err != nil {
-					return err
-				}
-				if _, err := r.viaMin.await(ctx, r.minority, h, 90*time.Second); err != nil {
 					return err
 				}
 				r.doomed = append(r.doomed, authority)
 			}
-			return nil
+			// Nonces are sequential from one sender, so the last receipt implies the rest.
+			_, err := r.viaMin.await(ctx, r.minority, last, 120*time.Second)
+			return err
 		},
 		verify: func(ctx context.Context, r *run) (string, error) {
 			// A cleared delegation means no code at all: back to a plain EOA.
@@ -151,23 +151,23 @@ var scenarios = map[string]*scenario{
 		name: "account",
 		doc:  "fresh accounts funded on the doomed branch; their header stems must go with it",
 		apply: func(ctx context.Context, r *run) error {
+			var last common.Hash
 			for i := 0; i < 5; i++ {
 				var addr common.Address
 				if _, err := rand.Read(addr[:]); err != nil {
 					return err
 				}
-				h, _, err := r.viaMin.send(ctx, r.minority, txReq{
+				var err error
+				last, _, err = r.viaMin.send(ctx, r.minority, txReq{
 					to: &addr, value: big.NewInt(1_000_000_000_000_000), gas: 60_000,
 				})
 				if err != nil {
 					return err
 				}
-				if _, err := r.viaMin.await(ctx, r.minority, h, 90*time.Second); err != nil {
-					return err
-				}
 				r.doomed = append(r.doomed, addr)
 			}
-			return nil
+			_, err := r.viaMin.await(ctx, r.minority, last, 120*time.Second)
+			return err
 		},
 		verify: func(ctx context.Context, r *run) (string, error) {
 			var bad []string
@@ -201,12 +201,9 @@ var scenarios = map[string]*scenario{
 			return nil
 		},
 		apply: func(ctx context.Context, r *run) error {
-			for _, s := range r.slots {
-				if err := r.write(ctx, r.survivor, s, txkit.SlotKey(s+1)); err != nil {
-					return err
-				}
-			}
-			return nil
+			return r.writeAll(ctx, r.survivor, r.slots, func(s uint64) common.Hash {
+				return txkit.SlotKey(s + 1)
+			})
 		},
 		verify: func(ctx context.Context, r *run) (string, error) {
 			return r.expectSlots(ctx, r.survivor, r.slots, false)
@@ -232,12 +229,9 @@ var scenarios = map[string]*scenario{
 		apply: func(ctx context.Context, r *run) error {
 			// Zero IS absence in this tree, so this is a leaf deletion, and reorging it
 			// out means resurrecting a value rather than dropping one.
-			for _, s := range r.slots {
-				if err := r.write(ctx, r.survivor, s, common.Hash{}); err != nil {
-					return err
-				}
-			}
-			return nil
+			return r.writeAll(ctx, r.survivor, r.slots, func(uint64) common.Hash {
+				return common.Hash{}
+			})
 		},
 		verify: func(ctx context.Context, r *run) (string, error) {
 			return r.expectSlots(ctx, r.survivor, r.slots, true)
@@ -271,14 +265,19 @@ func (r *run) deploy(ctx context.Context, e *el, s *sender, initcode []byte) (co
 	return addr, nil
 }
 
-// write calls the writer contract: calldata is key || value.
-func (r *run) write(ctx context.Context, to common.Address, slot uint64, val common.Hash) error {
-	data := append(txkit.SlotKey(slot).Bytes(), val.Bytes()...)
-	h, _, err := r.viaMin.send(ctx, r.minority, txReq{to: &to, data: data, gas: 200_000})
-	if err != nil {
-		return err
+// writeAll calls the writer contract once per slot -- calldata is key || value -- and
+// confirms only the last, since one sender's nonces are sequential.
+func (r *run) writeAll(ctx context.Context, to common.Address, slots []uint64, val func(uint64) common.Hash) error {
+	var last common.Hash
+	for _, s := range slots {
+		data := append(txkit.SlotKey(s).Bytes(), val(s).Bytes()...)
+		h, _, err := r.viaMin.send(ctx, r.minority, txReq{to: &to, data: data, gas: 200_000})
+		if err != nil {
+			return err
+		}
+		last = h
 	}
-	_, err = r.viaMin.await(ctx, r.minority, h, 90*time.Second)
+	_, err := r.viaMin.await(ctx, r.minority, last, 120*time.Second)
 	return err
 }
 

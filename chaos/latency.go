@@ -48,8 +48,10 @@ func (c *chaos) latencyFork(ctx context.Context) result {
 	}
 
 	// Watching starts before the shaping does, so the block that gets orphaned is
-	// already recorded as canonical when it disappears.
-	watch := c.watchReorg(ctx, 8*c.cfg.slotSeconds)
+	// already recorded as canonical when it disappears. Watch through a node that is
+	// NOT the one being delayed: its own RPC answers late, which is enough to miss the
+	// short window in which the reorg is visible.
+	watch := c.watchReorg(ctx, c.observerExcept(node), 8*c.cfg.slotSeconds)
 
 	name := fmt.Sprintf("late-proposer-%d", slot)
 	if err := c.d.delay(name, []int{node}, c.cfg.latencyDelay); err != nil {
@@ -136,11 +138,20 @@ type reorgEvent struct {
 // watchReorg polls one client and reports the first height whose canonical hash CHANGES.
 // A changed hash at an unchanged height is the definition of a reorg, and it needs no
 // cooperation from the client's logs.
-func (c *chaos) watchReorg(ctx context.Context, window time.Duration) <-chan reorgEvent {
+// observerExcept picks a client to watch through, avoiding the one being disrupted.
+func (c *chaos) observerExcept(node int) *el {
+	for i, e := range c.els {
+		if i+1 != node {
+			return e
+		}
+	}
+	return c.els[0]
+}
+
+func (c *chaos) watchReorg(ctx context.Context, e *el, window time.Duration) <-chan reorgEvent {
 	out := make(chan reorgEvent, 1)
 	go func() {
 		defer close(out)
-		e := c.els[0]
 		seen := map[uint64]common.Hash{}
 		deadline := time.After(window)
 		tick := time.NewTicker(time.Second)
