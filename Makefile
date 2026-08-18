@@ -52,7 +52,8 @@ ui: ## print every web UI and API url
 	  spamoor    "$$(kurtosis port print $(ENCLAVE) spamoor http 2>/dev/null)" \
 	  assertoor  "$$(kurtosis port print $(ENCLAVE) assertoor http 2>/dev/null)" \
 	  forky      "$$(kurtosis port print $(ENCLAVE) forky http 2>/dev/null)" \
-	  disruptoor "$$(kurtosis port print $(ENCLAVE) disruptoor http 2>/dev/null)"
+	  disruptoor "$$(kurtosis port print $(ENCLAVE) disruptoor http 2>/dev/null)" \
+	  pbtchaos   "$$(kurtosis port print $(ENCLAVE) pbtchaos http 2>/dev/null)"
 
 status: ## show every execution client's head and state root
 	@scripts/status.sh $(ENCLAVE)
