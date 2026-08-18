@@ -67,7 +67,7 @@ Bare `make` lists every target. Ctrl-C detaches from the logs without stopping a
 | `kurtosis run --privileged` | `pbt-egg:local` writes a `binaryTrieTime` genesis, then 4 EL + 4 CL + 4 VC start | `--privileged` is for disruptoor alone, which enters other containers' network namespaces |
 | first slots | the chain starts; `pbtmonitor` follows every client | `chain number=N … clients=4`, one state root shared by all four |
 | ~2 epochs | attestations accumulate | finalized epoch advancing, in Dora or `make diagnose` |
-| continuously | `pbthammer` cycles 11 PBT-shaped workloads; spamoor adds four more | blocks around 14% of the 200M gas limit |
+| continuously | `pbthammer` cycles 11 PBT-shaped workloads; spamoor adds four more | blocks around 14% of the 200M gas limit, base fee near zero |
 | every 15-30 blocks | `pbtchaos` isolates the next proposer for two slots | `reorg observed client=… height=… before=… after=…`, and the fork in forky |
 | on demand | `make scenario NAME=… DEPTH=…` | `partitioned` → `healed` → `reconverged` → `scenario passed` |
 | after a long split | a client can be left with no peers | `make repeer` restarts it; it rejoins in a slot or two |
@@ -229,6 +229,18 @@ Known gaps, in rough order of how much they would be worth closing:
   a client that has been down for many epochs takes a sync path none of this touches.
 - **Single consensus client.** Every node runs lighthouse, so a consensus-side bug is
   invisible here by construction.
+
+### Keep the chain under its gas target
+
+Blocks must average below 50% of the gas limit, and it is worth checking after any change to
+the hammer or spamoor. Above target the base fee rises 12.5% **per block** and compounds with
+nothing to stop it: measured at the old settings, ten blocks ran 74.9% full and the base fee
+went 3,600 → 11,579 gwei, at which point no scenario could pay for a transaction within the
+node's 1 ether cap and five of six failed. At the current settings the same measurement is
+14.3% full with the base fee at 0.1 gwei.
+
+The hammer dominates, not spamoor: `interval` and `batch` set its rate, and `code_size`
+multiplies by 1530 into state gas, so a 12,000-byte deploy alone costs ~18M.
 
 ## Debugging one client on its own
 
