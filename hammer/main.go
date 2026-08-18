@@ -30,7 +30,6 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -40,6 +39,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/CPerezz/pbt-devnet/hammer/txkit"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -156,7 +157,7 @@ func main() {
 	// One fixed blob, reused across senders on purpose: identical code means an
 	// identical code hash, which means the code-zone leaves are shared. That shared
 	// ownership is the thing no per-account history can describe.
-	sharedCode := patternCode(*codeSize, 0x5f)
+	sharedCode := txkit.PatternCode(*codeSize, 0x5f)
 
 	head, err := clients[0].HeaderByNumber(ctx, nil)
 	if err != nil {
@@ -314,9 +315,9 @@ func (w *world) deployTargets(ctx context.Context, clients []*ethclient.Client, 
 	}{
 		// The reader pre-writes a handful of slots in its own initcode, so callread has
 		// both present and absent leaves to read rather than only absent ones.
-		{"reader", &w.reader, deployCodeAfter(seedCode(readerSeeded), readerRuntime())},
-		{"writer", &w.writer, deployCodeAfter(nil, writerRuntime())},
-		{"bigcode", &w.bigcode, deployCodeAfter(nil, w.code)},
+		{"reader", &w.reader, txkit.DeployCodeAfter(txkit.SeedCode(txkit.ReaderSeeded), txkit.ReaderRuntime())},
+		{"writer", &w.writer, txkit.DeployCodeAfter(nil, txkit.WriterRuntime())},
+		{"bigcode", &w.bigcode, txkit.DeployCodeAfter(nil, w.code)},
 	}
 
 	hashes := make([]common.Hash, len(specs))
@@ -642,7 +643,7 @@ func (w *world) shapeFor(ctx context.Context, clients []*ethclient.Client, kind 
 	case "fanout":
 		// A brand-new random recipient every time, so every one of these adds a
 		// header stem the tree has never held.
-		addr, err := randomAddress()
+		addr, err := txkit.RandomAddress()
 		if err != nil {
 			return nil, err
 		}
@@ -651,17 +652,17 @@ func (w *world) shapeFor(ctx context.Context, clients []*ethclient.Client, kind 
 	case "storage":
 		// Creation whose initcode writes `slots` scattered storage slots and returns
 		// empty code: a fresh account plus a wide scatter of storage-zone leaves.
-		sh.data = storageInitCode(w.slots)
+		sh.data = txkit.StorageInitCode(w.slots)
 
 	case "codedup":
 		// Same runtime code from a rotating set of senders: identical code hash,
 		// shared code-zone leaves.
-		sh.data = deployCodeAfter(nil, w.code)
+		sh.data = txkit.DeployCodeAfter(nil, w.code)
 
 	case "destruct":
 		// A modest child so the workload stays cheap next to codedup; the point is
 		// that code exists at all when the account disappears.
-		sh.data = factoryDestructInitCode(s.addr, 2048)
+		sh.data = txkit.FactoryDestructInitCode(s.addr, 2048)
 
 	case "delegate":
 		return w.delegateShape(ctx, clients)
@@ -673,23 +674,23 @@ func (w *world) shapeFor(ctx context.Context, clients []*ethclient.Client, kind 
 		// CALL the reader, which SLOADs the slot named by calldata. Half the keys are
 		// ones it seeded in its own initcode (a present leaf), half are not (an absent
 		// one) — two different walks through the tree.
-		key := readerSeeded[w.readTurn%len(readerSeeded)]
+		key := txkit.ReaderSeeded[w.readTurn%len(txkit.ReaderSeeded)]
 		if w.readTurn%2 == 1 {
 			key += 1 << 32 // far outside anything the reader ever wrote
 		}
 		w.readTurn++
 		to := w.reader
-		sh.to, sh.data = &to, slotKey(key).Bytes()
+		sh.to, sh.data = &to, txkit.SlotKey(key).Bytes()
 
 	case "extcode":
 		// Reading only the SIZE of a large contract still makes the client resolve the
 		// whole blob, which on this tree means touching every code-zone chunk leaf the
 		// contract occupies. Cheap in gas, wide in state access — that is the shape.
-		sh.data = extcodeInitCode(w.bigcode, len(w.code), 8)
+		sh.data = txkit.ExtcodeInitCode(w.bigcode, len(w.code), 8)
 
 	case "legacy":
 		// Type 0, EIP-155 protected. A plain transfer keeps the envelope the variable.
-		addr, err := randomAddress()
+		addr, err := txkit.RandomAddress()
 		if err != nil {
 			return nil, err
 		}
@@ -701,12 +702,12 @@ func (w *world) shapeFor(ctx context.Context, clients []*ethclient.Client, kind 
 		// nothing the 1559 path does not.
 		to := w.reader
 		sh.to = &to
-		sh.data = slotKey(readerSeeded[0]).Bytes()
+		sh.data = txkit.SlotKey(txkit.ReaderSeeded[0]).Bytes()
 		sh.envelope = envAccessList
 		sh.accessList = types.AccessList{{
 			Address: w.reader,
 			StorageKeys: []common.Hash{
-				slotKey(readerSeeded[0]), slotKey(readerSeeded[1]), slotKey(1 << 40),
+				txkit.SlotKey(txkit.ReaderSeeded[0]), txkit.SlotKey(txkit.ReaderSeeded[1]), txkit.SlotKey(1 << 40),
 			},
 		}}
 
@@ -718,9 +719,9 @@ func (w *world) shapeFor(ctx context.Context, clients []*ethclient.Client, kind 
 		// fails and the workload would loop on "build failed". The non-reverting twin
 		// does identical work and ends in RETURN instead of REVERT, so its estimate is
 		// the right number — which keeps the rule that gas is never hardcoded.
-		writes := zeroizeSlots()
-		sh.data = append(seedCode(writes), 0x60, 0x00, 0x60, 0x00, 0xfd)      // ... REVERT
-		sh.priceData = append(seedCode(writes), 0x60, 0x00, 0x60, 0x00, 0xf3) // ... RETURN
+		writes := txkit.ZeroizeSlots()
+		sh.data = append(txkit.SeedCode(writes), 0x60, 0x00, 0x60, 0x00, 0xfd)      // ... REVERT
+		sh.priceData = append(txkit.SeedCode(writes), 0x60, 0x00, 0x60, 0x00, 0xf3) // ... RETURN
 
 	default:
 		return nil, fmt.Errorf("unknown workload %q", kind)
@@ -801,7 +802,7 @@ func (w *world) delegateShape(ctx context.Context, clients []*ethclient.Client) 
 func (w *world) zeroizeShape() *shape {
 	w.zeroizeTurn++
 	if w.zeroizeTurn%2 == 0 {
-		return &shape{value: big.NewInt(0), data: zeroizeInitCode(zeroizeSlots())}
+		return &shape{value: big.NewInt(0), data: txkit.ZeroizeInitCode(txkit.ZeroizeSlots())}
 	}
 
 	to := w.writer
@@ -814,246 +815,15 @@ func (w *world) zeroizeShape() *shape {
 		sh.data = append(key.Bytes(), common.Hash{}.Bytes()...) // key, value=0 -> delete
 		return sh
 	}
-	key := slotKey(uint64(w.zeroizeTurn))
+	key := txkit.SlotKey(uint64(w.zeroizeTurn))
 	if w.zeroizeTurn%3 == 0 {
-		key = slotKey(uint64(w.zeroizeTurn) % 64) // land in the header stem sometimes
+		key = txkit.SlotKey(uint64(w.zeroizeTurn) % 64) // land in the header stem sometimes
 	}
 	w.liveSlots = append(w.liveSlots, key)
 	var val common.Hash
 	val[31] = 0xff
 	sh.data = append(key.Bytes(), val.Bytes()...)
 	return sh
-}
-
-// readerSeeded are the slots the reader contract writes in its own initcode. They
-// straddle 64 so callread and the access-list workload touch both the header stem and
-// dedicated storage stems.
-var readerSeeded = []uint64{1, 2, 3, 5, 8, 13, 64, 65, 96, 200}
-
-// zeroizeSlots returns the batch a single zeroize or revert transaction works over:
-// three in the header stem, then a full group above it so its stem goes from populated
-// to empty in one go.
-func zeroizeSlots() []uint64 {
-	out := []uint64{1, 2, 3}
-	for i := uint64(64); i < 72; i++ {
-		out = append(out, i)
-	}
-	return out
-}
-
-func randomAddress() (common.Address, error) {
-	var addr common.Address
-	if _, err := rand.Read(addr[:]); err != nil {
-		return addr, err
-	}
-	return addr, nil
-}
-
-// slotKey turns a slot number into its 32-byte big-endian key.
-func slotKey(n uint64) common.Hash {
-	return common.BigToHash(new(big.Int).SetUint64(n))
-}
-
-// push32 emits PUSH32 followed by a full word. Every value is pushed at full width so
-// the builders below never have to reason about operand sizes.
-func push32(h common.Hash) []byte {
-	return append([]byte{0x7f}, h[:]...)
-}
-
-// sstore emits PUSH32 value, PUSH32 key, SSTORE. SSTORE pops the key first, so the value
-// has to be pushed first.
-func sstore(key, val common.Hash) []byte {
-	out := push32(val)
-	out = append(out, push32(key)...)
-	return append(out, 0x55)
-}
-
-// seedCode writes each slot to a non-zero value derived from it.
-func seedCode(slots []uint64) []byte {
-	var out []byte
-	for _, s := range slots {
-		out = append(out, sstore(slotKey(s), slotKey(s+1))...)
-	}
-	return out
-}
-
-// zeroizeInitCode writes every slot non-zero and then stores zero over all of them,
-// inside one transaction, returning empty code.
-//
-// The order matters: all the writes first, then all the deletions. Interleaving them
-// would only ever have one leaf live at a time, and never take a stem from fully
-// populated to empty — which is the transition that makes a group collapse.
-func zeroizeInitCode(slots []uint64) []byte {
-	out := seedCode(slots)
-	for _, s := range slots {
-		out = append(out, sstore(slotKey(s), common.Hash{})...)
-	}
-	return append(out, 0x60, 0x00, 0x60, 0x00, 0xf3) // PUSH1 0 PUSH1 0 RETURN
-}
-
-// storageInitCode returns initcode that performs `n` unrolled SSTOREs and then
-// returns zero-length code. Straight-line, no jumps: PUSH32 value, PUSH32 key,
-// SSTORE, repeated, then PUSH1 0 PUSH1 0 RETURN.
-func storageInitCode(n int) []byte {
-	code := make([]byte, 0, n*67+5)
-	for i := 0; i < n; i++ {
-		var key, val common.Hash
-		// 24 random leading bytes keep successive slots far apart in the tree
-		// instead of sharing a stem.
-		if _, err := rand.Read(key[:24]); err != nil {
-			panic(err)
-		}
-		key[31] = byte(i)
-		val[31] = byte(i + 1)
-		code = append(code, sstore(key, val)...)
-	}
-	code = append(code, 0x60, 0x00, 0x60, 0x00, 0xf3) // PUSH1 0 PUSH1 0 RETURN
-	return code
-}
-
-// readerRuntime SLOADs the slot named by the first word of calldata and returns it.
-//
-//	PUSH1 0 | CALLDATALOAD | SLOAD | PUSH1 0 | MSTORE | PUSH1 32 | PUSH1 0 | RETURN
-func readerRuntime() []byte {
-	return []byte{0x60, 0x00, 0x35, 0x54, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3}
-}
-
-// writerRuntime stores calldata word 1 at calldata word 0. The value is pushed before
-// the key because SSTORE pops the key first.
-//
-//	PUSH1 32 | CALLDATALOAD | PUSH1 0 | CALLDATALOAD | SSTORE | STOP
-func writerRuntime() []byte {
-	return []byte{0x60, 0x20, 0x35, 0x60, 0x00, 0x35, 0x55, 0x00}
-}
-
-// extcodeInitCode reads the size of `target` `reps` times and then copies its whole code
-// into memory, returning nothing. Straight-line, and deliberately cheap in gas relative
-// to the number of code-zone leaves it makes the client touch.
-func extcodeInitCode(target common.Address, codeLen, reps int) []byte {
-	var out []byte
-	for i := 0; i < reps; i++ {
-		out = append(out, 0x73)              // PUSH20 target
-		out = append(out, target.Bytes()...) //
-		out = append(out, 0x3b, 0x50)        // EXTCODESIZE, POP
-	}
-	// EXTCODECOPY pops address, destOffset, offset, length — so push them in reverse.
-	out = append(out, push32(slotKey(uint64(codeLen)))...) // length
-	out = append(out, 0x60, 0x00)                          // PUSH1 0  (offset in the code)
-	out = append(out, 0x60, 0x00)                          // PUSH1 0  (memory destination)
-	out = append(out, 0x73)                                // PUSH20 target
-	out = append(out, target.Bytes()...)                   //
-	out = append(out, 0x3c)                                // EXTCODECOPY
-	return append(out, 0x60, 0x00, 0x60, 0x00, 0xf3)       // return empty code
-}
-
-// deployCodeAfter returns `prefix`, then a CODECOPY/RETURN preamble, then the runtime
-// blob. The prefix runs first and is a chance to initialise storage before the code is
-// returned; the preamble's offset is corrected for its length.
-//
-// The preamble is exactly 15 bytes, so the blob starts at len(prefix)+15.
-func deployCodeAfter(prefix, runtime []byte) []byte {
-	n := len(runtime)
-	if n > 0xffff {
-		panic("runtime blob too large for a PUSH2 length")
-	}
-	const preambleLen = 15
-	off := len(prefix) + preambleLen
-	if off > 0xffff {
-		panic("prefix too large for a PUSH2 offset")
-	}
-	preamble := []byte{
-		0x61, byte(n >> 8), byte(n), // PUSH2 len
-		0x61, byte(off >> 8), byte(off), // PUSH2 offset of the blob in this code
-		0x60, 0x00, // PUSH1 0  (memory destination)
-		0x39,                        // CODECOPY
-		0x61, byte(n >> 8), byte(n), // PUSH2 len
-		0x60, 0x00, // PUSH1 0
-		0xf3, // RETURN
-	}
-	if len(preamble) != preambleLen {
-		panic(fmt.Sprintf("preamble is %d bytes, the offset says %d", len(preamble), preambleLen))
-	}
-	out := make([]byte, 0, len(prefix)+preambleLen+n)
-	out = append(out, prefix...)
-	out = append(out, preamble...)
-	return append(out, runtime...)
-}
-
-// factoryDestructInitCode returns initcode that deploys a child WITH REAL CODE and
-// then destroys it in the same transaction.
-//
-// The obvious shape — `PUSH20 addr; SELFDESTRUCT` as the creation transaction's own
-// initcode — deploys nothing, because SELFDESTRUCT halts before any RETURN. It cost
-// 215,814 gas against 210,588 for a bare empty CREATE, i.e. it wrote no code at all,
-// so the workload never produced the orphaned code-zone leaves it was meant to.
-//
-// A factory fixes that: the child returns `codeSize` bytes of code, so code-zone
-// leaves are written, and the parent then calls it so it self-destructs. Post
-// EIP-6780 SELFDESTRUCT only deletes when the account was created in the same
-// transaction — which is exactly this case — so the account goes away while its code
-// chunks remain, with nothing reference-counting them.
-//
-// Parent layout (31-byte prefix, then the child initcode it copies out of itself):
-//
-//	PUSH2 len | PUSH2 31 | PUSH1 0 | CODECOPY      copy child initcode to memory
-//	PUSH2 len | PUSH1 0  | PUSH1 0 | CREATE        deploy it -> address
-//	PUSH1 0 ×5 | DUP6 | GAS | CALL | STOP          call it -> SELFDESTRUCT
-func factoryDestructInitCode(beneficiary common.Address, codeSize int) []byte {
-	// Child runtime: destroy on any call, followed by inert filler that exists only
-	// to occupy code-zone leaves.
-	childRuntime := append([]byte{0x73}, beneficiary.Bytes()...) // PUSH20 beneficiary
-	childRuntime = append(childRuntime, 0xff)                    // SELFDESTRUCT
-	for len(childRuntime) < codeSize {
-		childRuntime = append(childRuntime, 0xfe) // INVALID: never reached, never executed
-	}
-	childInit := deployCodeAfter(nil, childRuntime)
-
-	n := len(childInit)
-	const prefixLen = 31
-	out := []byte{
-		0x61, byte(n >> 8), byte(n), // PUSH2 len
-		0x61, 0x00, prefixLen, // PUSH2 31  (offset of childInit in this code)
-		0x60, 0x00, // PUSH1 0   (memory destination)
-		0x39,                        // CODECOPY
-		0x61, byte(n >> 8), byte(n), // PUSH2 len
-		0x60, 0x00, // PUSH1 0   (memory offset)
-		0x60, 0x00, // PUSH1 0   (value)
-		0xf0,       // CREATE     -> [addr]
-		0x60, 0x00, // retLength
-		0x60, 0x00, // retOffset
-		0x60, 0x00, // argsLength
-		0x60, 0x00, // argsOffset
-		0x60, 0x00, // value
-		0x85, // DUP6 -> copy addr to the top
-		0x5a, // GAS
-		0xf1, // CALL
-		0x00, // STOP
-	}
-	if len(out) != prefixLen {
-		panic(fmt.Sprintf("factory prefix is %d bytes, the PUSH2 offset says %d", len(out), prefixLen))
-	}
-	return append(out, childInit...)
-}
-
-// patternCode builds a deterministic runtime blob that is safe to CALL: byte 0 is
-// STOP, so execution halts immediately and the rest is inert data.
-//
-// The terminator has to be FIRST. Filling with PUSH0 and putting a STOP at the end
-// produced code that overflowed the 1024-slot stack after ~1024 bytes and reverted,
-// burning all forwarded gas — so the contracts could be deployed but never called,
-// and the code-zone read path went untested.
-//
-// fill selects the body, which decides the code hash: the same fill from different
-// senders shares code-zone leaves, a different fill does not.
-func patternCode(n int, fill byte) []byte {
-	out := make([]byte, n)
-	for i := range out {
-		out[i] = fill
-	}
-	if n > 0 {
-		out[0] = 0x00 // STOP
-	}
-	return out
 }
 
 func total(stats map[string]int) int {
