@@ -197,8 +197,8 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
     # success, so refuse rather than start a no-op.
     services = args.get("additional_services", [])
     if DISRUPTOOR_SERVICE not in services:
-        fail("pbt_chaos needs the '{0}' additional service; add it to additional_services "
-             "or set pbt_chaos.enabled: false".format(DISRUPTOOR_SERVICE))
+        fail("pbt_chaos needs the '" + DISRUPTOOR_SERVICE + "' additional service: " +
+             "add it to additional_services, or set pbt_chaos.enabled: false")
 
     disruptoor = plan.get_service(name=DISRUPTOOR_SERVICE)
     cmd = ["--disruptoor", "http://{0}:{1}".format(disruptoor.ip_address, DISRUPTOOR_PORT)]
