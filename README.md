@@ -191,6 +191,12 @@ A scenario that cannot confirm the clients reconverged reports `inconclusive` ra
 finding: state that differs across a network which never healed says nothing about anyone's
 reorg handling.
 
+**Seeing no forks at all?** Check `make chaos-status` first. A quiet chain usually means
+pbtchaos is not running — it is stopped deliberately when taking a baseline, since
+`make proposals` cannot measure a proposer's miss rate on a network that is being
+partitioned. If the service is up and the chain is still quiet, the last few attempts will be
+in its history as `no-reorg`, with the slot each one targeted.
+
 Reorgs are the interesting case for a binary tree. Geth handles them by replacing layers rather
 than reversing them — an abandoned branch is dropped from the layer tree, and anything it wrote
 went with it — so shared, content-addressed code chunks never need reference counting. It refuses
@@ -306,9 +312,18 @@ besu, so besu spent the run partitioned — and the miss rate was measured by as
 node whether besu's slots had blocks. A partitioned node's blocks do not reach the node being
 asked, so this measured the partition, not the proposer.
 
-Measured over a window with nothing applied, the picture is flat: geth-1 missed 1 of 9 (the
-slot an isolation fork had targeted), geth-2 0 of 15, besu 1 of 7 (slot 1, at startup). All
-three published at the same rate and about 30ms into their slot.
+Measured properly — four nodes, chaos stopped, three epochs, 81 proposal duties — every node
+missed nothing at all:
+
+```
+proposer                         due  missed   miss %
+el-1-geth-lighthouse              16       0     0.0%
+el-2-geth-lighthouse              17       0     0.0%
+el-3-besu-lighthouse              22       0     0.0%
+el-4-besu-lighthouse              26       0     0.0%
+```
+
+All four publish at the same rate and about 30ms into their slot.
 
 Two changes came out of it. The minority now rotates, so no client is permanently the doomed
 one. And `make proposals` does this attribution properly, refusing to report a clean number
