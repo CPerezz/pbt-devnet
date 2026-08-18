@@ -215,11 +215,25 @@ affect this devnet.
 
 ## Known issues
 
-- **Consensus clients do not re-peer after a partition heals.** A partition of under a second is
-  enough to drop every libp2p connection, and they have not been observed to reconnect — the
-  clients then build separate chains indefinitely. `make chaos` will therefore leave the devnet
-  split; treat it as destructive and `make down && make up` afterwards. This is the current
-  blocker for automated reorg testing.
+- **The consensus clients do not peer, so the devnet runs as three separate chains.** This is the
+  current blocker and it is not yet explained. `/eth/v1/node/peer_count` reports `connected: 0` on
+  every beacon node from startup, with no chaos applied, so each lighthouse drives its own
+  execution client down its own chain from the shared genesis. `make verify` reports it correctly;
+  `make status` will show three different roots.
+
+  What is known: the execution clients agree perfectly for the first ~35 blocks and then diverge
+  permanently, which is consistent with peering never being established rather than being lost.
+  An earlier note here blamed a partition smoke test — that was wrong, a clean run with zero
+  disruptoor events shows the same thing.
+
+  The leading hypothesis is data-availability sampling. `fulu_fork_epoch: 0` puts the chain in
+  PeerDAS from genesis, and on a three-node devnet a non-supernode may never obtain or reconstruct
+  the data columns it needs. Karim's working setup sets `supernode: true` on every participant and
+  uses `PRESET_BASE: mainnet` rather than `preset: minimal`; this one sets neither. Those are the
+  two things to try first.
+
+  Until it is resolved, treat cross-client agreement as verified only over the first ~35 blocks,
+  and treat `make chaos` as destructive.
 - `make up` does not rebuild besu. Run `make besu` after changing the besu checkout.
 - Do not pass `--image-download always`; these are local tags with no registry behind them.
 
