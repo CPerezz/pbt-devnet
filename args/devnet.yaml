@@ -135,16 +135,16 @@ spamoor_params:
   spammers:
     - scenario: eoatx
       name: "EOA baseline"
-      config: {throughput: 40, max_pending: 80, max_wallets: 40, base_fee: 20}
+      config: {throughput: 20, max_pending: 40, max_wallets: 40, base_fee: 20}
     - scenario: deploytx
       name: "Contract deploys (code-zone leaves)"
-      config: {throughput: 5, max_pending: 10, max_wallets: 10, base_fee: 20}
+      config: {throughput: 3, max_pending: 6, max_wallets: 10, base_fee: 20}
     - scenario: setcodetx
       name: "EIP-7702 delegations"
-      config: {throughput: 3, max_pending: 6, max_wallets: 10, base_fee: 20}
+      config: {throughput: 2, max_pending: 4, max_wallets: 10, base_fee: 20}
     - scenario: storagespam
       name: "Storage growth"
-      config: {throughput: 5, max_pending: 10, max_wallets: 10, base_fee: 20}
+      config: {throughput: 3, max_pending: 6, max_wallets: 10, base_fee: 20}
 
 assertoor_params:
   run_stability_check: true
@@ -164,10 +164,17 @@ disruptoor_params:
 
 pbt_hammer:
   enabled: true
-  interval: "400ms"
-  batch: 4
+  # Measured at interval 400ms / batch 4 / code_size 12000: blocks ran 74.9% full against a
+  # 50% gas target, so the base fee compounded 12.5% a block -- 3,600 to 6,400 gwei in
+  # eight blocks -- until scenario transactions could not be paid for within the node's
+  # 1 ether cap. Nothing pushes back before that point, so the rate has to.
+  #
+  # 10 tx/s at 12,000 bytes a deploy is ~18M state gas each (1530 per byte); this is 2 tx/s
+  # at half the size.
+  interval: "1s"
+  batch: 2
   slots_per_tx: 20
-  code_size: 12000
+  code_size: 6000
   senders: 4
   # only: zeroize        # restrict to one workload; see the README for the list
 
