@@ -1,4 +1,4 @@
-module github.com/CPerezz/pbt-devnet/driver
+module github.com/CPerezz/pbt-devnet/monitor
 
 go 1.24.0
 
