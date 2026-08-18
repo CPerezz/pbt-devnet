@@ -1,8 +1,8 @@
 # pbt-devnet
 
-A differential devnet for the **EIP-8297 partitioned binary tree (PBT)**: geth and besu running
-the same Amsterdam chain, driven by real lighthouse consensus clients, with every execution client
-required to agree on every state root.
+A differential devnet for the **EIP-8297 partitioned binary tree (PBT)**: two geth and two besu
+nodes running the same Amsterdam chain, driven by real lighthouse consensus clients, with every
+execution client required to agree on every state root.
 
 The point is cross-implementation. Two instances of one binary agree by construction and prove
 nothing; geth agreeing with besu is evidence the specification is unambiguous enough to implement
@@ -58,6 +58,22 @@ make down     # stop and remove
 it. `make besu-image` rebuilds just the image from an existing `build/install/besu`.
 
 Bare `make` lists every target. Ctrl-C detaches from the logs without stopping anything.
+
+### What `make up` actually does
+
+| stage | what happens | what you should see |
+|---|---|---|
+| `check`, `build` | builds `pbt-geth`, `pbt-egg`, `pbt-monitor`, `pbt-hammer`, `pbt-chaos`; besu comes from `make besu` | a warning if `besu-pbt:local` is missing |
+| `kurtosis run --privileged` | `pbt-egg:local` writes a `binaryTrieTime` genesis, then 4 EL + 4 CL + 4 VC start | `--privileged` is for disruptoor alone, which enters other containers' network namespaces |
+| first slots | the chain starts; `pbtmonitor` follows every client | `chain number=N … clients=4`, one state root shared by all four |
+| ~2 epochs | attestations accumulate | finalized epoch advancing, in Dora or `make diagnose` |
+| continuously | `pbthammer` cycles 11 PBT-shaped workloads; spamoor adds four more | blocks around 14% of the 200M gas limit |
+| every 15-30 blocks | `pbtchaos` isolates the next proposer for two slots | `reorg observed client=… height=… before=… after=…`, and the fork in forky |
+| on demand | `make scenario NAME=… DEPTH=…` | `partitioned` → `healed` → `reconverged` → `scenario passed` |
+| after a long split | a client can be left with no peers | `make repeer` restarts it; it rejoins in a slot or two |
+
+The devnet is **not** quiet by default: chaos is on, and reorgs happen without asking. Set
+`pbt_chaos.enabled: false` for a baseline run.
 
 ## The UIs
 
@@ -130,6 +146,8 @@ The revert workload is expected to produce `status=0` receipts. Everything else 
 
 **Reorgs happen on their own.** `pbtchaos` runs continuously and forces a reorg every 15-30
 blocks by cutting the p2p of whichever node proposes next, for the two slots around its duty.
+The doomed node **rotates**, so reorgs land on geth and besu alike rather than always on the
+same participant — `make chaos-status` reports the tally per client.
 The node still builds its block — only publication is cut — so its own execution client takes
 that block as head while everyone else builds on the parent; when the isolation lifts, the
 loser unwinds. Watch them in forky and Dora. It owns disruptoor state exclusively and runs
@@ -158,9 +176,14 @@ its transactions to the minority's RPC only, holds for `DEPTH` blocks, heals, an
 branch was their only writer, and stay when a surviving account still holds them — lifted from
 unit test to two live clients.
 
+Each run also names the branch that must survive: the majority's tip hash is recorded before
+the heal and asserted afterwards, so a scenario cannot pass by reading its state assertions
+the wrong way round if the doomed branch happens to win.
+
 ```bash
-make scenario NAME=code-shared DEPTH=20   # one scenario now
-make chaos-status                         # running, queued, and recent results
+make scenario NAME=code-shared DEPTH=20   # next node in the rotation is the minority
+make scenario NAME=code-sole MINORITY=3   # or pin which node gets stranded
+make chaos-status                         # running, queued, per-client coverage, results
 make split ; make heal                    # partition by hand, outside the queue
 ```
 
@@ -278,7 +301,7 @@ finding.
 - **Partitions cost peers.** Clearing a partition removes every network rule — the containers
   can reach each other again — but lighthouse does not reliably rebuild its peer set: it sits at
   the same slot as everyone else, so it never measures itself as behind and never range-syncs.
-  One node in three ends up stranded after a run of scenarios. `make repeer` restarts any client
+  A node can end up stranded after a run of scenarios. `make repeer` restarts any client
   with no peers, which rebuilds its discovery table from the bootnode and rejoins it in a slot or
   two. Scenarios report `inconclusive` rather than a finding when the clients have not
   reconverged, so a stranded node never masquerades as a client bug.
@@ -292,8 +315,8 @@ main.star            composes ethereum-package, adds pbtmonitor, pbthammer and p
 args/devnet.yaml     the whole configuration
 monitor/             the differential observer and its oracles
 hammer/              the eleven PBT-shaped transaction workloads; txkit/ is shared with chaos
-chaos/               forced reorgs: periodic latency forks and the six state scenarios
+chaos/               forced reorgs: proposer isolation and the six state scenarios
 gengenesis/          standalone geth-format PBT genesis, for single-client debugging
-scripts/             build, status, verify, chaos
+scripts/             build, status, verify, diagnose, chaos, repeer
 patches/             the besu fix, for anyone building besu by hand
 ```

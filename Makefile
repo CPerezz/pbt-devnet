@@ -8,6 +8,9 @@ BLOCKS  ?= 100
 ARGS    ?= args/devnet.yaml
 NAME    ?= code-shared
 DEPTH   ?= 10
+# Empty means "next node in pbtchaos's rotation", which is what spreads reorgs across
+# both client types.
+MINORITY ?=
 
 .DEFAULT_GOAL := help
 .PHONY: help up down logs build besu besu-image bin genesis check
@@ -72,8 +75,8 @@ repeer: ## restart any consensus client left with no peers after a partition
 chaos-status: ## what pbtchaos is doing now, what is queued, and recent results
 	@scripts/chaos.sh $(ENCLAVE) status
 
-scenario: ## run one reorg scenario (NAME=code-shared DEPTH=20)
-	@scripts/chaos.sh $(ENCLAVE) scenario $(NAME) $(DEPTH)
+scenario: ## run one reorg scenario (NAME=code-shared DEPTH=20 [MINORITY=3])
+	@scripts/chaos.sh $(ENCLAVE) scenario $(NAME) $(DEPTH) $(MINORITY)
 
 build: ## build the geth image, the genesis generator, the monitor and the hammer
 	scripts/build-images.sh $(ARGS)
