@@ -70,19 +70,28 @@ func (s *sender) fees(ctx context.Context, e *el, gas uint64) (tip, feeCap *big.
 	// 50 gwei sits far above the 1-2 gwei the generators use, and still costs a fraction
 	// of an ether at these gas figures.
 	tip = big.NewInt(50_000_000_000) // 50 gwei
-	feeCap = new(big.Int).Div(big.NewInt(900_000_000_000_000_000), new(big.Int).SetUint64(gas))
+	feeCap = new(big.Int).Div(feeBudgetWei, new(big.Int).SetUint64(gas))
 
-	// If the chain is already dearer than the cap allows, pay what we can and let the
-	// caller find out from the missing receipt rather than signing something invalid.
-	floor := new(big.Int).Add(tip, new(big.Int).Mul(h.BaseFee, big.NewInt(2)))
-	if feeCap.Cmp(floor) < 0 {
-		feeCap = floor
+	// The budget is a ceiling, never a target to be raised past. An earlier version
+	// lifted feeCap to `tip + 2*basefee` when that was higher, which put the maximum cost
+	// back over the node's 1 ether guard and guaranteed rejection -- the clamp did
+	// nothing. Repeated partitions push the base fee up (each leaves a backlog), so this
+	// is reached in practice, not in theory.
+	if feeCap.Cmp(h.BaseFee) <= 0 {
+		return nil, nil, fmt.Errorf(
+			"base fee on %s is %s wei; %d gas cannot be paid for within the node's 1 ether "+
+				"cap (max %s wei/gas). Let the chain settle, or lower the load",
+			e.name, h.BaseFee, gas, feeCap)
 	}
 	if feeCap.Cmp(tip) < 0 {
 		tip = new(big.Int).Set(feeCap)
 	}
 	return tip, feeCap, nil
 }
+
+// feeBudgetWei is the most a single transaction may cost in total. Nodes reject anything
+// whose gasFeeCap*gas exceeds 1 ether, so stay under it.
+var feeBudgetWei = big.NewInt(900_000_000_000_000_000)
 
 type txReq struct {
 	to    *common.Address

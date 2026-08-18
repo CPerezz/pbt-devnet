@@ -253,8 +253,12 @@ func (r *run) all() []*el { return append([]*el{r.minority}, r.majority...) }
 // deployGas sizes a deployment under EIP-8297's two-dimensional gas, where every byte of
 // deployed code costs 1530 state gas. A flat allowance silently made every scenario
 // unsendable: 3000 bytes alone needs 4.59M, well past the 3M that used to be passed.
+//
+// The constant stays small on purpose. A transaction's maximum cost is feeCap*gas, and
+// the fee cap is derived by dividing a fixed budget by the gas, so an oversized limit
+// buys nothing and prices the transaction out on a chain whose base fee has risen.
 func deployGas(codeLen int) uint64 {
-	return 500_000 + uint64(codeLen)*1800
+	return 120_000 + uint64(codeLen)*1800
 }
 
 func (r *run) deploy(ctx context.Context, e *el, s *sender, initcode []byte) (common.Address, error) {
