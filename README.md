@@ -128,15 +128,39 @@ The revert workload is expected to produce `status=0` receipts. Everything else 
 
 ## Chaos
 
+**Reorgs happen on their own.** `pbtchaos` runs continuously and forces a one-block reorg
+every 15-30 blocks by delaying whichever node proposes next, so its CL/EL exchange misses the
+slot and the following proposer builds over its parent. Watch them land in forky, or as
+`Chain reorg detected` in geth. It owns disruptoor state exclusively and runs everything
+through one queue, so two disruptions never overlap.
+
+On top of that, scenarios strand **specific state** on a branch that is then reorged out, and
+check every client agrees about that state afterwards. Each one partitions the network, sends
+its transactions to the minority's RPC only, holds for `DEPTH` blocks, heals, and verifies.
+
+| scenario | on the doomed branch | must be true after the heal |
+|---|---|---|
+| `code-sole` | unique bytecode, deployed once | no code on any client |
+| `code-shared` | the same bytecode a surviving account already holds | the survivor's copy still reads back |
+| `delegate` | 7702 delegations on fresh authorities | no code: back to a plain EOA |
+| `account` | fresh funded accounts | zero balance everywhere |
+| `storage-add` | slots written below and above `HEADER_STORAGE_OFFSET` (64) | both zero again |
+| `storage-del` | slots deleted that existed before the split | the values are back |
+
+`code-sole` and `code-shared` are the pair from
+[go-ethereum#30](https://github.com/CPerezz/go-ethereum/pull/30) — chunks go when the dead
+branch was their only writer, and stay when a surviving account still holds them — lifted from
+unit test to two live clients.
+
 ```bash
-make split    # partition participants {1,2} | {3} on both el and cl
-make heal     # clear every partition and shaping rule
-make chaos    # split, hold, heal, and report whether the branches actually diverged
+make scenario NAME=code-shared DEPTH=20   # one scenario now
+make chaos-status                         # running, queued, and recent results
+make split ; make heal                    # partition by hand, outside the queue
 ```
 
-Driven through disruptoor's HTTP API. Note that a partition **applying** is not the same as a
-partition **biting**: `make chaos` checks that two clients actually sat at the same height on
-different hashes, because that is the only proof the split did anything.
+A scenario that cannot confirm the clients reconverged reports `inconclusive` rather than a
+finding: state that differs across a network which never healed says nothing about anyone's
+reorg handling.
 
 Reorgs are the interesting case for a binary tree. Geth handles them by replacing layers rather
 than reversing them — an abandoned branch is dropped from the layer tree, and anything it wrote
@@ -245,18 +269,23 @@ finding.
 
 ## Known issues
 
-- **`make chaos` is destructive.** Consensus clients have not been observed to re-peer after a
-  partition heals, so a split leaves the devnet in pieces. `make down && make up` afterwards.
+- **A hard partition may not heal.** Clearing the partition removes every network rule — the
+  containers can reach each other again — but a lighthouse that comes back with no peers can sit
+  on its own branch indefinitely: it is at the same slot as everyone else, so it does not measure
+  itself as behind and never range-syncs. Restarting that container restores peering. Scenarios
+  report `inconclusive` when this happens rather than claiming a finding. Latency shaping, which
+  never severs the connections, always recovers.
 - `make up` does not rebuild besu. Run `make besu` after changing the besu checkout.
 - Do not pass `--image-download always`; these are local tags with no registry behind them.
 
 ## Layout
 
 ```
-main.star            composes ethereum-package, adds pbtmonitor and pbthammer
+main.star            composes ethereum-package, adds pbtmonitor, pbthammer and pbtchaos
 args/devnet.yaml     the whole configuration
 monitor/             the differential observer and its oracles
-hammer/              the eleven PBT-shaped transaction workloads
+hammer/              the eleven PBT-shaped transaction workloads; txkit/ is shared with chaos
+chaos/               forced reorgs: periodic latency forks and the six state scenarios
 gengenesis/          standalone geth-format PBT genesis, for single-client debugging
 scripts/             build, status, verify, chaos
 patches/             the besu fix, for anyone building besu by hand
