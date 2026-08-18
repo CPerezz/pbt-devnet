@@ -180,6 +180,14 @@ Each run also names the branch that must survive: the majority's tip hash is rec
 the heal and asserted afterwards, so a scenario cannot pass by reading its state assertions
 the wrong way round if the doomed branch happens to win.
 
+**Everything is verified at that recorded block, not at head**, and this is the difference
+between a real test and a race. A reorged-out transaction is still valid — same sender, same
+nonce — so it re-enters the mempool and is mined again on the surviving branch within a block
+or two, recreating the contract at the same address. Checked at head, `code-sole` correctly
+reported all four clients holding the code they were supposed to have dropped: they had it
+again, legitimately. At the recorded block the doomed branch was never canonical, so nothing
+mined afterwards can put its writes back.
+
 ```bash
 make scenario NAME=code-shared DEPTH=20   # next node in the rotation is the minority
 make scenario NAME=code-sole MINORITY=3   # or pin which node gets stranded
