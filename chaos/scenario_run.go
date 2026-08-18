@@ -33,6 +33,28 @@ func majorityTip(ctx context.Context, majority []*el) (uint64, common.Hash) {
 // tipMargin is how far below the majority's head the survival check anchors itself.
 const tipMargin = 4
 
+// minChainHeight is how much chain a scenario wants behind it before it starts.
+const minChainHeight = 24
+
+// diverged reports whether the minority and the majority are actually on different
+// chains, which is the whole premise of a partition scenario.
+func (c *chaos) diverged(ctx context.Context, minority *el, majority []*el) bool {
+	n, err := lowestHead(ctx, append([]*el{minority}, majority...))
+	if err != nil || n == 0 {
+		return false
+	}
+	mh := minority.hashAt(ctx, n)
+	if mh == (common.Hash{}) {
+		return false
+	}
+	for _, e := range majority {
+		if h := e.hashAt(ctx, n); h != (common.Hash{}) && h != mh {
+			return true
+		}
+	}
+	return false
+}
+
 // awaitHeight waits for every client to have SOME block at n. A client that has just
 // rejoined is still catching up, and "has not got there yet" is not "disagrees".
 func awaitHeight(ctx context.Context, els []*el, n uint64, timeout time.Duration) bool {
@@ -79,6 +101,17 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 		res.Outcome = "skipped"
 		res.Detail = "no --key given, so nothing can be sent"
 		return res
+	}
+	// A scenario needs history behind it. Run one seconds after genesis and the anchor
+	// lands on block 2, the fee market has not settled, and the partition competes with
+	// nodes still finding each other -- all of which produce findings about the harness
+	// rather than the clients.
+	if h, err := lowestHead(ctx, c.els); err == nil && h < minChainHeight {
+		if err := waitBlocks(ctx, c.els, minChainHeight-h); err != nil {
+			res.Outcome = "skipped"
+			res.Detail = fmt.Sprintf("waiting for the chain to reach block %d: %v", minChainHeight, err)
+			return res
+		}
 	}
 
 	// Which node gets stranded rotates every run, so reorgs land on both client types
@@ -162,6 +195,22 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 		// Measure depth on the majority: the minority builds slowly while partitioned,
 		// so waiting on the slowest client would stretch a depth-10 scenario forever.
 		c.log.Warn("did not reach the requested depth", "err", err)
+	}
+
+	// The partition has to have actually bitten. Everything below assumes the scenario's
+	// writes are confined to the minority, and that is only true if the two sides really
+	// did build different chains -- disruptoor applies its rules asynchronously, so a
+	// transaction sent immediately after the call can still reach the majority and be
+	// mined on the branch that survives. It then looks like state that refused to go away.
+	if !c.diverged(ctx, minority, majority) {
+		if err := c.d.clear(); err != nil {
+			c.log.Error("could not clear after a partition that did not bite", "err", err)
+		}
+		res.Outcome = "inconclusive"
+		res.Detail = "the partition never separated the chains, so nothing was doomed; " +
+			"the scenario's writes may have landed on the surviving branch"
+		c.log.Warn("partition did not bite", "name", sc.name, "minority", minority.name)
+		return res
 	}
 
 	// Record the branch that is MEANT to survive, before healing, so survival is checked

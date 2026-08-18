@@ -270,7 +270,11 @@ func (r *run) all() []*el { return append([]*el{r.minority}, r.majority...) }
 // the fee cap is derived by dividing a fixed budget by the gas, so an oversized limit
 // buys nothing and prices the transaction out on a chain whose base fee has risen.
 func deployGas(codeLen int) uint64 {
-	return 120_000 + uint64(codeLen)*1800
+	// 260k covers creating the account itself before a single byte of code is written:
+	// under EIP-8297 a fresh account costs about 207,391 state gas, and a deployment
+	// always makes one. At 120k the writer contract -- eight bytes of runtime -- ran out
+	// and reverted, which reads as a scenario bug rather than a gas one.
+	return 260_000 + uint64(codeLen)*1800
 }
 
 func (r *run) deploy(ctx context.Context, e *el, s *sender, initcode []byte) (common.Address, error) {
