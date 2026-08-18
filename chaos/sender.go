@@ -43,21 +43,32 @@ func newSender(ctx context.Context, hexKey string, e *el) (*sender, error) {
 	return &sender{key: key, addr: addr, chainID: id, nonce: n}, nil
 }
 
-// fees derives a fee cap from the target's current base fee. geth's RPC rejects any
-// transaction whose maximum cost exceeds 1 ether, so the cap is clamped to stay well
-// under that -- a diverged branch can carry a base fee high enough to trip it, and the
-// resulting rejection looks like the scenario silently doing nothing.
+// fees picks the highest fee cap the RPC will accept, rather than a multiple of the
+// current base fee.
+//
+// A multiple does not work here, and fails in a way that looks like the scenario doing
+// nothing: the fee is derived from the chain BEFORE the partition, but the partition is
+// what moves the price. Cut off with a third of the validators and the full transaction
+// load still pointed at it, the minority's blocks run full and its base fee climbed from
+// 2 gwei to over 400 in a few blocks -- long past 2x anything, so the transaction sat
+// unmined until the scenario timed out.
+//
+// Signing high costs nothing: under EIP-1559 the sender pays base fee plus tip, and the
+// cap is only a ceiling. The one real limit is the node's own RPC guard, which rejects a
+// transaction whose maximum cost exceeds 1 ether, so stay just under that.
 func (s *sender) fees(ctx context.Context, e *el, gas uint64) (tip, feeCap *big.Int, err error) {
 	h, err := e.c.HeaderByNumber(ctx, nil)
 	if err != nil {
 		return nil, nil, err
 	}
 	tip = big.NewInt(1_000_000_000) // 1 gwei
-	feeCap = new(big.Int).Add(tip, new(big.Int).Mul(h.BaseFee, big.NewInt(2)))
+	feeCap = new(big.Int).Div(big.NewInt(900_000_000_000_000_000), new(big.Int).SetUint64(gas))
 
-	maxSpend := new(big.Int).Div(big.NewInt(500_000_000_000_000_000), new(big.Int).SetUint64(gas)) // 0.5 ether / gas
-	if feeCap.Cmp(maxSpend) > 0 {
-		feeCap = maxSpend
+	// If the chain is already dearer than the cap allows, pay what we can and let the
+	// caller find out from the missing receipt rather than signing something invalid.
+	floor := new(big.Int).Add(tip, new(big.Int).Mul(h.BaseFee, big.NewInt(2)))
+	if feeCap.Cmp(floor) < 0 {
+		feeCap = floor
 	}
 	if feeCap.Cmp(tip) < 0 {
 		tip = new(big.Int).Set(feeCap)
