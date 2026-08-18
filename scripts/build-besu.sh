@@ -78,6 +78,18 @@ if [[ "$SKIP_GRADLE" -eq 0 ]]; then
       --console=plain -Dorg.gradle.java.installations.paths="$JDK25" )
 fi
 
+# The NPE fix is what lets besu accept a forkchoice update at all. Building the wrong
+# branch produces a besu that computes correct state roots, imports every block, and then
+# sits at block 0 forever — which looks like a devnet problem rather than a stale checkout.
+if ! grep -q 'removeTrieNode(location)' \
+     "$BESU/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/mainnet/staterootcommitter/BinaryStateRootCommitter.java" 2>/dev/null; then
+  echo "!! $BESU does not contain the binary-trie deletion fix (matkt/besu#31)." >&2
+  echo "   Expected branch: fix/pbt-fcu-null-trie-node from https://github.com/CPerezz/besu" >&2
+  echo "   Without it besu will import blocks and then refuse every forkchoiceUpdated." >&2
+  echo "   Continuing anyway in 5s; Ctrl-C to stop." >&2
+  sleep 5
+fi
+
 DIST="$BESU/build/install/besu"
 [[ -x "$DIST/bin/besu" ]] || {
   echo "no besu distribution at $DIST (run without --skip-gradle)" >&2; exit 1; }

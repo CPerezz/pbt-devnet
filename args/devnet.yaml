@@ -61,14 +61,62 @@ ethereum_genesis_generator_params:
     PBT: "true"
 
 # Deliberately NO builder. buildoor wires one shared builder to participant 0's execution
-# client, so every payload on the chain would be built by that one node and the others would
-# only ever import — which is precisely the half of each client this harness exists to
+# client, so every payload on the chain would be built by that one node and the others
+# would only ever import — precisely the half of each client this harness exists to
 # compare. Without it each proposer builds locally through its own engine API, so geth and
 # besu both propose and both validate.
 #
+# ORDER IS PART OF THE CONTRACT: published host ports are
+# port_publisher.additional_services.public_port_start + 2*index, so reordering this list
+# silently moves every UI. `make ui` reads the real ports rather than assuming these.
 additional_services:
-  - dora
-  - disruptoor
+  - dora        # 36000  block explorer
+  - spamoor     # 36002  transaction spammer + UI
+  - assertoor   # 36004  test playbooks + UI
+  - forky       # 36006  fork / reorg visualiser
+  - disruptoor  # 36008  partition and latency injection (needs `kurtosis run --privileged`)
+
+port_publisher:
+  additional_services:
+    enabled: true
+    public_port_start: 36000
+
+dora_params:
+  image: ethpandaops/dora:latest
+
+spamoor_params:
+  # Setting `spammers` REPLACES both built-in defaults, so everything wanted is listed.
+  # Scenarios chosen for what the binary tree changed rather than for raw throughput; the
+  # hammer covers the shapes spamoor has no scenario for (zeroization, shared code,
+  # 7702 clear-to-zero).
+  start_chainload: true
+  start_fuzzing: false
+  spammers:
+    - scenario: eoatx
+      name: "EOA baseline"
+      config: {throughput: 40, max_pending: 80, max_wallets: 40, base_fee: 20}
+    - scenario: deploytx
+      name: "Contract deploys (code-zone leaves)"
+      config: {throughput: 5, max_pending: 10, max_wallets: 10, base_fee: 20}
+    - scenario: setcodetx
+      name: "EIP-7702 delegations"
+      config: {throughput: 3, max_pending: 6, max_wallets: 10, base_fee: 20}
+    - scenario: storagespam
+      name: "Storage growth"
+      config: {throughput: 5, max_pending: 10, max_wallets: 10, base_fee: 20}
+
+assertoor_params:
+  run_stability_check: true
+  run_block_proposal_check: true
+  # Custom playbooks cannot be mounted from this package — the launcher only uploads its
+  # own baked-in /tests directory — so ours are referenced by URL once pushed. Until then
+  # use `make assertoor-load`, which POSTs them to the running instance.
+  tests: []
+
+# Chaos sidecar. Left with no partitions or shaping applied: `make split` / `make chaos`
+# drive it at runtime, so the default devnet is quiet.
+disruptoor_params:
+  image: ethpandaops/disruptoor:latest
 
 ### Everything below is ours, not ethereum-package's.
 
@@ -83,7 +131,8 @@ pbt_hammer:
 
 pbt_monitor:
   enabled: true
-  # Corrupt a state root on purpose at startup and require every other client to reject it.
-  # Without it a later "0 findings" is indistinguishable from a broken oracle.
+  # Corrupt a state root on purpose at startup and require every other client to reject
+  # it. Without it a later "0 findings" is indistinguishable from a broken oracle.
   verify_oracle: true
+  poll: "2s"
   probe_every: 8

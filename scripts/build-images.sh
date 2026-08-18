@@ -59,8 +59,8 @@ build_from "geth (EIP-8297)" "pbt-geth:local" "$GETH_SRC" \
 build_from "genesis generator" "pbt-egg:local" "$EGG_SRC" \
   "clone CPerezz/ethereum-genesis-generator at branch pbt, or set PBT_EGG_SRC"
 
-echo "==> pbt-driver:local"
-docker build --platform "$PLATFORM" -t pbt-driver:local "$ROOT/driver"
+echo "==> pbt-monitor:local"
+docker build --platform "$PLATFORM" -t pbt-monitor:local "$ROOT/monitor"
 echo "==> pbt-hammer:local"
 docker build --platform "$PLATFORM" -t pbt-hammer:local "$ROOT/hammer"
 

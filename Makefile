@@ -4,10 +4,11 @@
 # ENCLAVE and ARGS are overridable: `make up ENCLAVE=pbt2 ARGS=args/mine.yaml`.
 
 ENCLAVE ?= pbt
+BLOCKS  ?= 100
 ARGS    ?= args/devnet.yaml
 
 .DEFAULT_GOAL := help
-.PHONY: help up down logs build bin dev genesis check
+.PHONY: help up down logs build besu besu-image bin genesis check
 
 help:
 	@echo "pbt-devnet — a differential test harness for EIP-8297 execution clients"
@@ -26,17 +27,39 @@ up: check build ## build the images and start the devnet, then follow the monito
 	@# disruptoor from additional_services and this flag goes with it.
 	kurtosis run . --enclave $(ENCLAVE) --args-file $(ARGS) --privileged
 	@echo ""
-	@echo "==> following pbtdriver. Ctrl-C detaches; the devnet keeps running."
+	@echo "==> following pbtmonitor. Ctrl-C detaches; the devnet keeps running."
 	@echo "    'make down' stops it. Watch for lines beginning FINDING."
 	@# Ctrl-C is how you leave this, so a non-zero exit here is the normal case.
 	@kurtosis service logs $(ENCLAVE) pbtmonitor -f || true
 
-down: ## stop and remove the devnet (both the enclave and any host-mode run)
+down: ## stop and remove the devnet
 	-@kurtosis enclave rm -f $(ENCLAVE)
-	-@scripts/local-devnet.sh stop 2>/dev/null
 
-logs: ## re-attach to the driver
+logs: ## re-attach to the monitor
 	kurtosis service logs $(ENCLAVE) pbtmonitor -f
+
+ui: ## print every web UI and API url
+	@printf '%-12s %s\n' \
+	  dora       "$$(kurtosis port print $(ENCLAVE) dora http 2>/dev/null)" \
+	  spamoor    "$$(kurtosis port print $(ENCLAVE) spamoor http 2>/dev/null)" \
+	  assertoor  "$$(kurtosis port print $(ENCLAVE) assertoor http 2>/dev/null)" \
+	  forky      "$$(kurtosis port print $(ENCLAVE) forky http 2>/dev/null)" \
+	  disruptoor "$$(kurtosis port print $(ENCLAVE) disruptoor http 2>/dev/null)"
+
+status: ## show every execution client's head and state root
+	@scripts/status.sh $(ENCLAVE)
+
+verify: ## compare every client at the same block number (BLOCKS=100)
+	@scripts/verify.py $(ENCLAVE) --blocks $(BLOCKS) --wait
+
+split: ## partition the network: participants 1,2 | 3  (el and cl)
+	@scripts/chaos.sh $(ENCLAVE) split
+
+heal: ## remove every partition and shaping rule
+	@scripts/chaos.sh $(ENCLAVE) heal
+
+chaos: ## split, hold, heal, and report whether the branches actually diverged
+	@scripts/chaos.sh $(ENCLAVE) cycle
 
 build: ## build the geth image, the genesis generator, the monitor and the hammer
 	scripts/build-images.sh $(ARGS)
@@ -49,18 +72,9 @@ besu-image: ## rebuild besu-pbt:local from an existing build/install/besu
 
 bin: ## build the driver and hammer as host binaries into bin/
 	@mkdir -p bin
-	cd driver  && go build -o ../bin/pbtdriver .
+	cd monitor && go build -o ../bin/pbtmonitor .
 	cd hammer  && go build -o ../bin/pbthammer .
-	@echo "==> bin/pbtdriver bin/pbthammer"
-
-dev: bin ## container-free loop: geth processes on the host, no Docker or Kurtosis
-	@test -x bin/pbtgeth || { \
-	  echo "no geth binary at bin/pbtgeth. Build one from the checkout the args file names:"; \
-	  echo "    cd $$(yq -r '.client_sources.geth.path // \"../go-ethereum\"' $(ARGS) 2>/dev/null || echo ../go-ethereum)"; \
-	  echo "    go build -o $(CURDIR)/bin/pbtgeth ./cmd/geth"; \
-	  exit 1; }
-	scripts/local-devnet.sh start
-	scripts/local-devnet.sh driver
+	@echo "==> bin/pbtmonitor bin/pbthammer"
 
 genesis: ## regenerate genesis/genesis.json and print the root to paste into the args file
 	@mkdir -p bin
