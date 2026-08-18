@@ -47,6 +47,18 @@ type run struct {
 	code      []byte           // the runtime blob deployed on both sides
 	slots     []uint64
 	slotIsSet bool // true when the slots must READ BACK non-zero after the heal
+
+	// at is the height every assertion is evaluated at: the majority's tip recorded
+	// before the heal.
+	//
+	// This has to be a fixed block, not "latest". A reorged-out transaction is still
+	// valid -- same sender, same nonce -- so it returns to the mempool and is re-mined on
+	// the surviving branch within a block or two, recreating the contract at the same
+	// address. Checking at head therefore measures how fast the pool re-broadcast, not
+	// whether the tree dropped the abandoned branch's writes. At `at`, the doomed branch
+	// was never canonical, so anything it wrote must be absent no matter what happens
+	// afterwards.
+	at *big.Int
 }
 
 var scenarios = map[string]*scenario{
@@ -173,7 +185,7 @@ var scenarios = map[string]*scenario{
 			var bad []string
 			for _, e := range r.all() {
 				for _, a := range r.doomed {
-					b, err := e.c.BalanceAt(ctx, a, nil)
+					b, err := e.c.BalanceAt(ctx, a, r.at)
 					if err != nil {
 						return "", err
 					}
@@ -182,7 +194,7 @@ var scenarios = map[string]*scenario{
 					}
 				}
 			}
-			return finding(bad, fmt.Sprintf("%d reorged-out accounts are empty on every client", len(r.doomed)))
+			return finding(bad, fmt.Sprintf("%d reorged-out accounts are empty on every client", len(r.doomed)), len(r.all()))
 		},
 	},
 
@@ -296,7 +308,7 @@ func (r *run) expectNoCode(ctx context.Context, addrs []common.Address) (string,
 	var bad []string
 	for _, e := range r.all() {
 		for _, a := range addrs {
-			code, err := e.c.CodeAt(ctx, a, nil)
+			code, err := e.c.CodeAt(ctx, a, r.at)
 			if err != nil {
 				return "", err
 			}
@@ -305,13 +317,13 @@ func (r *run) expectNoCode(ctx context.Context, addrs []common.Address) (string,
 			}
 		}
 	}
-	return finding(bad, fmt.Sprintf("%d reorged-out accounts have no code on any client", len(addrs)))
+	return finding(bad, fmt.Sprintf("%d reorged-out accounts have no code on any client", len(addrs)), len(r.all()))
 }
 
 func (r *run) expectCode(ctx context.Context, addr common.Address, want []byte) (string, error) {
 	var bad []string
 	for _, e := range r.all() {
-		code, err := e.c.CodeAt(ctx, addr, nil)
+		code, err := e.c.CodeAt(ctx, addr, r.at)
 		if err != nil {
 			return "", err
 		}
@@ -321,7 +333,7 @@ func (r *run) expectCode(ctx context.Context, addr common.Address, want []byte) 
 		}
 	}
 	return finding(bad, fmt.Sprintf("the shared %d-byte blob is still readable at %s on every client",
-		len(want), addr.Hex()))
+		len(want), addr.Hex()), len(r.all()))
 }
 
 // expectSlots checks each slot reads back as the seeded value (wantSet) or as zero.
@@ -329,7 +341,7 @@ func (r *run) expectSlots(ctx context.Context, addr common.Address, slots []uint
 	var bad []string
 	for _, e := range r.all() {
 		for _, s := range slots {
-			got, err := e.c.StorageAt(ctx, addr, txkit.SlotKey(s), nil)
+			got, err := e.c.StorageAt(ctx, addr, txkit.SlotKey(s), r.at)
 			if err != nil {
 				return "", err
 			}
@@ -347,15 +359,22 @@ func (r *run) expectSlots(ctx context.Context, addr common.Address, slots []uint
 	if wantSet {
 		what = "are back to their pre-split values"
 	}
-	return finding(bad, fmt.Sprintf("slots %v %s on every client", slots, what))
+	return finding(bad, fmt.Sprintf("slots %v %s on every client", slots, what), len(r.all()))
 }
 
-// finding turns a list of disagreements into either a passing note or an error. An error
-// here is the interesting outcome: it means two clients disagree about state after a
-// reorg, which is the whole reason this devnet exists.
-func finding(bad []string, ok string) (string, error) {
+// finding turns a list of wrong answers into either a passing note or an error.
+//
+// Wrong is not the same as inconsistent. If every client gives the same wrong answer the
+// tree is being rolled back identically but not as expected -- a harness or specification
+// question. If they differ, two implementations disagree, which is the reason this devnet
+// exists. Say which.
+func finding(bad []string, ok string, clients int) (string, error) {
 	if len(bad) == 0 {
 		return ok, nil
 	}
-	return "", fmt.Errorf("%s", strings.Join(bad, "; "))
+	kind := "every client gives the same wrong answer"
+	if len(bad) < clients {
+		kind = "clients DISAGREE"
+	}
+	return "", fmt.Errorf("%s: %s", kind, strings.Join(bad, "; "))
 }
