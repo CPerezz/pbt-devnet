@@ -103,11 +103,14 @@ func (d *disruptoor) partition(name string, a, b []int) error {
 	return err
 }
 
-// delay shapes ALL egress from the named nodes, including the engine API. That is the
-// point rather than a side effect: a proposer whose CL<->EL exchange is late misses its
-// slot, so the block lands late enough for the next proposer to build over its parent.
+// delay shapes ALL egress from the named nodes, including the engine API: disruptoor v0
+// rejects every scope except ["include_control"], so p2p cannot be slowed on its own.
 //
-// scope has to be exactly ["include_control"]; disruptoor v0 rejects any other value.
+// That makes it useless for producing reorgs -- a proposer whose engine API is slowed
+// cannot assemble a payload in time and skips the slot outright, and a missed slot
+// reorgs nothing. It is kept because it is the one disruption that always recovers:
+// unlike a partition it never severs a connection, so clearing it restores the network
+// immediately.
 func (d *disruptoor) delay(name string, idx []int, dur string) error {
 	ids := make([]any, len(idx))
 	for i, n := range idx {

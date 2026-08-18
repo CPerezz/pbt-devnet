@@ -45,7 +45,7 @@ type config struct {
 	latencyEnabled bool
 	latencyMin     uint64
 	latencyMax     uint64
-	latencyDelay   string
+	isolateFor     time.Duration
 	defaultDepth   uint64
 }
 
@@ -93,7 +93,7 @@ func main() {
 	latency := flag.Bool("latency", true, "run the periodic latency forks")
 	latMin := flag.Uint64("latency-min-blocks", 15, "minimum blocks between latency forks")
 	latMax := flag.Uint64("latency-max-blocks", 30, "maximum blocks between latency forks")
-	latDelay := flag.String("latency-delay", "3s", "egress delay applied to the target proposer")
+	isolateFor := flag.Duration("isolate-for", 0, "how long to isolate the proposer (default: one slot)")
 	depth := flag.Uint64("depth", 10, "default scenario depth in blocks")
 	flag.Parse()
 
@@ -107,6 +107,13 @@ func main() {
 	}
 	if *latMin > *latMax {
 		fatal(log, "--latency-min-blocks (%d) is above --latency-max-blocks (%d)", *latMin, *latMax)
+	}
+
+	// Two slots by default. The isolation starts once the chain reaches the slot BEFORE
+	// the duty, so it has to span the rest of that slot plus the whole proposal slot;
+	// one slot would lift it while the proposer was still publishing.
+	if *isolateFor == 0 {
+		*isolateFor = 2 * *slotSeconds
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -150,7 +157,7 @@ func main() {
 			latencyEnabled: *latency,
 			latencyMin:     *latMin,
 			latencyMax:     *latMax,
-			latencyDelay:   *latDelay,
+			isolateFor:     *isolateFor,
 			defaultDepth:   *depth,
 		},
 	}
