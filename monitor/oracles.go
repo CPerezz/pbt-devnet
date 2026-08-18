@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -99,7 +98,7 @@ func (d *Driver) assertNoBadBlocks(ctx context.Context) error {
 		if err := n.RPC(ctx, "debug_getBadBlocks", &bad); err != nil {
 			// Loud, not Debug: an oracle that has quietly stopped running is how a
 			// harness ends up reporting a clean run it never actually checked.
-			slog.Warn("ORACLE DEGRADED: getBadBlocks unavailable", "node", n.Name, "err", err)
+			d.degrade(n.Name, "debug_getBadBlocks", err)
 			continue
 		}
 		var fresh []badBlock
@@ -130,7 +129,7 @@ func (d *Driver) baselineBadBlocks(ctx context.Context) {
 		d.knownBad[i] = map[common.Hash]bool{}
 		var bad []badBlock
 		if err := n.RPC(ctx, "debug_getBadBlocks", &bad); err != nil {
-			slog.Warn("ORACLE DEGRADED: cannot baseline bad blocks", "node", n.Name, "err", err)
+			d.degrade(n.Name, "debug_getBadBlocks (baseline)", err)
 			continue
 		}
 		for _, bb := range bad {
@@ -161,7 +160,7 @@ func (d *Driver) probe(ctx context.Context) error {
 		ok := true
 		for i, n := range d.nodes {
 			if err := n.RPC(ctx, "eth_getProof", &proofs[i], target.addr, target.slots, "latest"); err != nil {
-				slog.Warn("ORACLE DEGRADED: getProof unavailable", "node", n.Name, "err", err)
+				d.degrade(n.Name, "eth_getProof", err)
 				ok = false
 				break
 			}
@@ -244,6 +243,34 @@ func (d *Driver) proofTargets(ctx context.Context) []proofTarget {
 	return targets
 }
 
+// awaitFirstBlock waits for the consensus clients to produce block 1. The self-test
+// needs a real parent to build on; genesis has no state history behind it.
+func (d *Driver) awaitFirstBlock(ctx context.Context) error {
+	deadline := time.Now().Add(5 * time.Minute)
+	logged := false
+	for {
+		blk, err := getBlock(ctx, d.nodes[0], "latest")
+		if err == nil && blk.Number > 0 {
+			d.head = blk.Hash
+			d.headNum = uint64(blk.Number)
+			d.headTime = uint64(blk.Timestamp)
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("no block was produced within 5m; are the consensus clients running?")
+		}
+		if !logged {
+			slog.Info("waiting for the consensus clients to produce a first block")
+			logged = true
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
 const zeroSlot = "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 // selfTest proves the harness can actually detect a divergence, by manufacturing
@@ -256,12 +283,11 @@ const zeroSlot = "0x000000000000000000000000000000000000000000000000000000000000
 func (d *Driver) selfTest(ctx context.Context) error {
 	slog.Info("self-test: manufacturing a divergence to prove the oracle detects it")
 
-	// Advance one real block first: debug_executionWitness needs the disputed block
-	// to have a parent, which genesis does not.
-	if d.headNum == 0 {
-		if err := d.advance(ctx, 1, d.nodes[0], d.nodes[1]); err != nil {
-			return fmt.Errorf("self-test could not produce a first block: %w", err)
-		}
+	// Wait for the consensus clients to produce a first block. Corrupting genesis
+	// would prove nothing: the payload needs a real parent whose state the importers
+	// already hold.
+	if err := d.awaitFirstBlock(ctx); err != nil {
+		return err
 	}
 
 	proposer := d.nodes[0]
@@ -324,82 +350,8 @@ func (d *Driver) selfTest(ctx context.Context) error {
 	return nil
 }
 
-// injectReorg is the highest-value chaos: two payloads on one parent, the loser
-// made canonical first and then abandoned. Because the binary tree reports
-// Recoverable()==false, rolling back cannot use the state history — the node has to
-// re-execute forward from the closest live ancestor, which is a path no EEST
-// fixture can express.
-func (d *Driver) injectReorg(ctx context.Context, slot uint64, proposer, importer *Node) error {
-	forkParent := d.head
-	forkParentNum := d.headNum
-	forkParentTime := d.headTime
-	slog.Info("reorg: forking", "parent", forkParent.TerminalString(), "depth", d.cfg.reorgDepth)
-
-	// Branch 1 ("loser"): built by the proposer, distinguished by fee recipient.
-	loserHead := forkParent
-	loserTime := forkParentTime
-	for i := 0; i < d.cfg.reorgDepth; i++ {
-		env, err := d.buildPayload(ctx, slot*1000+uint64(i), proposer, loserHead,
-			loserTime+uint64(d.cfg.slotTime.Seconds()), common.HexToAddress("0xdead"))
-		if err != nil {
-			return fmt.Errorf("loser branch block %d: %w", i, err)
-		}
-		data := env.ExecutionPayload
-		statuses, err := d.newPayloadAll(ctx, data)
-		if err != nil {
-			return err
-		}
-		for j, st := range statuses {
-			if st.Status != engine.VALID {
-				return fmt.Errorf("%s rejected loser block %d: %s (%s)",
-					d.nodes[j].Name, data.Number, st.Status, deref(st.ValidationError))
-			}
-		}
-		if err := d.setHeadAll(ctx, data.BlockHash); err != nil {
-			return err
-		}
-		loserHead, loserTime = data.BlockHash, data.Timestamp
-	}
-
-	// Branch 2 ("winner"): built by the *other* node, from the same fork parent, so
-	// both nodes must reorg off a branch they had already made canonical.
-	d.head, d.headNum, d.headTime = forkParent, forkParentNum, forkParentTime
-	winnerHead := forkParent
-	winnerTime := forkParentTime
-	for i := 0; i <= d.cfg.reorgDepth; i++ {
-		env, err := d.buildPayload(ctx, slot*2000+uint64(i), importer, winnerHead,
-			winnerTime+uint64(d.cfg.slotTime.Seconds())+1, common.HexToAddress("0xbeef"))
-		if err != nil {
-			return fmt.Errorf("winner branch block %d: %w", i, err)
-		}
-		data := env.ExecutionPayload
-		statuses, err := d.newPayloadAll(ctx, data)
-		if err != nil {
-			return err
-		}
-		for j, st := range statuses {
-			if st.Status != engine.VALID {
-				return fmt.Errorf("%s rejected winner block %d after reorg: %s (%s)",
-					d.nodes[j].Name, data.Number, st.Status, deref(st.ValidationError))
-			}
-		}
-		if err := d.setHeadAll(ctx, data.BlockHash); err != nil {
-			return err
-		}
-		winnerHead, winnerTime = data.BlockHash, data.Timestamp
-		d.head, d.headNum, d.headTime = data.BlockHash, data.Number, data.Timestamp
-	}
-
-	if err := d.assertHeadsAgree(ctx, winnerHead, d.headNum); err != nil {
-		return fmt.Errorf("after reorg: %w", err)
-	}
-	slog.Info("reorg: all nodes converged", "head", winnerHead.TerminalString(), "number", d.headNum)
-	return nil
-}
-
-// captureDivergence grabs everything that helps debug a finding, before the nodes
-// are torn down: bad blocks with RLP, both heads, and an execution witness per node
-// for the disputed block.
+// captureDivergence grabs everything that helps debug a finding, before the nodes are
+// torn down: bad blocks with RLP, and every client's head.
 func (d *Driver) captureDivergence(ctx context.Context, disputed common.Hash) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -421,42 +373,6 @@ func (d *Driver) captureDivergence(ctx context.Context, disputed common.Hash) er
 		}
 	}
 
-	// Re-execute the DISPUTED block on every node and compare what state each had to
-	// resolve. Compared as sorted sets, because the witness encoding is not known to
-	// be canonical across nodes. Headers are included: a header-witness difference is
-	// as much a divergence as a state one.
-	sets := make([][]string, len(d.nodes))
-	for i, n := range d.nodes {
-		// headers arrive as full header OBJECTS, not hex strings — decoding them as
-		// hexutil.Bytes made this oracle fail on every call, which went unnoticed
-		// because it only runs on a finding.
-		var w struct {
-			Headers []json.RawMessage `json:"headers"`
-			Codes   []hexutil.Bytes   `json:"codes"`
-			State   []hexutil.Bytes   `json:"state"`
-			Keys    []hexutil.Bytes   `json:"keys"`
-		}
-		if err := n.RPC(ctx, "debug_executionWitness", &w, disputed); err != nil {
-			slog.Warn("ORACLE DEGRADED: executionWitness unavailable", "node", n.Name, "block", disputed, "err", err)
-			continue
-		}
-		blob, _ := json.MarshalIndent(w, "", "  ")
-		d.saveArtifact(fmt.Sprintf("witness-%s.json", n.Name), blob)
-		sets[i] = witnessFingerprint(w.Headers, w.State, w.Codes, w.Keys)
-	}
-	for i := 1; i < len(d.nodes); i++ {
-		if sets[0] == nil || sets[i] == nil {
-			continue // a node we could not ask; already logged as degraded
-		}
-		onlyFirst, onlyOther := setDiff(sets[0], sets[i]), setDiff(sets[i], sets[0])
-		if len(onlyFirst) > 0 || len(onlyOther) > 0 {
-			d.findings++
-			slog.Error("FINDING: execution witnesses differ for the disputed block",
-				"block", disputed,
-				"only_in_"+d.nodes[0].Name, len(onlyFirst), "sample", firstN(onlyFirst, 3),
-				"only_in_"+d.nodes[i].Name, len(onlyOther), "sample_other", firstN(onlyOther, 3))
-		}
-	}
 	return nil
 }
 
@@ -489,7 +405,6 @@ func (d *Driver) saveArtifact(name string, blob []byte) {
 	slog.Info("saved artifact", "path", path, "bytes", len(blob))
 }
 
-
 func jsonEqual(a, b json.RawMessage) bool {
 	var av, bv any
 	if err := json.Unmarshal(a, &av); err != nil {
@@ -501,42 +416,4 @@ func jsonEqual(a, b json.RawMessage) bool {
 	an, _ := json.Marshal(av)
 	bn, _ := json.Marshal(bv)
 	return string(an) == string(bn)
-}
-
-// witnessFingerprint flattens a witness into a sorted set of strings. Sorted rather
-// than compared byte-for-byte because the witness encoding is not known to be
-// canonical across nodes; what matters is which items are present.
-func witnessFingerprint(headers []json.RawMessage, groups ...[]hexutil.Bytes) []string {
-	var out []string
-	for _, h := range headers {
-		out = append(out, "header:"+string(h))
-	}
-	for _, g := range groups {
-		for _, item := range g {
-			out = append(out, item.String())
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-func setDiff(a, b []string) []string {
-	inB := make(map[string]struct{}, len(b))
-	for _, s := range b {
-		inB[s] = struct{}{}
-	}
-	var out []string
-	for _, s := range a {
-		if _, ok := inB[s]; !ok {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-func firstN(s []string, n int) []string {
-	if len(s) < n {
-		return s
-	}
-	return s[:n]
 }

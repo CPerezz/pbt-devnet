@@ -13,8 +13,8 @@
 //	zeroize     write slots, then store zero     -> deletion, because zero IS absence
 //	callread    CALL a contract that SLOADs      -> the read path, present and absent leaves
 //	extcode     EXTCODESIZE / EXTCODECOPY over
-//	            a large contract                 -> code-zone reads, and the witness
-//	                                               amplification TODO.md flags
+//	            a large contract                 -> code-zone reads of a blob spread
+//	                                               across many chunk leaves
 //	legacy      type 0 envelope                  -> the pre-2930 path
 //	accesslist  type 1, populated list           -> repriced access-list accounting
 //	revert      write slots, then REVERT         -> intra-transaction rollback of tree writes
@@ -682,9 +682,9 @@ func (w *world) shapeFor(ctx context.Context, clients []*ethclient.Client, kind 
 		sh.to, sh.data = &to, slotKey(key).Bytes()
 
 	case "extcode":
-		// Reading only the SIZE of a large contract still drags its whole code into the
-		// execution witness, because GetCodeSize adds the full blob. That asymmetry —
-		// integers out, megabytes in — is what this shape is for.
+		// Reading only the SIZE of a large contract still makes the client resolve the
+		// whole blob, which on this tree means touching every code-zone chunk leaf the
+		// contract occupies. Cheap in gas, wide in state access — that is the shape.
 		sh.data = extcodeInitCode(w.bigcode, len(w.code), 8)
 
 	case "legacy":
@@ -927,8 +927,8 @@ func writerRuntime() []byte {
 }
 
 // extcodeInitCode reads the size of `target` `reps` times and then copies its whole code
-// into memory, returning nothing. Straight-line, and cheap in gas precisely because
-// EXTCODESIZE is: the cost is paid in witness bytes instead.
+// into memory, returning nothing. Straight-line, and deliberately cheap in gas relative
+// to the number of code-zone leaves it makes the client touch.
 func extcodeInitCode(target common.Address, codeLen, reps int) []byte {
 	var out []byte
 	for i := 0; i < reps; i++ {

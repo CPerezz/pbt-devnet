@@ -19,7 +19,9 @@ On top of the network this adds two services of our own:
 
   pbthammer  transaction load shaped at what the tree changed, not at throughput
   pbtmonitor watches every execution client for state-root divergence, and proves its own
-             oracle by feeding a corrupted payload through the engine API
+             oracle by feeding a corrupted payload through the engine API. It observes
+             only: the consensus clients drive the chain, and a second thing driving
+             forkchoice manufactures the very forks it would then report.
 
 Both are optional and independently switchable, so `kurtosis run` with load disabled is a
 quiet baseline.
@@ -51,8 +53,9 @@ DEFAULT_HAMMER = {
 
 DEFAULT_MONITOR = {
     "enabled": True,
-    "image": "pbt-driver:local",
+    "image": "pbt-monitor:local",
     "verify_oracle": True,
+    "poll": "2s",
     "probe_every": 8,
 }
 
@@ -113,7 +116,7 @@ def _launch_monitor(plan, cfg, els):
         # the plain RPC to follow heads.
         cmd += ["--el", "{0}=http://{1}:{2},{3}".format(
             el.service_name, el.ip_addr, el.engine_rpc_port_num, el.rpc_http_url)]
-    cmd += ["--jwt", JWT_PATH, "--probe-every", str(cfg["probe_every"])]
+    cmd += ["--jwt", JWT_PATH, "--poll", cfg["poll"], "--probe-every", str(cfg["probe_every"])]
     if not cfg["verify_oracle"]:
         cmd += ["--verify-oracle=false"]
 
@@ -132,14 +135,20 @@ def _launch_hammer(plan, cfg, els, prefunded):
     cmd = []
     for el in els:
         cmd += ["--rpc", el.rpc_http_url]
-    # Send from the package's own prefunded accounts. Passing keys in beats pre-funding our
-    # own addresses through the genesis generator: these are guaranteed funded on whatever
-    # network the package just built, whatever its chain id or alloc.
+    # Send from the package's own prefunded accounts, taken from the END of the list.
+    # Passing keys in beats pre-funding our own addresses through the genesis generator:
+    # these are funded on whatever network the package just built, whatever its chain id.
+    #
+    # The end, not the start, because spamoor's chainload spends the low-index accounts
+    # and assertoor takes another. Sharing one account means both senders pick the same
+    # nonce and every send after the first is rejected as "replacement transaction
+    # underpriced" — which is how the hammer failed to deploy its startup targets and
+    # exited before sending anything.
     n = cfg["senders"]
     if n > len(prefunded):
         fail("asked for {0} senders but the network only prefunds {1} accounts".format(
             n, len(prefunded)))
-    for acct in prefunded[:n]:
+    for acct in prefunded[len(prefunded) - n:]:
         cmd += ["--key", acct.private_key]
     cmd += [
         "--interval", cfg["interval"],

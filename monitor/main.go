@@ -1,20 +1,23 @@
-// Command pbtdriver stands in for a consensus client and, in doing so, acts as a
-// differential test harness for N execution clients running the EIP-8297 binary tree.
+// Command pbtmonitor watches N execution clients running the EIP-8297 binary tree and
+// reports any disagreement about state.
 //
-// One node builds a payload and EVERY node is asked to import it.
-// engine_newPayloadV5 re-executes the block and compares the importer's own computed
-// state root against the root the payload commits to, so a VALID from a node that did
-// not build the block IS the state-root agreement assertion — delivered every block,
-// with no polling and no root-scraping. Rotating the proposer means every node's
-// block-building path is checked against every other node's validation path, which is
-// where a same-binary devnet can actually diverge.
+// Real consensus clients drive the chain; this process only observes it. Every tick it
+// asks each client for the same block number and requires identical hashes, which on a
+// chain whose block hash commits to the state root is a state-root assertion. Bad-block
+// sets and eth_getProof samples are compared on a slower cadence.
+//
+// The one thing it does actively is prove its own oracle at startup: it builds a payload,
+// corrupts a single byte of the state root, and requires every other client to reject it.
+// Without that, "0 findings" from a broken oracle is indistinguishable from "0 findings"
+// from a healthy chain. Neither half of that moves forkchoice or persists a block, so it
+// is safe alongside real consensus clients.
 //
 // Clients are given as repeated --el name=engineURL,rpcURL; at least two are required,
 // since one node has nobody to disagree with.
 //
-// Engine versions are Amsterdam's: forkchoiceUpdatedV4 / getPayloadV6 /
-// newPayloadV5. getPayloadV5 is gated to Osaka+BPO and will refuse an Amsterdam
-// payload, so V6 is not optional here.
+// Engine versions are Amsterdam's: forkchoiceUpdatedV4 / getPayloadV6 / newPayloadV5.
+// getPayloadV5 is gated to Osaka+BPO and will refuse an Amsterdam payload, so V6 is not
+// optional here.
 package main
 
 import (
@@ -40,14 +43,18 @@ import (
 // a genesis state root would mean the node silently came up on the wrong commitment.
 var emptyMPTRoot = common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
 
+// stalledTicks is how many consecutive polls may show the same head before saying so.
+const stalledTicks = 10
+
+// buildWait is how long the self-test lets a client pack transactions before asking
+// for the payload.
+const buildWait = 2 * time.Second
+
 type config struct {
-	slotTime     time.Duration
-	slots        int
+	pollInterval time.Duration
 	feeRecipient common.Address
-	reorgEvery   int
-	reorgDepth   int
 	probeEvery   int
-	// verifyOracle runs the self-test before the slot loop. On by default: "0 findings"
+	// verifyOracle runs the self-test before the follow loop. On by default: "0 findings"
 	// from an oracle nobody proved is indistinguishable from "0 findings" from a broken
 	// one, so every run earns the right to be believed before it starts.
 	verifyOracle bool
@@ -80,14 +87,11 @@ func main() {
 		els     elFlag
 		jwtPath = flag.String("jwt", "/jwt/jwtsecret", "path to the engine API jwt secret")
 
-		slotTime   = flag.Duration("slot-time", 3*time.Second, "time between blocks")
-		slots      = flag.Int("slots", 0, "stop after N slots (0 = run forever)")
-		reorgEvery = flag.Int("reorg-every", 0, "inject a competing-payload reorg every N slots (0 = never)")
-		reorgDepth = flag.Int("reorg-depth", 1, "how many blocks the losing branch gets")
-		probeEvery = flag.Int("probe-every", 16, "run the deeper cross-node probes every N slots")
-		feeRecip   = flag.String("fee-recipient", "0x0000000000000000000000000000000000000001", "suggested fee recipient")
+		poll       = flag.Duration("poll", 2*time.Second, "how often to compare the clients' heads")
+		probeEvery = flag.Int("probe-every", 16, "run the deeper cross-node probes every N polls")
+		feeRecip   = flag.String("fee-recipient", "0x0000000000000000000000000000000000000001", "suggested fee recipient for the self-test payload")
 		verbose    = flag.Bool("v", false, "debug logging")
-		verifyOrac = flag.Bool("verify-oracle", true, "prove the oracle detects a corrupted state root before starting the slot loop")
+		verifyOrac = flag.Bool("verify-oracle", true, "prove the oracle detects a corrupted state root before following the chain")
 		selfTest   = flag.Bool("self-test", false, "run only that proof, then exit")
 		expRoot    = flag.String("expected-genesis-root", "", "assert every node's genesis state root equals this (proves the binary-tree commitment)")
 	)
@@ -116,11 +120,8 @@ func main() {
 	}
 
 	cfg := config{
-		slotTime:     *slotTime,
-		slots:        *slots,
+		pollInterval: *poll,
 		feeRecipient: common.HexToAddress(*feeRecip),
-		reorgEvery:   *reorgEvery,
-		reorgDepth:   *reorgDepth,
 		probeEvery:   *probeEvery,
 		verifyOracle: *verifyOrac,
 	}
@@ -156,7 +157,7 @@ func fatal(format string, args ...any) {
 	os.Exit(1)
 }
 
-// Driver owns the execution clients and the canonical head they are all driven to.
+// Driver owns the execution clients and the highest block they have all agreed on.
 type Driver struct {
 	nodes []*Node
 	cfg   config
@@ -167,16 +168,34 @@ type Driver struct {
 	finalized common.Hash
 
 	findings int
-	// transient counts consecutive unreachable-node slots, so an outage that never
-	// ends is still eventually reported rather than retried forever.
-	transient int
-	// disputed is the block the driver last tried to make canonical. On failure this
-	// is the block to collect evidence about; d.head is still its parent, because
-	// head only advances once both nodes have accepted.
+	// stalled counts consecutive polls that saw no new block, so a chain that stops
+	// producing is reported once rather than every tick.
+	stalled int
+	// disputed is the block the clients last disagreed about, and the one evidence is
+	// collected for.
 	disputed common.Hash
 	// knownBad is the per-node set of blocks already rejected before this run started,
 	// so oracle 2 reports new rejections rather than history.
 	knownBad []map[common.Hash]bool
+	// degraded remembers which node/method pairs have already been reported as
+	// unavailable. A client that does not implement an optional RPC does not
+	// implement it on every tick either, and burying real findings under thousands of
+	// identical warnings is its own kind of broken oracle.
+	degraded map[string]bool
+}
+
+// degrade reports an unavailable oracle once per node and method.
+func (d *Driver) degrade(node, method string, err error) {
+	if d.degraded == nil {
+		d.degraded = map[string]bool{}
+	}
+	key := node + "/" + method
+	if d.degraded[key] {
+		return
+	}
+	d.degraded[key] = true
+	slog.Warn("ORACLE DEGRADED", "node", node, "method", method, "err", err,
+		"note", "reported once; this oracle is skipped for the rest of the run")
 }
 
 func (d *Driver) Run(ctx context.Context) error {
@@ -188,54 +207,123 @@ func (d *Driver) Run(ctx context.Context) error {
 			return err
 		}
 	}
+	return d.follow(ctx)
+}
 
-	ticker := time.NewTicker(d.cfg.slotTime)
+// follow watches the chain the consensus clients are driving. It never proposes and
+// never sets a head: the only engine API calls this process makes after startup are
+// the self-test's, and those neither move forkchoice nor persist a block.
+//
+// That restraint is the point. An earlier version drove the chain itself while real
+// consensus clients drove it too, which manufactured competing blocks at every height,
+// wedged one execution client, and then reported the resulting fork as a finding
+// against the clients rather than against itself.
+func (d *Driver) follow(ctx context.Context) error {
+	ticker := time.NewTicker(d.cfg.pollInterval)
 	defer ticker.Stop()
 
-	for slot := 1; d.cfg.slots == 0 || slot <= d.cfg.slots; slot++ {
+	slog.Info("following the chain", "nodes", len(d.nodes), "poll", d.cfg.pollInterval)
+
+	ticks := 0
+	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("stopping", "slots_done", slot-1, "findings", d.findings)
-			return nil
+			return d.summarise()
 		case <-ticker.C:
 		}
+		ticks++
 
-		// Rotate the proposer so every node's builder output is validated by every
-		// other node's importer. With N clients each block is checked N-1 times.
-		proposer := d.nodes[slot%len(d.nodes)]
-		importer := d.nodes[(slot+1)%len(d.nodes)]
-
-		if err := d.advance(ctx, uint64(slot), proposer, importer); err != nil {
-			if halt := d.handleErr(ctx, slot, "advance", err); halt != nil {
-				return halt
-			}
-			continue
-		}
-
-		if d.cfg.reorgEvery > 0 && slot%d.cfg.reorgEvery == 0 {
-			if err := d.injectReorg(ctx, uint64(slot), proposer, importer); err != nil {
-				if halt := d.handleErr(ctx, slot, "reorg", err); halt != nil {
-					return halt
-				}
-				continue
+		if err := d.compareHeads(ctx); err != nil {
+			if IsTransportError(err) {
+				slog.Warn("node unreachable", "err", err)
+			} else {
+				d.finding("head comparison: %v", err)
 			}
 		}
-
-		if d.cfg.probeEvery > 0 && slot%d.cfg.probeEvery == 0 {
+		if d.cfg.probeEvery > 0 && ticks%d.cfg.probeEvery == 0 {
+			if err := d.assertNoBadBlocks(ctx); err != nil {
+				d.finding("%v", err)
+			}
 			if err := d.probe(ctx); err != nil {
-				// Probes are advisory: they compare state the primary oracle has
-				// already accepted, so a probe failure is recorded but does not stop
-				// the run. Transport noise is not recorded at all.
 				if IsTransportError(err) {
-					slog.Warn("probe unreachable", "slot", slot, "err", err)
+					slog.Warn("probe unreachable", "err", err)
 				} else {
-					d.findings++
-					slog.Error("FINDING: " + fmt.Sprintf("slot %d probe: %v", slot, err))
+					d.finding("probe: %v", err)
 				}
 			}
 		}
 	}
-	slog.Info("done", "findings", d.findings)
+}
+
+// compareHeads asks every client for the same block number and requires identical
+// hashes. The number is the lowest head across the clients, so a node that is merely
+// one block behind is compared where it has actually reached rather than reported as
+// a divergence.
+func (d *Driver) compareHeads(ctx context.Context) error {
+	heads := make([]*rpcBlock, len(d.nodes))
+	lowest := ^uint64(0)
+	for i, n := range d.nodes {
+		blk, err := getBlock(ctx, n, "latest")
+		if err != nil {
+			return err
+		}
+		heads[i] = blk
+		if uint64(blk.Number) < lowest {
+			lowest = uint64(blk.Number)
+		}
+	}
+	if lowest == 0 {
+		return nil // nothing has been built yet
+	}
+
+	tag := hexutil.Uint64(lowest).String()
+	at := make([]*rpcBlock, len(d.nodes))
+	for i, n := range d.nodes {
+		blk, err := getBlock(ctx, n, tag)
+		if err != nil {
+			return err
+		}
+		at[i] = blk
+	}
+	for i := 1; i < len(at); i++ {
+		if at[i].Hash != at[0].Hash {
+			d.disputed = at[0].Hash
+			d.finding("clients disagree at block %d: %s=%s (root %s) %s=%s (root %s)",
+				lowest,
+				d.nodes[0].Name, at[0].Hash, at[0].StateRoot,
+				d.nodes[i].Name, at[i].Hash, at[i].StateRoot)
+			if err := d.captureDivergence(ctx, at[0].Hash); err != nil {
+				slog.Warn("evidence capture failed", "err", err)
+			}
+			return nil
+		}
+	}
+
+	if lowest > d.headNum {
+		d.headNum = lowest
+		d.head = at[0].Hash
+		slog.Info("chain", "number", lowest, "hash", at[0].Hash.TerminalString(),
+			"state_root", at[0].StateRoot.TerminalString(), "clients", len(d.nodes))
+	} else if lowest == d.headNum {
+		d.stalled++
+		if d.stalled == stalledTicks {
+			slog.Warn("chain has not advanced", "number", lowest, "ticks", d.stalled)
+		}
+		return nil
+	}
+	d.stalled = 0
+	return nil
+}
+
+// finding records a divergence and keeps going. Halting on the first one ends a soak
+// at the least convenient moment; the count is what the exit status reports.
+func (d *Driver) finding(format string, args ...any) {
+	d.findings++
+	slog.Error("FINDING: " + fmt.Sprintf(format, args...))
+}
+
+func (d *Driver) summarise() error {
+	slog.Info("stopping", "highest_block", d.headNum, "findings", d.findings)
 	if d.findings > 0 {
 		return fmt.Errorf("%d findings", d.findings)
 	}
@@ -347,64 +435,7 @@ func (d *Driver) preflight(ctx context.Context) error {
 		"genesis", genesis[0].Hash,
 		"genesis_state_root", genesis[0].StateRoot,
 		"head", d.head,
-		"head_number", d.headNum,
-		"slot_time", d.cfg.slotTime)
-	return nil
-}
-
-// advance builds one block on the proposer and requires both nodes to accept it.
-func (d *Driver) advance(ctx context.Context, slot uint64, proposer, importer *Node) error {
-	payload, err := d.buildPayload(ctx, slot, proposer, d.head, d.headTime+uint64(d.cfg.slotTime.Seconds()), d.cfg.feeRecipient)
-	if err != nil {
-		return err
-	}
-	data := payload.ExecutionPayload
-	d.disputed = data.BlockHash
-
-	// The oracle. Both nodes re-execute; the importer independently recomputes the
-	// binary-tree root and compares it to data.StateRoot.
-	statuses, err := d.newPayloadAll(ctx, data)
-	if err != nil {
-		return err
-	}
-	for i, st := range statuses {
-		if st.Status != engine.VALID {
-			return fmt.Errorf("%s rejected block %d (%s): status=%s latestValidHash=%v validationError=%s",
-				d.nodes[i].Name, data.Number, data.BlockHash, st.Status, st.LatestValidHash, deref(st.ValidationError))
-		}
-	}
-
-	if err := d.setHeadAll(ctx, data.BlockHash); err != nil {
-		return err
-	}
-
-	// Heads must agree. Because the block hash commits to the state root, equal
-	// hashes at equal height means equal roots.
-	if err := d.assertHeadsAgree(ctx, data.BlockHash, data.Number); err != nil {
-		return err
-	}
-
-	d.head = data.BlockHash
-	d.headNum = data.Number
-	d.headTime = data.Timestamp
-	d.transient = 0 // both nodes answered and agreed; any past outage is over
-	// Finality is ours to declare; keep it a few blocks back so reorgs stay legal.
-	if data.Number > 8 {
-		if blk, err := getBlock(ctx, proposer, hexutil.Uint64(data.Number-8).String()); err == nil {
-			d.finalized = blk.Hash
-		}
-	}
-
-	slog.Info("block",
-		"slot", slot,
-		"number", data.Number,
-		"proposer", proposer.Name,
-		"importer", importer.Name,
-		"hash", data.BlockHash.TerminalString(),
-		"state_root", data.StateRoot.TerminalString(),
-		"txs", len(data.Transactions),
-		"gas_used", data.GasUsed,
-		"bal_bytes", len(data.BlockAccessList))
+		"head_number", d.headNum)
 	return nil
 }
 
@@ -447,12 +478,13 @@ func (d *Driver) buildPayload(ctx context.Context, slot uint64, n *Node, parent 
 		return nil, errors.New("forkchoiceUpdatedV4 returned no payload id")
 	}
 
-	// Give the builder most of a slot to actually pack transactions; asking
-	// immediately yields an empty block and would fuzz nothing.
+	// Give the builder a moment to pack transactions; asking immediately yields an
+	// empty block. This runs once, in the self-test, so the wait is a fixed small
+	// value rather than a fraction of a slot we no longer control.
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-time.After(d.cfg.slotTime * 2 / 3):
+	case <-time.After(buildWait):
 	}
 
 	var envelope engine.ExecutionPayloadEnvelope
@@ -498,115 +530,9 @@ func (d *Driver) newPayloadAll(ctx context.Context, data *engine.ExecutableData)
 	return statuses, nil
 }
 
-func (d *Driver) setHeadAll(ctx context.Context, head common.Hash) error {
-	state := engine.ForkchoiceStateV1{
-		HeadBlockHash:      head,
-		SafeBlockHash:      d.finalized,
-		FinalizedBlockHash: d.finalized,
-	}
-	for _, n := range d.nodes {
-		var fcu engine.ForkChoiceResponse
-		if err := n.Engine(ctx, "engine_forkchoiceUpdatedV4", &fcu, state, nil, nil); err != nil {
-			return fmt.Errorf("set head on %s: %w", n.Name, err)
-		}
-		if fcu.PayloadStatus.Status != engine.VALID {
-			return fmt.Errorf("set head on %s: status=%s err=%s",
-				n.Name, fcu.PayloadStatus.Status, deref(fcu.PayloadStatus.ValidationError))
-		}
-	}
-	return nil
-}
-
-// handleErr decides whether an error from the slot loop is a finding worth halting
-// on, or just a node that went away. It returns non-nil only when the run should
-// stop.
-func (d *Driver) handleErr(ctx context.Context, slot int, phase string, err error) error {
-	if IsTransportError(err) {
-		// A node is restarting or otherwise unreachable. This is expected during
-		// chaos testing and says nothing about the tree.
-		d.transient++
-		slog.Warn("node unreachable; waiting and resyncing",
-			"slot", slot, "phase", phase, "consecutive", d.transient, "err", err)
-		if d.transient > maxTransient {
-			return fmt.Errorf("gave up after %d consecutive unreachable slots: %w", d.transient, err)
-		}
-		if rerr := d.resync(ctx); rerr != nil {
-			if IsTransportError(rerr) {
-				slog.Warn("resync not yet possible", "err", rerr)
-				return nil
-			}
-			// resync found a real disagreement (a fork) while looking for the head.
-			return d.report(ctx, slot, "resync", rerr)
-		}
-		return nil
-	}
-
-	return d.report(ctx, slot, phase, err)
-}
-
-// report records a divergence, captures the evidence for the disputed block, and
-// returns the error that stops the run.
-func (d *Driver) report(ctx context.Context, slot int, phase string, err error) error {
-	d.transient = 0
-	d.findings++
-	slog.Error("FINDING: " + fmt.Sprintf("slot %d %s: %v", slot, phase, err))
-	// d.head is still the parent at this point, since it only advances on success.
-	// The disputed block is whatever the driver last tried to make canonical.
-	if cerr := d.captureDivergence(ctx, d.disputed); cerr != nil {
-		slog.Warn("capture failed", "err", cerr)
-	}
-	return fmt.Errorf("halting after divergence at slot %d (%s)", slot, phase)
-}
-
 // maxTransient bounds how long the driver waits out an unreachable node before it
 // treats the outage itself as the failure.
 const maxTransient = 40
-
-// resync re-reads the head from every node and adopts it once they agree. A node
-// that restarted may have come back at the last state its pbt.journal persisted
-// rather than at the head the driver last set, so the driver's own view has to be
-// refreshed instead of assumed.
-func (d *Driver) resync(ctx context.Context) error {
-	heads := make([]*rpcBlock, len(d.nodes))
-	for i, n := range d.nodes {
-		blk, err := getBlock(ctx, n, "latest")
-		if err != nil {
-			return err
-		}
-		heads[i] = blk
-	}
-
-	// A node at a different HEIGHT is behind, which an outage explains. A node at the
-	// same height with a different HASH is a fork — the divergence this harness exists
-	// to find — and must never be papered over by adopting one side.
-	lower := 0
-	for i := 1; i < len(d.nodes); i++ {
-		if heads[i].Hash == heads[0].Hash {
-			continue
-		}
-		if heads[i].Number == heads[0].Number {
-			return fmt.Errorf("fork: %s and %s are both at height %d with different hashes: %s (root %s) vs %s (root %s)",
-				d.nodes[0].Name, d.nodes[i].Name, heads[0].Number,
-				heads[0].Hash, heads[0].StateRoot, heads[i].Hash, heads[i].StateRoot)
-		}
-		if heads[i].Number < heads[lower].Number {
-			lower = i
-		}
-	}
-	if heads[lower].Hash != heads[0].Hash || lower != 0 {
-		slog.Warn("a node is behind after an outage; rebuilding from the lowest head",
-			"node", d.nodes[lower].Name, "height", heads[lower].Number)
-		d.head = heads[lower].Hash
-		d.headNum = uint64(heads[lower].Number)
-		d.headTime = uint64(heads[lower].Timestamp)
-		return nil
-	}
-	d.head = heads[0].Hash
-	d.headNum = uint64(heads[0].Number)
-	d.headTime = uint64(heads[0].Timestamp)
-	slog.Info("resynced", "head", d.head.TerminalString(), "number", d.headNum)
-	return nil
-}
 
 func deref(s *string) string {
 	if s == nil {
