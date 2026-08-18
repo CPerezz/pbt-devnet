@@ -61,7 +61,15 @@ func (s *sender) fees(ctx context.Context, e *el, gas uint64) (tip, feeCap *big.
 	if err != nil {
 		return nil, nil, err
 	}
-	tip = big.NewInt(1_000_000_000) // 1 gwei
+	// Outbid the load generators. Blocks on this devnet run 99.9% full -- the hammer and
+	// spamoor between them fill 200M gas -- and builders order by effective tip, so a
+	// scenario transaction at the hammer's own 1 gwei is tied for last and simply never
+	// gets in. That failure is silent: the send succeeds, no receipt ever arrives, and
+	// the scenario times out looking like a partition problem.
+	//
+	// 50 gwei sits far above the 1-2 gwei the generators use, and still costs a fraction
+	// of an ether at these gas figures.
+	tip = big.NewInt(50_000_000_000) // 50 gwei
 	feeCap = new(big.Int).Div(big.NewInt(900_000_000_000_000_000), new(big.Int).SetUint64(gas))
 
 	// If the chain is already dearer than the cap allows, pay what we can and let the
