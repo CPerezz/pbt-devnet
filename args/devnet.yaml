@@ -3,9 +3,15 @@
 # key it does not recognise, so consult its README rather than inventing fields here.
 
 participants:
-  # Two geth nodes with deliberately different configs. Instances of one binary with one
-  # config agree by construction and prove nothing; these are pushed down different paths
-  # through the same tree and required to produce identical roots.
+  # Four nodes, two of each client, and within each pair two deliberately different
+  # configs. Instances of one binary with one config agree by construction and prove
+  # nothing; these are pushed down different paths through the same tree and required to
+  # produce identical roots.
+  #
+  # Four rather than three is what lets the network finalize through a partition: isolating
+  # one of three leaves the majority holding exactly 2/3, and finality needs MORE than 2/3,
+  # so every scenario used to run against a majority that could not finalize. One of four
+  # leaves 3/4.
   - el_type: geth
     el_image: pbt-geth:local
     cl_type: lighthouse
@@ -38,6 +44,21 @@ participants:
     # BINARY.
     el_extra_params: ["--data-storage-format=BINARY"]
 
+  - el_type: besu
+    el_image: besu-pbt:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    # The same tree, but every trie log kept instead of pruned to the default window.
+    #
+    # This is the axis that matters for reorgs: besu unwinds a branch by REVERSING trie
+    # logs where geth replaces layers, and a missing log is the mechanism behind the
+    # StateRootMismatchException in issue #7. If the pruning besu above fails a deep reorg
+    # and this one survives it, the difference names the cause. The differentiator is
+    # deliberately the MORE capable config — a crippled node would manufacture failures
+    # rather than isolate one.
+    el_extra_params: ["--data-storage-format=BINARY", "--bonsai-limit-trie-logs-enabled=false"]
+
 network_params:
   # Load-bearing, and its effect is indirect. Both el launchers choose full sync only when
   # the network is named "kurtosis"; any custom name silently yields --syncmode=snap /
@@ -66,10 +87,13 @@ network_params:
   gloas_fork_epoch: 0
 
 ethereum_genesis_generator_params:
-  # Fork of ethereum-genesis-generator: emits geth's "pbt": true and besu's
-  # "binaryTrieTime" into one genesis.json, and bundles a fork of eth-beacon-genesis that
-  # derives the consensus genesis from the binary-tree block hash instead of a
-  # merkle-patricia one. Build with scripts/build-images.sh.
+  # Fork of ethereum-genesis-generator: emits "binaryTrieTime" — ONE key, taken by both
+  # clients — into genesis.json, and bundles a fork of eth-beacon-genesis that derives the
+  # consensus genesis from the binary-tree block hash instead of a merkle-patricia one.
+  # Build with scripts/build-images.sh.
+  #
+  # The PBT env var below is named after the retired `"pbt": true` boolean; it now selects
+  # the activation timestamp. The name is historical, the behaviour is not.
   image: pbt-egg:local
   extra_env:
     PBT: "true"
@@ -103,7 +127,10 @@ spamoor_params:
   # Scenarios chosen for what the binary tree changed rather than for raw throughput; the
   # hammer covers the shapes spamoor has no scenario for (zeroization, shared code,
   # 7702 clear-to-zero).
-  start_chainload: true
+  # The built-in chain-load group is off: it adds unmeasured traffic on top of the four
+  # spammers below, and it is what backs up into a partitioned minority. A healthy chain
+  # here runs about 14% of the 200M gas limit, so there is nothing else to trim.
+  start_chainload: false
   start_fuzzing: false
   spammers:
     - scenario: eoatx
@@ -122,13 +149,14 @@ spamoor_params:
 assertoor_params:
   run_stability_check: true
   run_block_proposal_check: true
-  # Custom playbooks cannot be mounted from this package — the launcher only uploads its
-  # own baked-in /tests directory — so ours are referenced by URL once pushed. Until then
-  # use `make assertoor-load`, which POSTs them to the running instance.
+  # Built-in checks only. Custom playbooks cannot be mounted from this package — the
+  # launcher only uploads its own baked-in /tests directory — and reorgs are pbtchaos's
+  # job, with verification a playbook could not do.
   tests: []
 
-# Chaos sidecar. Left with no partitions or shaping applied: `make split` / `make chaos`
-# drive it at runtime, so the default devnet is quiet.
+# Chaos sidecar. pbtchaos owns its state exclusively and drives it continuously, so the
+# default devnet is NOT quiet: expect a reorg every 15-30 blocks. `make split` / `make heal`
+# poke it by hand; `make scenario` runs one of the six state scenarios.
 disruptoor_params:
   image: ethpandaops/disruptoor:latest
 
