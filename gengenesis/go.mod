@@ -45,4 +45,7 @@ require (
 
 // Point at the local PBT checkout so the generated genesis can never drift from
 // the client binary the devnet runs. Rebuild after switching branches there.
-replace github.com/ethereum/go-ethereum => ../../go-ethereum
+// Pinned to a published commit rather than a sibling checkout: that checkout is a
+// working tree that may sit on any branch, and building the genesis against the wrong
+// one silently produces a merkle-patricia chain.
+replace github.com/ethereum/go-ethereum => github.com/CPerezz/go-ethereum v0.0.0-20260818102504-bcf30164bf65
