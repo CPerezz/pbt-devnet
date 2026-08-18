@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 	"time"
@@ -196,7 +197,16 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 
 	// The intended branch has to be the one that won. If the doomed branch survived
 	// instead, every state assertion below would be inverted, so say so and stop.
-	if wantHash != (common.Hash{}) {
+	if wantHash == (common.Hash{}) {
+		// Without an anchor the only thing left to check against is head, where a
+		// re-mined transaction will have restored the doomed state -- so the check would
+		// be meaningless rather than merely weaker.
+		res.Outcome = "inconclusive"
+		res.Detail = "could not record a settled majority block before the heal, so there is " +
+			"no branch-anchored height to verify against"
+		return res
+	}
+	{
 		if !awaitHeight(ctx, c.els, wantHeight, 2*time.Minute) {
 			res.Outcome = "inconclusive"
 			res.Detail = fmt.Sprintf("not every client reached block %d after the heal", wantHeight)
@@ -219,6 +229,9 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 			return res
 		}
 		res.Survivor = fmt.Sprintf("majority block %d %s", wantHeight, short(wantHash))
+		// Every assertion is evaluated here, on the surviving branch, rather than at head
+		// where a re-mined transaction would have put the doomed state back.
+		r.at = new(big.Int).SetUint64(wantHeight)
 	}
 
 	note, err := sc.verify(ctx, r)
