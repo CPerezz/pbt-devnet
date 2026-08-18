@@ -1,0 +1,70 @@
+# Fast debugging profile. Two clients, almost no traffic, no extra tooling — the point is
+# a four-minute loop you can read the logs of, not a representative devnet.
+#
+#   make fast          == make up ARGS=args/fast.yaml
+#
+# args/devnet.yaml stays the reference configuration; this file exists to reproduce one
+# specific failure quickly. The three-chain split shows up around block 35-40, roughly
+# four minutes in, so a run does not need to be long — it needs to be quiet.
+
+participants:
+  # One geth and one besu. Two is the minimum that can disagree. The reference config's
+  # second geth exists to tell "besu is wrong" from "we are wrong"; while chasing a
+  # peering problem that distinction is not what is being tested, and dropping it halves
+  # both startup time and log volume.
+  - el_type: geth
+    el_image: pbt-geth:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--state.size-tracking"]
+
+  - el_type: besu
+    el_image: besu-pbt:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--data-storage-format=BINARY"]
+
+network_params:
+  network: "kurtosis"
+  preset: minimal
+  seconds_per_slot: 6
+  genesis_delay: 20
+  fulu_fork_epoch: 0
+  gloas_fork_epoch: 0
+
+ethereum_genesis_generator_params:
+  image: pbt-egg:local
+  extra_env:
+    PBT: "true"
+
+# dora to watch the chain, disruptoor because reorg testing is the eventual point.
+# No spamoor, assertoor or forky: every extra service is more log to read and more
+# traffic between the thing being measured and the measurement.
+additional_services:
+  - dora        # 36000
+  - disruptoor  # 36002
+
+port_publisher:
+  additional_services:
+    enabled: true
+    public_port_start: 36000
+
+### Ours.
+
+pbt_hammer:
+  # A trickle, not a flood. Enough that blocks are not empty, little enough that the
+  # monitor's output stays readable and a divergence is not buried.
+  enabled: true
+  interval: "2s"
+  batch: 1
+  slots_per_tx: 4
+  code_size: 2000
+  senders: 2
+
+pbt_monitor:
+  enabled: true
+  verify_oracle: true
+  poll: "2s"
+  probe_every: 16

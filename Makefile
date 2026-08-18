@@ -19,6 +19,9 @@ help:
 	@echo ""
 	@echo "  ENCLAVE=$(ENCLAVE)  ARGS=$(ARGS)"
 
+fast: ## two clients, minimal traffic, no extra tooling — a four-minute debug loop
+	@$(MAKE) --no-print-directory up ARGS=args/fast.yaml BLOCKS=40
+
 up: check build ## build the images and start the devnet, then follow the monitor
 	@kurtosis enclave rm -f $(ENCLAVE) >/dev/null 2>&1 || true
 	@# --privileged is for disruptoor only: it enters other containers' network namespaces
@@ -51,6 +54,9 @@ status: ## show every execution client's head and state root
 
 verify: ## compare every client at the same block number (BLOCKS=100)
 	@scripts/verify.py $(ENCLAVE) --blocks $(BLOCKS) --wait
+
+diagnose: ## where did the chain split, and what were the peers doing then
+	@scripts/diagnose.py $(ENCLAVE)
 
 split: ## partition the network: participants 1,2 | 3  (el and cl)
 	@scripts/chaos.sh $(ENCLAVE) split
