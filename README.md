@@ -275,12 +275,13 @@ finding.
 
 ## Known issues
 
-- **A hard partition may not heal.** Clearing the partition removes every network rule — the
-  containers can reach each other again — but a lighthouse that comes back with no peers can sit
-  on its own branch indefinitely: it is at the same slot as everyone else, so it does not measure
-  itself as behind and never range-syncs. Restarting that container restores peering. Scenarios
-  report `inconclusive` when this happens rather than claiming a finding. Latency shaping, which
-  never severs the connections, always recovers.
+- **Partitions cost peers.** Clearing a partition removes every network rule — the containers
+  can reach each other again — but lighthouse does not reliably rebuild its peer set: it sits at
+  the same slot as everyone else, so it never measures itself as behind and never range-syncs.
+  One node in three ends up stranded after a run of scenarios. `make repeer` restarts any client
+  with no peers, which rebuilds its discovery table from the bootnode and rejoins it in a slot or
+  two. Scenarios report `inconclusive` rather than a finding when the clients have not
+  reconverged, so a stranded node never masquerades as a client bug.
 - `make up` does not rebuild besu. Run `make besu` after changing the besu checkout.
 - Do not pass `--image-download always`; these are local tags with no registry behind them.
 
