@@ -73,15 +73,17 @@ func main() {
 		CancunTime:   &zero,
 		PragueTime:   &zero,
 		OsakaTime:    &zero,
-		// Amsterdam is mandatory: params.ChainConfig.CheckConfigForkOrder rejects
-		// PBT without it ("the binary tree requires Amsterdam, which is not
-		// scheduled"). BogotaTime stays nil — Bogota brings EIP-7805/8141, which
+		// Amsterdam is mandatory: params.ChainConfig.CheckConfigForkOrder rejects the
+		// binary tree without it, and requires binaryTrieTime no earlier than
+		// amsterdamTime. BogotaTime stays nil — Bogota brings EIP-7805/8141, which
 		// would make any divergence harder to attribute to the tree.
 		AmsterdamTime: &zero,
 
-		// PBT is not a fork. It is a property of the chain, applied from genesis
-		// onwards, with no in-consensus conversion from the merkle-patricia trie.
-		PBT: true,
+		// The binary tree is a timestamp fork, scheduled here at genesis. The key is
+		// shared with besu, so one genesis.json serves both clients. It used to be a
+		// `"pbt": true` boolean; a config still carrying that decodes fork-less and
+		// yields a merkle-patricia chain without any error.
+		BinaryTrieTime: &zero,
 
 		DepositContractAddress: params.MainnetChainConfig.DepositContractAddress,
 
@@ -130,7 +132,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "write %s: %v\n", *out, err)
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s (chainid %d, pbt=true, amsterdamTime=0)\n", *out, *chainID)
+	fmt.Fprintf(os.Stderr, "wrote %s (chainid %d, binaryTrieTime=0, amsterdamTime=0)\n", *out, *chainID)
 
 	// Compute and print the genesis root as the tree commits it. Feed this to the
 	// driver as --expected-genesis-root (or expected_genesis_root in an args file):

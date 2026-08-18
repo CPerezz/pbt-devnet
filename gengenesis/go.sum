@@ -1,3 +1,5 @@
+github.com/CPerezz/go-ethereum v0.0.0-20260818102504-bcf30164bf65 h1:CAXZqwT5dJT7GHZQo8wYNWjN/mdU7bcRHHOfogh2/rE=
+github.com/CPerezz/go-ethereum v0.0.0-20260818102504-bcf30164bf65/go.mod h1:/RsSIzKTMj+9lbQ1+m9RiFGvqzKwmCb2V/o65KsOorY=
 github.com/DataDog/zstd v1.5.7 h1:ybO8RBeh29qrxIhCA9E8gKY6xfONU9T6G6aP9DTKfLE=
 github.com/DataDog/zstd v1.5.7/go.mod h1:g4AWEaM3yOg3HYfnJ3YIawPnVdXJh9QME85blwSAmyw=
 github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 h1:1zYrtlhrZ6/b6SAjLSfKzWtdgqK0U+HtH/VcBWh1BaU=

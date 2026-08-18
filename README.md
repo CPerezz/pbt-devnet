@@ -163,7 +163,7 @@ block hash  0x52327d2df655a26b98cf29f76232c9568f4ce10c3753e39729f1a8b43ae71c55
 ```
 
 Seeing `0x16f3bf8b…c70145` instead means the client ignored the tree and built a
-merkle-patricia genesis. This is how the first besu bug was isolated, and a single-client enclave
+merkle-patricia genesis — most likely a genesis still using the retired `"pbt": true` key. This is how the first besu bug was isolated, and a single-client enclave
 is supported for the same reason — set `pbt_monitor.enabled: false` and run one participant.
 
 ## Configuration
@@ -184,17 +184,21 @@ Three settings there are load-bearing and easy to break:
   client, so every block would be built by that one node and the others would only ever import.
   Without it each proposer builds locally and both implementations are exercised.
 
-The two clients disagree on how PBT is spelled, so the generator emits both keys into one
-`genesis.json` and each ignores the other's:
+Both clients now take the **same** genesis key, a fork activation timestamp:
 
-| | genesis key | runtime flag | model |
-|---|---|---|---|
-| geth | `"pbt": true` | *(none — read from genesis)* | chain property, fixed from genesis |
-| besu | `"binaryTrieTime": 0` | `--data-storage-format=BINARY` | fork activation timestamp |
+| | genesis key | runtime flag |
+|---|---|---|
+| geth | `"binaryTrieTime": 0` | *(none — read from genesis)* |
+| besu | `"binaryTrieTime": 0` | `--data-storage-format=BINARY` |
 
-That is a real difference in interpretation, not just spelling: besu's shape implies a chain could
-switch to the tree mid-flight, which geth's model forbids. They coincide at genesis, so it does not
-affect this devnet.
+geth used to take a `"pbt": true` boolean and model the tree as a property of the chain rather
+than a fork; [PR #26](https://github.com/CPerezz/go-ethereum/pull/26) made it a timestamp fork and
+adopted besu's key, and mid-chain schedules are now accepted by both.
+
+**A genesis still carrying `"pbt": true` is worse than one carrying nothing.** It decodes
+fork-less, so the chain comes up on the merkle-patricia trie with no error anywhere — the genesis
+hash is `0x16f3bf8b…c70145` instead of `0x52327d2d…ae71c55`, and nothing says why. The fork-order
+check requires Amsterdam scheduled with `binaryTrieTime` no earlier than `amsterdamTime`.
 
 ## What this has found
 

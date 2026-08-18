@@ -17,9 +17,9 @@
     "pragueTime": 0,
     "osakaTime": 0,
     "amsterdamTime": 0,
+    "binaryTrieTime": 0,
     "terminalTotalDifficulty": 0,
     "depositContractAddress": "0x00000000219ab540356cbb839cbe05303d7705fa",
-    "pbt": true,
     "blobSchedule": {
       "cancun": {
         "target": 3,
