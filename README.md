@@ -197,6 +197,33 @@ went with it — so shared, content-addressed code chunks never need reference c
 only a fork at or below the persisted disk layer, and re-executes forward instead. See
 `core/pbt_reorg_code_test.go` in the geth branch.
 
+## What is covered, and what is not
+
+Three layers, each answering a different question.
+
+| layer | what it asks | what it would catch |
+|---|---|---|
+| `pbthammer`, 11 workloads | do the clients agree while writing every shape the tree changed? | a leaf, stem or chunk encoded differently by one client |
+| spamoor, 4 spammers | does that hold under sustained mixed traffic? | ordering- or volume-dependent divergence |
+| `pbtchaos`, isolation forks | does a client that has to abandon a block converge on the same state? | reorg handling: layer replacement vs trie-log reversal |
+| `pbtchaos`, 6 scenarios | is specific state on an abandoned branch actually gone, everywhere? | a chunk, delegation or storage group kept or dropped wrongly |
+| `pbtmonitor` | do all four agree on every root, and does the oracle still work? | silent agreement on a wrong root, or a dead check |
+
+Deliberately not covered: stateless clients and `debug_executionWitness` (no longer a goal),
+teku (its Gloas-at-genesis state is mutually exclusive with lighthouse's, see below), and any
+builder or MEV path.
+
+Known gaps, in rough order of how much they would be worth closing:
+
+- **Reorg depth is barely exercised.** `DEPTH` accepts anything, but the useful boundary is
+  geth's `Engine API maximum reorg depth depth=32` — below it geth re-executes forward, and
+  PBT's `Recoverable()` is false either way. A sweep at 10 / 20 / 30 and one crossing 32 is
+  the obvious next run.
+- **Nothing tests a client rejoining from cold.** `make repeer` restarts a stranded node, but
+  a client that has been down for many epochs takes a sync path none of this touches.
+- **Single consensus client.** Every node runs lighthouse, so a consensus-side bug is
+  invisible here by construction.
+
 ## Debugging one client on its own
 
 The fastest way to isolate a client is to take the consensus layer out entirely:

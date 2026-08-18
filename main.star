@@ -71,11 +71,11 @@ DEFAULT_CHAOS = {
     "isolate_for": "",
     # Default depth for `make scenario` when none is given.
     "depth": 10,
-    # A pair of keys per scenario run, rotated so no two consecutive runs share a nonce
-    # sequence: a reorged-out transaction stays valid and re-enters the pool, and a reused
-    # key then reads a nonce that goes stale underneath it. Four gives two distinct pairs,
-    # which is what back-to-back scenarios need.
-    "senders": 4,
+    # A pair of keys per scenario run, walked so no two consecutive runs share one: a
+    # reorged-out transaction stays valid and re-enters the pool, and a reused key then
+    # reads a nonce that goes stale underneath it. Three is the most that fits below the
+    # hammer without reaching the accounts other services claim -- see the guard below.
+    "senders": 3,
 }
 
 DEFAULT_MONITOR = {
@@ -245,8 +245,11 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
     # same nonce and every send after the first is rejected as underpriced -- silently, and
     # only under load.
     if end - n <= SPAMOOR_ACCOUNT:
-        fail(("pbt_chaos would take prefunded account {0}, but spamoor hardcodes {1}. " +
-              "Lower pbt_hammer.senders or pbt_chaos.senders.").format(end - n, SPAMOOR_ACCOUNT))
+        fail(("pbt_chaos would take prefunded accounts {0}..{1}, but spamoor hardcodes {2} " +
+              "and assertoor {3}, out of {4} accounts total. Lower pbt_hammer.senders " +
+              "({5}) or pbt_chaos.senders ({6}).").format(
+            end - n, end - 1, SPAMOOR_ACCOUNT, ASSERTOOR_ACCOUNT, len(prefunded),
+            hammer_senders, n))
     for acct in prefunded[end - n:end]:
         cmd += ["--key", acct.private_key]
 
