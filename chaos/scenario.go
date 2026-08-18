@@ -54,7 +54,7 @@ var scenarios = map[string]*scenario{
 		name: "code-sole",
 		doc:  "unique bytecode deployed only on the doomed branch; its code-zone chunks have no other owner",
 		apply: func(ctx context.Context, r *run) error {
-			r.code = txkit.PatternCode(3000, 0xa1)
+			r.code = txkit.PatternCode(400, 0xa1)
 			addr, err := r.deploy(ctx, r.minority, r.viaMin, txkit.DeployCodeAfter(nil, r.code))
 			if err != nil {
 				return err
@@ -73,7 +73,7 @@ var scenarios = map[string]*scenario{
 		setup: func(ctx context.Context, r *run) error {
 			// A different fill would make this a second code-sole. The whole point is
 			// that both accounts hold the IDENTICAL blob.
-			r.code = txkit.PatternCode(3000, 0xb2)
+			r.code = txkit.PatternCode(400, 0xb2)
 			addr, err := r.deploy(ctx, r.majority[0], r.viaMaj, txkit.DeployCodeAfter(nil, r.code))
 			if err != nil {
 				return err
@@ -105,7 +105,7 @@ var scenarios = map[string]*scenario{
 		name: "delegate",
 		doc:  "7702 delegations set on the doomed branch; the delegation leaf must not survive",
 		setup: func(ctx context.Context, r *run) error {
-			r.code = txkit.PatternCode(600, 0xc3)
+			r.code = txkit.PatternCode(300, 0xc3)
 			addr, err := r.deploy(ctx, r.majority[0], r.viaMaj, txkit.DeployCodeAfter(nil, r.code))
 			if err != nil {
 				return err
@@ -250,8 +250,15 @@ func scenarioNames() []string {
 
 func (r *run) all() []*el { return append([]*el{r.minority}, r.majority...) }
 
+// deployGas sizes a deployment under EIP-8297's two-dimensional gas, where every byte of
+// deployed code costs 1530 state gas. A flat allowance silently made every scenario
+// unsendable: 3000 bytes alone needs 4.59M, well past the 3M that used to be passed.
+func deployGas(codeLen int) uint64 {
+	return 500_000 + uint64(codeLen)*1800
+}
+
 func (r *run) deploy(ctx context.Context, e *el, s *sender, initcode []byte) (common.Address, error) {
-	h, addr, err := s.send(ctx, e, txReq{data: initcode, gas: 3_000_000})
+	h, addr, err := s.send(ctx, e, txReq{data: initcode, gas: deployGas(len(initcode))})
 	if err != nil {
 		return common.Address{}, err
 	}
