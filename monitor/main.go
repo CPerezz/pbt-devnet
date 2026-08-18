@@ -135,19 +135,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	d := &Driver{nodes: nodes, cfg: cfg}
+	m := &Monitor{nodes: nodes, cfg: cfg}
 
 	if *selfTest {
-		if err := d.preflight(ctx); err != nil {
+		if err := m.preflight(ctx); err != nil {
 			fatal("%v", err)
 		}
-		if err := d.proveOracle(ctx); err != nil {
+		if err := m.proveOracle(ctx); err != nil {
 			fatal("%v", err)
 		}
 		return
 	}
 
-	if err := d.Run(ctx); err != nil {
+	if err := m.Run(ctx); err != nil {
 		fatal("%v", err)
 	}
 }
@@ -157,8 +157,8 @@ func fatal(format string, args ...any) {
 	os.Exit(1)
 }
 
-// Driver owns the execution clients and the highest block they have all agreed on.
-type Driver struct {
+// Monitor owns the execution clients and the highest block they have all agreed on.
+type Monitor struct {
 	nodes []*Node
 	cfg   config
 
@@ -185,29 +185,29 @@ type Driver struct {
 }
 
 // degrade reports an unavailable oracle once per node and method.
-func (d *Driver) degrade(node, method string, err error) {
-	if d.degraded == nil {
-		d.degraded = map[string]bool{}
+func (m *Monitor) degrade(node, method string, err error) {
+	if m.degraded == nil {
+		m.degraded = map[string]bool{}
 	}
 	key := node + "/" + method
-	if d.degraded[key] {
+	if m.degraded[key] {
 		return
 	}
-	d.degraded[key] = true
+	m.degraded[key] = true
 	slog.Warn("ORACLE DEGRADED", "node", node, "method", method, "err", err,
 		"note", "reported once; this oracle is skipped for the rest of the run")
 }
 
-func (d *Driver) Run(ctx context.Context) error {
-	if err := d.preflight(ctx); err != nil {
+func (m *Monitor) Run(ctx context.Context) error {
+	if err := m.preflight(ctx); err != nil {
 		return err
 	}
-	if d.cfg.verifyOracle {
-		if err := d.proveOracle(ctx); err != nil {
+	if m.cfg.verifyOracle {
+		if err := m.proveOracle(ctx); err != nil {
 			return err
 		}
 	}
-	return d.follow(ctx)
+	return m.follow(ctx)
 }
 
 // follow watches the chain the consensus clients are driving. It never proposes and
@@ -218,37 +218,37 @@ func (d *Driver) Run(ctx context.Context) error {
 // consensus clients drove it too, which manufactured competing blocks at every height,
 // wedged one execution client, and then reported the resulting fork as a finding
 // against the clients rather than against itself.
-func (d *Driver) follow(ctx context.Context) error {
-	ticker := time.NewTicker(d.cfg.pollInterval)
+func (m *Monitor) follow(ctx context.Context) error {
+	ticker := time.NewTicker(m.cfg.pollInterval)
 	defer ticker.Stop()
 
-	slog.Info("following the chain", "nodes", len(d.nodes), "poll", d.cfg.pollInterval)
+	slog.Info("following the chain", "nodes", len(m.nodes), "poll", m.cfg.pollInterval)
 
 	ticks := 0
 	for {
 		select {
 		case <-ctx.Done():
-			return d.summarise()
+			return m.summarise()
 		case <-ticker.C:
 		}
 		ticks++
 
-		if err := d.compareHeads(ctx); err != nil {
+		if err := m.compareHeads(ctx); err != nil {
 			if IsTransportError(err) {
 				slog.Warn("node unreachable", "err", err)
 			} else {
-				d.finding("head comparison: %v", err)
+				m.finding("head comparison: %v", err)
 			}
 		}
-		if d.cfg.probeEvery > 0 && ticks%d.cfg.probeEvery == 0 {
-			if err := d.assertNoBadBlocks(ctx); err != nil {
-				d.finding("%v", err)
+		if m.cfg.probeEvery > 0 && ticks%m.cfg.probeEvery == 0 {
+			if err := m.assertNoBadBlocks(ctx); err != nil {
+				m.finding("%v", err)
 			}
-			if err := d.probe(ctx); err != nil {
+			if err := m.probe(ctx); err != nil {
 				if IsTransportError(err) {
 					slog.Warn("probe unreachable", "err", err)
 				} else {
-					d.finding("probe: %v", err)
+					m.finding("probe: %v", err)
 				}
 			}
 		}
@@ -259,10 +259,10 @@ func (d *Driver) follow(ctx context.Context) error {
 // hashes. The number is the lowest head across the clients, so a node that is merely
 // one block behind is compared where it has actually reached rather than reported as
 // a divergence.
-func (d *Driver) compareHeads(ctx context.Context) error {
-	heads := make([]*rpcBlock, len(d.nodes))
+func (m *Monitor) compareHeads(ctx context.Context) error {
+	heads := make([]*rpcBlock, len(m.nodes))
 	lowest := ^uint64(0)
-	for i, n := range d.nodes {
+	for i, n := range m.nodes {
 		blk, err := getBlock(ctx, n, "latest")
 		if err != nil {
 			return err
@@ -277,8 +277,8 @@ func (d *Driver) compareHeads(ctx context.Context) error {
 	}
 
 	tag := hexutil.Uint64(lowest).String()
-	at := make([]*rpcBlock, len(d.nodes))
-	for i, n := range d.nodes {
+	at := make([]*rpcBlock, len(m.nodes))
+	for i, n := range m.nodes {
 		blk, err := getBlock(ctx, n, tag)
 		if err != nil {
 			return err
@@ -287,83 +287,83 @@ func (d *Driver) compareHeads(ctx context.Context) error {
 	}
 	for i := 1; i < len(at); i++ {
 		if at[i].Hash != at[0].Hash {
-			d.disputed = at[0].Hash
-			d.finding("clients disagree at block %d: %s=%s (root %s) %s=%s (root %s)",
+			m.disputed = at[0].Hash
+			m.finding("clients disagree at block %d: %s=%s (root %s) %s=%s (root %s)",
 				lowest,
-				d.nodes[0].Name, at[0].Hash, at[0].StateRoot,
-				d.nodes[i].Name, at[i].Hash, at[i].StateRoot)
-			if err := d.captureDivergence(ctx, at[0].Hash); err != nil {
+				m.nodes[0].Name, at[0].Hash, at[0].StateRoot,
+				m.nodes[i].Name, at[i].Hash, at[i].StateRoot)
+			if err := m.captureDivergence(ctx, at[0].Hash); err != nil {
 				slog.Warn("evidence capture failed", "err", err)
 			}
 			return nil
 		}
 	}
 
-	if lowest > d.headNum {
-		d.headNum = lowest
-		d.head = at[0].Hash
+	if lowest > m.headNum {
+		m.headNum = lowest
+		m.head = at[0].Hash
 		slog.Info("chain", "number", lowest, "hash", at[0].Hash.TerminalString(),
-			"state_root", at[0].StateRoot.TerminalString(), "clients", len(d.nodes))
-	} else if lowest == d.headNum {
-		d.stalled++
-		if d.stalled == stalledTicks {
-			slog.Warn("chain has not advanced", "number", lowest, "ticks", d.stalled)
+			"state_root", at[0].StateRoot.TerminalString(), "clients", len(m.nodes))
+	} else if lowest == m.headNum {
+		m.stalled++
+		if m.stalled == stalledTicks {
+			slog.Warn("chain has not advanced", "number", lowest, "ticks", m.stalled)
 		}
 		return nil
 	}
-	d.stalled = 0
+	m.stalled = 0
 	return nil
 }
 
 // finding records a divergence and keeps going. Halting on the first one ends a soak
 // at the least convenient moment; the count is what the exit status reports.
-func (d *Driver) finding(format string, args ...any) {
-	d.findings++
+func (m *Monitor) finding(format string, args ...any) {
+	m.findings++
 	slog.Error("FINDING: " + fmt.Sprintf(format, args...))
 }
 
-func (d *Driver) summarise() error {
-	slog.Info("stopping", "highest_block", d.headNum, "findings", d.findings)
-	if d.findings > 0 {
-		return fmt.Errorf("%d findings", d.findings)
+func (m *Monitor) summarise() error {
+	slog.Info("stopping", "highest_block", m.headNum, "findings", m.findings)
+	if m.findings > 0 {
+		return fmt.Errorf("%d findings", m.findings)
 	}
 	return nil
 }
 
 // proveOracle runs the self-test on a chain that should be healthy, and leaves the
 // harness able to report real findings afterwards.
-func (d *Driver) proveOracle(ctx context.Context) error {
-	before := d.findings
-	if err := d.selfTest(ctx); err != nil {
+func (m *Monitor) proveOracle(ctx context.Context) error {
+	before := m.findings
+	if err := m.selfTest(ctx); err != nil {
 		return err
 	}
-	if d.findings > before {
+	if m.findings > before {
 		return fmt.Errorf("self-test found %d real divergence(s) on a chain that should be healthy",
-			d.findings-before)
+			m.findings-before)
 	}
 	// The self-test deliberately left a rejected block behind on every non-builder.
 	// Oracle 2 reports blocks rejected *during* the run, so without re-baselining here
 	// the first slot of the real loop reports our own planted block as a finding.
-	d.baselineBadBlocks(ctx)
+	m.baselineBadBlocks(ctx)
 	return nil
 }
 
 // preflight checks every node is alive, on the same chain and genesis, on the same
 // head, and — where the probe is conclusive — running the binary tree. Everything is
 // compared against nodes[0].
-func (d *Driver) preflight(ctx context.Context) error {
+func (m *Monitor) preflight(ctx context.Context) error {
 	boot, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 
-	for _, n := range d.nodes {
+	for _, n := range m.nodes {
 		if err := n.WaitReady(boot); err != nil {
 			return err
 		}
 	}
 
-	chainIDs := make([]string, len(d.nodes))
-	genesis := make([]*rpcBlock, len(d.nodes))
-	for i, n := range d.nodes {
+	chainIDs := make([]string, len(m.nodes))
+	genesis := make([]*rpcBlock, len(m.nodes))
+	for i, n := range m.nodes {
 		if err := n.RPC(ctx, "eth_chainId", &chainIDs[i]); err != nil {
 			return err
 		}
@@ -374,18 +374,18 @@ func (d *Driver) preflight(ctx context.Context) error {
 		genesis[i] = blk
 	}
 
-	for i := 1; i < len(d.nodes); i++ {
+	for i := 1; i < len(m.nodes); i++ {
 		if chainIDs[i] != chainIDs[0] {
 			return fmt.Errorf("chain id mismatch: %s=%s %s=%s",
-				d.nodes[0].Name, chainIDs[0], d.nodes[i].Name, chainIDs[i])
+				m.nodes[0].Name, chainIDs[0], m.nodes[i].Name, chainIDs[i])
 		}
 		if genesis[i].Hash != genesis[0].Hash {
 			return fmt.Errorf("genesis mismatch: %s=%s %s=%s — the nodes are not on one chain",
-				d.nodes[0].Name, genesis[0].Hash, d.nodes[i].Name, genesis[i].Hash)
+				m.nodes[0].Name, genesis[0].Hash, m.nodes[i].Name, genesis[i].Hash)
 		}
 	}
 	if genesis[0].StateRoot == emptyMPTRoot {
-		return fmt.Errorf("genesis state root is the empty MPT root — genesis has no alloc, or pbt is off")
+		return fmt.Errorf("genesis state root is the empty MPT root — genesis has no alloc, or binaryTrieTime is not scheduled")
 	}
 
 	// Positive proof of the commitment, portable across clients: the genesis state
@@ -396,51 +396,51 @@ func (d *Driver) preflight(ctx context.Context) error {
 	// tree. That inferred a property of the tree from one client's error string, and it
 	// hard-failed any client that happens to serve the method — a barrier that had
 	// nothing to do with whether the client implements PBT.
-	if d.cfg.expectedGenesisRoot != (common.Hash{}) {
-		if genesis[0].StateRoot != d.cfg.expectedGenesisRoot {
-			return fmt.Errorf("genesis state root is %s, expected %s — the nodes are not committing state with the binary tree (is \"pbt\": true set?)",
-				genesis[0].StateRoot, d.cfg.expectedGenesisRoot)
+	if m.cfg.expectedGenesisRoot != (common.Hash{}) {
+		if genesis[0].StateRoot != m.cfg.expectedGenesisRoot {
+			return fmt.Errorf("genesis state root is %s, expected %s — the nodes are not committing state with the binary tree (is binaryTrieTime scheduled in genesis?)",
+				genesis[0].StateRoot, m.cfg.expectedGenesisRoot)
 		}
 		slog.Info("confirmed the binary-tree commitment", "genesis_state_root", genesis[0].StateRoot)
 	} else {
 		slog.Warn("no --expected-genesis-root given: the nodes agree with each other, but nothing checks they are on the binary tree at all")
 	}
 
-	// Start from wherever the nodes already are, not from genesis, so the driver can
-	// be restarted against a running pair without trying to rebuild block 1.
-	heads := make([]*rpcBlock, len(d.nodes))
-	for i, n := range d.nodes {
+	// Start from wherever the nodes already are, not from genesis, so the monitor can be
+	// restarted against a running network without replaying everything it already saw.
+	heads := make([]*rpcBlock, len(m.nodes))
+	for i, n := range m.nodes {
 		blk, err := getBlock(ctx, n, "latest")
 		if err != nil {
 			return err
 		}
 		heads[i] = blk
 	}
-	for i := 1; i < len(d.nodes); i++ {
+	for i := 1; i < len(m.nodes); i++ {
 		if heads[i].Hash != heads[0].Hash {
 			return fmt.Errorf("nodes start on different heads: %s=%s@%d %s=%s@%d",
-				d.nodes[0].Name, heads[0].Hash, heads[0].Number,
-				d.nodes[i].Name, heads[i].Hash, heads[i].Number)
+				m.nodes[0].Name, heads[0].Hash, heads[0].Number,
+				m.nodes[i].Name, heads[i].Hash, heads[i].Number)
 		}
 	}
-	d.head = heads[0].Hash
-	d.headNum = uint64(heads[0].Number)
-	d.headTime = uint64(heads[0].Timestamp)
-	d.finalized = common.Hash{}
+	m.head = heads[0].Hash
+	m.headNum = uint64(heads[0].Number)
+	m.headTime = uint64(heads[0].Timestamp)
+	m.finalized = common.Hash{}
 
-	d.baselineBadBlocks(ctx)
+	m.baselineBadBlocks(ctx)
 
 	slog.Info("preflight ok",
 		"chainid", chainIDs[0],
 		"genesis", genesis[0].Hash,
 		"genesis_state_root", genesis[0].StateRoot,
-		"head", d.head,
-		"head_number", d.headNum)
+		"head", m.head,
+		"head_number", m.headNum)
 	return nil
 }
 
 // buildPayload runs the FCUv4-with-attributes then getPayloadV6 sequence.
-func (d *Driver) buildPayload(ctx context.Context, slot uint64, n *Node, parent common.Hash, timestamp uint64, feeRecipient common.Address) (*engine.ExecutionPayloadEnvelope, error) {
+func (m *Monitor) buildPayload(ctx context.Context, slot uint64, n *Node, parent common.Hash, timestamp uint64, feeRecipient common.Address) (*engine.ExecutionPayloadEnvelope, error) {
 	parentBlk, err := getBlockByHash(ctx, n, parent)
 	if err != nil {
 		return nil, err
@@ -462,8 +462,8 @@ func (d *Driver) buildPayload(ctx context.Context, slot uint64, n *Node, parent 
 	}
 	state := engine.ForkchoiceStateV1{
 		HeadBlockHash:      parent,
-		SafeBlockHash:      d.finalized,
-		FinalizedBlockHash: d.finalized,
+		SafeBlockHash:      m.finalized,
+		FinalizedBlockHash: m.finalized,
 	}
 
 	var fcu engine.ForkChoiceResponse
@@ -506,14 +506,14 @@ func (d *Driver) buildPayload(ctx context.Context, slot uint64, n *Node, parent 
 // newPayloadAll imports one payload into every node concurrently. Each node
 // re-executes it and compares its own computed state root against the one the
 // payload commits to, which is what makes this the primary oracle.
-func (d *Driver) newPayloadAll(ctx context.Context, data *engine.ExecutableData) ([]engine.PayloadStatusV1, error) {
+func (m *Monitor) newPayloadAll(ctx context.Context, data *engine.ExecutableData) ([]engine.PayloadStatusV1, error) {
 	var (
-		statuses = make([]engine.PayloadStatusV1, len(d.nodes))
-		errs     = make([]error, len(d.nodes))
+		statuses = make([]engine.PayloadStatusV1, len(m.nodes))
+		errs     = make([]error, len(m.nodes))
 		wg       sync.WaitGroup
 	)
 	beaconRoot := common.Hash{}
-	for i, n := range d.nodes {
+	for i, n := range m.nodes {
 		wg.Add(1)
 		go func(i int, n *Node) {
 			defer wg.Done()
@@ -524,13 +524,13 @@ func (d *Driver) newPayloadAll(ctx context.Context, data *engine.ExecutableData)
 	wg.Wait()
 	for i := range errs {
 		if errs[i] != nil {
-			return statuses, fmt.Errorf("newPayloadV5 on %s: %w", d.nodes[i].Name, errs[i])
+			return statuses, fmt.Errorf("newPayloadV5 on %s: %w", m.nodes[i].Name, errs[i])
 		}
 	}
 	return statuses, nil
 }
 
-// maxTransient bounds how long the driver waits out an unreachable node before it
+// maxTransient bounds how long the monitor waits out an unreachable node before it
 // treats the outage itself as the failure.
 const maxTransient = 40
 

@@ -1,8 +1,10 @@
 // Command pbtchaos makes reorgs happen on purpose.
 //
-// Two things drive it. A periodic latency fork delays whichever node is about to
-// propose, so its block lands late and the next proposer builds over its parent: a
-// one-block reorg, every 15-30 blocks, with no operator involvement. On top of that,
+// Two things drive it. A periodic isolation fork cuts the p2p of whichever node is about
+// to propose, for the two slots around its duty: it still builds a block, but nobody
+// receives it, so its own execution client takes that block as head while the rest build
+// on the parent. When the isolation lifts the loser unwinds -- a reorg every 15-30 blocks
+// with no operator involvement. On top of that,
 // scenarios put SPECIFIC state on the branch that is about to die -- deployed code,
 // 7702 delegations, fresh accounts, storage written and storage deleted -- and then
 // check every client agrees about that state once the branch is gone.
@@ -42,9 +44,9 @@ type config struct {
 	slotSeconds    time.Duration
 	validatorsPer  uint64
 	nodeCount      int
-	latencyEnabled bool
-	latencyMin     uint64
-	latencyMax     uint64
+	isolateEnabled bool
+	isolateMin     uint64
+	isolateMax     uint64
 	isolateFor     time.Duration
 	defaultDepth   uint64
 }
@@ -135,9 +137,9 @@ func main() {
 	listen := flag.String("listen", ":7800", "control API listen address")
 	slotSeconds := flag.Duration("slot-seconds", 12*time.Second, "seconds per slot")
 	validatorsPer := flag.Uint64("validators-per-node", 128, "validators assigned to each participant")
-	latency := flag.Bool("latency", true, "run the periodic latency forks")
-	latMin := flag.Uint64("latency-min-blocks", 15, "minimum blocks between latency forks")
-	latMax := flag.Uint64("latency-max-blocks", 30, "maximum blocks between latency forks")
+	isolation := flag.Bool("isolation", true, "run the periodic proposer-isolation forks")
+	isoMin := flag.Uint64("isolate-min-blocks", 15, "minimum blocks between isolation forks")
+	isoMax := flag.Uint64("isolate-max-blocks", 30, "maximum blocks between isolation forks")
 	isolateFor := flag.Duration("isolate-for", 0, "how long to isolate the proposer (default: one slot)")
 	depth := flag.Uint64("depth", 10, "default scenario depth in blocks")
 	flag.Parse()
@@ -150,8 +152,8 @@ func main() {
 	if len(els) == 0 {
 		fatal(log, "missing --el")
 	}
-	if *latMin > *latMax {
-		fatal(log, "--latency-min-blocks (%d) is above --latency-max-blocks (%d)", *latMin, *latMax)
+	if *isoMin > *isoMax {
+		fatal(log, "--isolate-min-blocks (%d) is above --isolate-max-blocks (%d)", *isoMin, *isoMax)
 	}
 
 	// Two slots by default. The isolation starts once the chain reaches the slot BEFORE
@@ -201,21 +203,21 @@ func main() {
 			slotSeconds:    *slotSeconds,
 			validatorsPer:  *validatorsPer,
 			nodeCount:      len(elc),
-			latencyEnabled: *latency,
-			latencyMin:     *latMin,
-			latencyMax:     *latMax,
+			isolateEnabled: *isolation,
+			isolateMin:     *isoMin,
+			isolateMax:     *isoMax,
 			isolateFor:     *isolateFor,
 			defaultDepth:   *depth,
 		},
 	}
 
 	go c.serve(ctx, *listen)
-	if c.cfg.latencyEnabled {
+	if c.cfg.isolateEnabled {
 		if len(clc) == 0 {
-			log.Warn("latency forks need --cl to read proposer duties; disabling them")
-			c.cfg.latencyEnabled = false
+			log.Warn("isolation forks need --cl to read proposer duties; disabling them")
+			c.cfg.isolateEnabled = false
 		} else {
-			go c.latencyLoop(ctx)
+			go c.isolationLoop(ctx)
 		}
 	}
 

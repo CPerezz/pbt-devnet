@@ -9,14 +9,14 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// forkLoop schedules a reorg every minBlocks..maxBlocks. It never runs one while
+// isolationLoop schedules a reorg every minBlocks..maxBlocks. It never runs one while
 // anything else is in flight: two overlapping disruptions produce a mess that proves
 // nothing about either.
-func (c *chaos) latencyLoop(ctx context.Context) {
+func (c *chaos) isolationLoop(ctx context.Context) {
 	for {
-		gap := c.cfg.latencyMin
-		if c.cfg.latencyMax > c.cfg.latencyMin {
-			gap += uint64(rand.Int63n(int64(c.cfg.latencyMax - c.cfg.latencyMin + 1)))
+		gap := c.cfg.isolateMin
+		if c.cfg.isolateMax > c.cfg.isolateMin {
+			gap += uint64(rand.Int63n(int64(c.cfg.isolateMax - c.cfg.isolateMin + 1)))
 		}
 		if err := waitBlocks(ctx, c.els, gap); err != nil {
 			return // context cancelled
@@ -24,13 +24,13 @@ func (c *chaos) latencyLoop(ctx context.Context) {
 		if c.busy() {
 			continue
 		}
-		if err := c.submit(job{name: "proposer-fork", run: c.latencyFork}); err != nil {
+		if err := c.submit(job{name: "proposer-fork", run: c.isolationFork}); err != nil {
 			c.log.Warn("could not queue proposer fork", "err", err)
 		}
 	}
 }
 
-// latencyFork isolates the node that is about to propose, for roughly one slot.
+// isolationFork cuts the p2p of the node that is about to propose.
 //
 // Egress DELAY was the obvious mechanism and it does not work: disruptoor v0 only
 // accepts scope ["include_control"] for shaping, which slows the engine API too, so the
@@ -44,7 +44,7 @@ func (c *chaos) latencyLoop(ctx context.Context) {
 // the partition clears, the proposer meets a heavier chain that does not contain its
 // block and has to unwind it -- which is the reorg, and it lands on the node that has
 // the doomed block, so that is where it must be observed.
-func (c *chaos) latencyFork(ctx context.Context) result {
+func (c *chaos) isolationFork(ctx context.Context) result {
 	res := result{Name: "proposer-fork", Started: time.Now().UTC().Format(time.RFC3339), Depth: 1}
 
 	node, slot, err := c.nextProposer(ctx)

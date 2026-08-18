@@ -15,15 +15,19 @@ that gap is closed with two forks and one config value, with no patch to the pac
     full sync only for that network name, and the binary tree refuses snap sync outright.
     A custom network name silently gets --syncmode=snap and the engine API dies.
 
-On top of the network this adds two services of our own:
+On top of the network this adds three services of our own:
 
   pbthammer  transaction load shaped at what the tree changed, not at throughput
   pbtmonitor watches every execution client for state-root divergence, and proves its own
              oracle by feeding a corrupted payload through the engine API. It observes
              only: the consensus clients drive the chain, and a second thing driving
              forkchoice manufactures the very forks it would then report.
+  pbtchaos   forces reorgs on purpose. It isolates whichever node proposes next, rotating
+             so both client types get reorged, and runs scenarios that strand specific
+             state on a branch that is then abandoned. It owns disruptoor exclusively, so
+             two disruptions never overlap.
 
-Both are optional and independently switchable, so `kurtosis run` with load disabled is a
+All three are independently switchable, so `kurtosis run` with load and chaos disabled is a
 quiet baseline.
 
 Run `make up`.
@@ -57,11 +61,12 @@ DEFAULT_HAMMER = {
 DEFAULT_CHAOS = {
     "enabled": True,
     "image": "pbt-chaos:local",
-    # Periodic one-block reorgs, produced by isolating whichever node proposes next for
-    # a single slot: it builds a block nobody else receives, then has to unwind it.
-    "latency": True,
-    "latency_min_blocks": 15,
-    "latency_max_blocks": 30,
+    # Periodic one-block reorgs, produced by isolating whichever node proposes next: it
+    # builds a block nobody else receives, then has to unwind it. The doomed node rotates,
+    # so reorgs land on both client types.
+    "isolation": True,
+    "isolate_min_blocks": 15,
+    "isolate_max_blocks": 30,
     # Empty means one slot, which is what this wants in almost every case.
     "isolate_for": "",
     # Default depth for `make scenario` when none is given.
@@ -79,6 +84,10 @@ DEFAULT_MONITOR = {
     "verify_oracle": True,
     "poll": "2s",
     "probe_every": 8,
+    # Optional, and the only POSITIVE proof the clients are on the binary tree: clients
+    # agreeing with each other says nothing if they all built a merkle-patricia genesis.
+    # Get the value from `make genesis`, which prints the root as the tree commits it.
+    "expected_genesis_root": "",
 }
 
 # ethereum-package uploads the engine API secret under this fixed artifact name, so the
@@ -152,6 +161,8 @@ def _launch_monitor(plan, cfg, els):
         cmd += ["--el", "{0}=http://{1}:{2},{3}".format(
             el.service_name, el.ip_addr, el.engine_rpc_port_num, el.rpc_http_url)]
     cmd += ["--jwt", JWT_PATH, "--poll", cfg["poll"], "--probe-every", str(cfg["probe_every"])]
+    if cfg["expected_genesis_root"] != "":
+        cmd += ["--expected-genesis-root", cfg["expected_genesis_root"]]
     if not cfg["verify_oracle"]:
         cmd += ["--verify-oracle=false"]
 
@@ -214,7 +225,7 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
     cmd = ["--disruptoor", "http://{0}:{1}".format(disruptoor.ip_address, DISRUPTOOR_PORT)]
     for el in els:
         cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
-    # Proposer duties come from the consensus layer, so latency forks can target the node
+    # Proposer duties come from the consensus layer, so isolation forks can target the node
     # that is about to build rather than a node at random.
     for p in net.all_participants:
         if p.cl_context != None:
@@ -242,8 +253,8 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
     cmd += [
         "--listen", ":{0}".format(CHAOS_API_PORT),
         "--depth", str(cfg["depth"]),
-        "--latency-min-blocks", str(cfg["latency_min_blocks"]),
-        "--latency-max-blocks", str(cfg["latency_max_blocks"]),
+        "--isolate-min-blocks", str(cfg["isolate_min_blocks"]),
+        "--isolate-max-blocks", str(cfg["isolate_max_blocks"]),
 
         # Mapping a proposer's validator index back to a participant needs the range
         # size. 128 is ethereum-package's own default, so this agrees when unset.
@@ -252,8 +263,8 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
     ]
     if cfg["isolate_for"] != "":
         cmd += ["--isolate-for", cfg["isolate_for"]]
-    if not cfg["latency"]:
-        cmd += ["--latency=false"]
+    if not cfg["isolation"]:
+        cmd += ["--isolation=false"]
 
     plan.add_service(
         name="pbtchaos",
@@ -263,5 +274,5 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
             ports={"http": PortSpec(number=CHAOS_API_PORT, transport_protocol="TCP", application_protocol="http")},
         ),
     )
-    plan.print("started pbtchaos: latency forks every {0}-{1} blocks; scenarios on POST /scenario/<name>".format(
-        cfg["latency_min_blocks"], cfg["latency_max_blocks"]))
+    plan.print("started pbtchaos: isolation forks every {0}-{1} blocks; scenarios on POST /scenario/<name>".format(
+        cfg["isolate_min_blocks"], cfg["isolate_max_blocks"]))
