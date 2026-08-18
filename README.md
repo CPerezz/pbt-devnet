@@ -128,11 +128,17 @@ The revert workload is expected to produce `status=0` receipts. Everything else 
 
 ## Chaos
 
-**Reorgs happen on their own.** `pbtchaos` runs continuously and forces a one-block reorg
-every 15-30 blocks by delaying whichever node proposes next, so its CL/EL exchange misses the
-slot and the following proposer builds over its parent. Watch them land in forky, or as
-`Chain reorg detected` in geth. It owns disruptoor state exclusively and runs everything
-through one queue, so two disruptions never overlap.
+**Reorgs happen on their own.** `pbtchaos` runs continuously and forces a reorg every 15-30
+blocks by cutting the p2p of whichever node proposes next, for the two slots around its duty.
+The node still builds its block — only publication is cut — so its own execution client takes
+that block as head while everyone else builds on the parent; when the isolation lifts, the
+loser unwinds. Watch them in forky and Dora. It owns disruptoor state exclusively and runs
+everything through one queue, so two disruptions never overlap.
+
+Delaying the proposer instead does **not** work, and the failure is silent: disruptoor v0
+accepts only `scope: ["include_control"]` for shaping, which slows the engine API too, so the
+proposer cannot assemble a payload before its deadline and skips the slot outright. A missed
+slot reorgs nothing.
 
 On top of that, scenarios strand **specific state** on a branch that is then reorged out, and
 check every client agrees about that state afterwards. Each one partitions the network, sends
