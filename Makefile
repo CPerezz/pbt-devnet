@@ -81,7 +81,7 @@ chaos-status: ## what pbtchaos is doing now, what is queued, and recent results
 scenario: ## run one reorg scenario (NAME=code-shared DEPTH=20 [MINORITY=3])
 	@scripts/chaos.sh $(ENCLAVE) scenario $(NAME) $(DEPTH) $(MINORITY)
 
-build: ## build the geth image, the genesis generator, the monitor and the hammer
+build: ## build every local image the package expects
 	scripts/build-images.sh $(ARGS)
 
 besu: ## build besu-pbt:local (two Gradle stages, then the image; needs JDK 25)
@@ -95,7 +95,7 @@ bin: ## build every command as a host binary into bin/
 	go build -o bin/ ./cmd/...
 	@echo "==> $$(ls bin | tr '\n' ' ')"
 
-genesis: ## regenerate genesis/genesis.json and print the root to paste into the args file
+genesis: ## regenerate genesis/genesis.json and print its root (for single-client debugging)
 	@mkdir -p bin
 	go build -o bin/gengenesis ./cmd/gengenesis
 	./bin/gengenesis --out genesis/genesis.json --gaslimit 200000000

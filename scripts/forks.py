@@ -14,7 +14,7 @@ Two views, because they answer different questions:
   consensus   every head each client knows about, and the depth from a fork's tip back to
               the common ancestor. This is what "a 13-block branch was abandoned" looks like
               while it is still happening.
-  execution   the same height on every execution client, compared by state root. A fork is
+  execution   the same height on every execution client, compared by block hash. A fork is
               invisible at the tip when heads differ by a block, so this compares equals.
 
 Usage:

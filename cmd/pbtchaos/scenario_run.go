@@ -65,8 +65,7 @@ func (c *chaos) awaitDivergence(ctx context.Context, minority *el, majority []*e
 		//
 		// The minority falls behind the moment it is cut off, so the lowest common height
 		// is its own head -- a block both sides still agree on. The split is real and
-		// invisible there, which made this wait time out and report a scenario
-		// inconclusive when the partition had in fact bitten. Asking whether the minority
+		// invisible there. Asking whether the minority
 		// has the majority's head answers the question directly.
 		if n, err := lowestHead(ctx, majority); err == nil && n > 0 {
 			want := majority[0].hashAt(ctx, n)
@@ -192,9 +191,7 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 	}
 
 	// Which node gets stranded rotates every run, so reorgs land on both client types
-	// rather than always on whichever participant happens to be last. Pinning it to the
-	// last participant is how besu came to look like it was orphaining a third of its
-	// blocks: it was simply the minority every single time.
+	// rather than always on whichever participant happens to be last.
 	//
 	// With two of each client this also produces the most interesting case on its own --
 	// one besu on the doomed branch while the other stays in the majority, so trie-log
@@ -218,8 +215,7 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 
 	// Each run takes its own pair of keys. A transaction that gets reorged out stays
 	// valid and re-enters the pool, so a key reused by the next scenario reads a nonce
-	// that goes stale underneath it -- which showed up as scenarios passing and failing
-	// in strict alternation.
+	// that goes stale underneath it.
 	majKey, minKey := c.keysFor()
 	var err error
 	if r.viaMaj, err = newSender(ctx, majKey, majority[0]); err != nil {
@@ -264,8 +260,7 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 	// Send only once the two sides really are on different chains. disruptoor applies
 	// its rules asynchronously, so a transaction sent immediately after the partition
 	// call can still reach the majority and be mined on the branch that SURVIVES -- and
-	// then looks like state that refused to go away. code-sole reported exactly that
-	// against all four clients, anchored at block 2.
+	// then looks like state that refused to go away.
 	if !c.awaitDivergence(ctx, minority, majority, 90*time.Second) {
 		c.healQuietly(ctx)
 		res.Outcome = "inconclusive"

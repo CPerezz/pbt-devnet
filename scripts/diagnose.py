@@ -3,9 +3,7 @@
 
 verify.py answers "do the tips agree". That is the wrong question once they do not: what
 you need is the last block everyone agreed on, the first one they did not, and what the
-consensus layer was doing at that moment. Reading those from three places by hand is how
-a peer drop and a chain split sat next to each other for an afternoon without being
-connected.
+consensus layer was doing at that moment. 
 
 Usage: diagnose.py [enclave]
 """

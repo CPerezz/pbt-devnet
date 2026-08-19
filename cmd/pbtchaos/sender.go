@@ -48,10 +48,9 @@ func newSender(ctx context.Context, hexKey string, e *el) (*sender, error) {
 //
 // A multiple does not work here, and fails in a way that looks like the scenario doing
 // nothing: the fee is derived from the chain BEFORE the partition, but the partition is
-// what moves the price. Cut off with a third of the validators and the full transaction
+// what moves the price. Cut off with its share of the validators and the full transaction
 // load still pointed at it, the minority's blocks run full and its base fee climbed from
-// 2 gwei to over 400 in a few blocks -- long past 2x anything, so the transaction sat
-// unmined until the scenario timed out.
+// 2 gwei to over 400 in a few blocks -- long past 2x anything.
 //
 // Signing high costs nothing: under EIP-1559 the sender pays base fee plus tip, and the
 // cap is only a ceiling. The one real limit is the node's own RPC guard, which rejects a
@@ -72,10 +71,7 @@ func (s *sender) fees(ctx context.Context, e *el, gas uint64) (tip, feeCap *big.
 	tip = big.NewInt(50_000_000_000) // 50 gwei
 	feeCap = new(big.Int).Div(feeBudgetWei, new(big.Int).SetUint64(gas))
 
-	// The budget is a ceiling, never a target to be raised past. An earlier version
-	// lifted feeCap to `tip + 2*basefee` when that was higher, which put the maximum cost
-	// back over the node's 1 ether guard and guaranteed rejection -- the clamp did
-	// nothing. Repeated partitions push the base fee up (each leaves a backlog), so this
+	// The budget is a ceiling, never a target to be raised past. Repeated partitions push the base fee up (each leaves a backlog), so this
 	// is reached in practice, not in theory.
 	if feeCap.Cmp(h.BaseFee) <= 0 {
 		return nil, nil, fmt.Errorf(
@@ -151,8 +147,8 @@ func (s *sender) send(ctx context.Context, e *el, r txReq) (common.Hash, common.
 
 // awaitOK waits for a receipt and insists the transaction actually succeeded.
 //
-// Discarding the status is how four of six scenarios could pass without doing anything:
-// each asserts an ABSENCE afterwards -- no code, zero balance, slots cleared -- which is
+// Discarding the status lets a scenario pass without doing anything: each asserts an
+// ABSENCE afterwards -- no code, zero balance, slots cleared -- which is
 // trivially true when the write never landed. A revert, an out-of-gas or a rejected 7702
 // authorization all read as success.
 func (s *sender) awaitOK(ctx context.Context, e *el, h common.Hash, timeout time.Duration) error {

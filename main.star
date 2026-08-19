@@ -43,9 +43,8 @@ OURS = [
 DEFAULT_HAMMER = {
     "enabled": True,
     "image": "pbt-hammer:local",
-    # These are the settings measured safe: at 400ms/batch 4/code_size 12000 blocks ran
-    # 74.9% full against a 50% gas target, so the base fee compounded until nothing could
-    # pay for a transaction. See the comment on pbt_hammer in args/devnet.yaml.
+    # Blocks must stay under half the gas limit; above it the base fee compounds with
+    # nothing to stop it. See the comment on pbt_hammer in args/devnet.yaml.
     "interval": "1s",
     "batch": 2,
     "slots_per_tx": 20,
@@ -95,18 +94,18 @@ DEFAULT_MONITOR = {
     "expected_genesis_root": "",
 }
 
-# ethereum-package uploads the engine API secret under this fixed artifact name, so the
-# monitor can mount the same one the clients use and speak the engine API itself.
-# disruptoor's own listen port, from ethereum-package's launcher. pbtchaos speaks the
-# native API on it rather than the friendlier start-up config.
 # Prefunded accounts other services claim upstream, and will not negotiate over.
 SPAMOOR_ACCOUNT = 13
 ASSERTOOR_ACCOUNT = 9
 
+# disruptoor's own listen port, from ethereum-package's launcher. pbtchaos speaks the
+# native API on it rather than the friendlier start-up config.
 DISRUPTOOR_SERVICE = "disruptoor"
 DISRUPTOOR_PORT = 7700
 CHAOS_API_PORT = 7800
 
+# ethereum-package uploads the engine API secret under this fixed artifact name, so the
+# monitor can mount the same one the clients use and speak the engine API itself.
 JWT_ARTIFACT = "jwt_file"
 JWT_MOUNT_DIR = "/jwt"
 JWT_PATH = JWT_MOUNT_DIR + "/jwtsecret"
@@ -194,11 +193,8 @@ def _launch_hammer(plan, cfg, els, prefunded):
     # Passing keys in beats pre-funding our own addresses through the genesis generator:
     # these are funded on whatever network the package just built, whatever its chain id.
     #
-    # The end, not the start, because spamoor's chainload spends the low-index accounts
-    # and assertoor takes another. Sharing one account means both senders pick the same
-    # nonce and every send after the first is rejected as "replacement transaction
-    # underpriced" — which is how the hammer failed to deploy its startup targets and
-    # exited before sending anything.
+    # The end, not the start: spamoor's chainload spends the low-index accounts and
+    # assertoor takes another. Sharing one is a nonce collision -- see _launch_chaos.
     n = cfg["senders"]
     if n > len(prefunded):
         fail("asked for {0} senders but the network only prefunds {1} accounts".format(
@@ -240,9 +236,7 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
         if p.cl_context != None:
             cmd += ["--cl", "{0}={1}".format(p.cl_context.beacon_service_name, p.cl_context.beacon_http_url)]
 
-    # Take the accounts just below the hammer's slice. spamoor spends the low indices and
-    # the hammer takes the top; sharing one account means both pick the same nonce and
-    # every send after the first is rejected as underpriced.
+    # Take the accounts just below the hammer's slice.
     prefunded = net.pre_funded_accounts
     n = cfg["senders"]
     end = len(prefunded) - hammer_senders

@@ -4,7 +4,7 @@
 //
 // It is shared by the hammer, which generates continuous traffic, and by pbtchaos,
 // which needs the same shapes on a branch that is about to be reorged out. The
-// builders are subtle in ways that have each been a bug once — SSTORE's operand
+// builders are subtle in ways — SSTORE's operand
 // order, STOP having to be byte 0, the factory's 31-byte prefix — so they live in one
 // place rather than being copied.
 //
@@ -177,9 +177,7 @@ func DeployCodeAfter(prefix, runtime []byte) []byte {
 // then destroys it in the same transaction.
 //
 // The obvious shape — `PUSH20 addr; SELFDESTRUCT` as the creation transaction's own
-// initcode — deploys nothing, because SELFDESTRUCT halts before any RETURN. It cost
-// 215,814 gas against 210,588 for a bare empty CREATE, i.e. it wrote no code at all,
-// so the workload never produced the orphaned code-zone leaves it was meant to.
+// initcode — deploys nothing, because SELFDESTRUCT halts before any RETURN.
 //
 // A factory fixes that: the child returns `codeSize` bytes of code, so code-zone
 // leaves are written, and the parent then calls it so it self-destructs. Post
@@ -234,8 +232,7 @@ func FactoryDestructInitCode(beneficiary common.Address, codeSize int) []byte {
 //
 // The terminator has to be FIRST. Filling with PUSH0 and putting a STOP at the end
 // produced code that overflowed the 1024-slot stack after ~1024 bytes and reverted,
-// burning all forwarded gas — so the contracts could be deployed but never called,
-// and the code-zone read path went untested.
+// burning all forwarded gas.
 //
 // fill selects the body, which decides the code hash: the same fill from different
 // senders shares code-zone leaves, a different fill does not.
