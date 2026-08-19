@@ -183,7 +183,10 @@ type Monitor struct {
 	expected     int
 	lastFinding  string
 	lastExpected string
-	hc           *http.Client
+	// lastDisruption is when disruptoor was last seen holding state, so a divergence that
+	// outlives the partition that caused it is still recognised as ours.
+	lastDisruption time.Time
+	hc             *http.Client
 	// stalled counts consecutive polls that saw no new block, so a chain that stops
 	// producing is reported once rather than every tick.
 	stalled int
@@ -347,7 +350,7 @@ func (m *Monitor) compareHeads(ctx context.Context) error {
 func (m *Monitor) finding(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 
-	if why := m.disrupted(); why != "" {
+	if why := m.disruptedRecently(); why != "" {
 		m.expected++
 		if m.lastExpected != msg {
 			m.lastExpected = msg
@@ -363,6 +366,30 @@ func (m *Monitor) finding(format string, args ...any) {
 	m.lastFinding = msg
 	slog.Error("FINDING: " + msg)
 }
+
+// disruptedRecently reports a disruption that is applied now OR was applied moments ago.
+//
+// The tail matters: a partition causes a reorg, and the reorg resolves AFTER the partition
+// is cleared -- the isolation fork lifts its rules and only then does the loser unwind. Ask
+// disruptoor at the instant the divergence appears and it truthfully answers "nothing
+// applied", so the divergence we caused gets reported as a finding. One per run, reliably.
+//
+// The window is deliberately short. Clients may disagree for as long as fork choice needs to
+// settle after a disruption of ours, and no longer.
+func (m *Monitor) disruptedRecently() string {
+	if why := m.disrupted(); why != "" {
+		m.lastDisruption = time.Now()
+		return why
+	}
+	if !m.lastDisruption.IsZero() && time.Since(m.lastDisruption) < disruptionTail {
+		return "a disruption cleared moments ago and fork choice is still settling"
+	}
+	return ""
+}
+
+// disruptionTail is how long after a disruption a divergence is still attributed to it.
+// Three slots at six seconds; a reorg that has not resolved by then is worth reporting.
+const disruptionTail = 18 * time.Second
 
 // disrupted reports what disruptoor currently has applied, or "" when the network is whole.
 // An unreachable disruptoor means we cannot rule out a partition, but reporting nothing
