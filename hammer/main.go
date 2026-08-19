@@ -202,6 +202,9 @@ func main() {
 	defer ticker.Stop()
 
 	stats := map[string]int{}
+	// Follow one in twelve transactions to a receipt. See audit.go for why sampling is
+	// enough, and why not doing this at all was a real gap.
+	audit := newReceiptAudit(12)
 	round := 0
 	for range ticker.C {
 		if !deadline.IsZero() && time.Now().After(deadline) {
@@ -233,10 +236,12 @@ func main() {
 			}
 			s.nonce++
 			stats[kind]++
+			audit.watch(kind, signed.Hash())
 		}
 
 		if round%25 == 0 {
 			slog.Info("sent", "total", total(stats), "by_workload", summary(stats))
+			audit.report(ctx, clients[0])
 			checkNonceDrift(ctx, clients, senders)
 			env.gasFeeCap = refreshFeeCap(ctx, clients[0], env.gasFeeCap, *gasTipCap)
 		}

@@ -125,6 +125,7 @@ type result struct {
 	Reorged  bool   `json:"reorged"`
 	Depth    uint64 `json:"depth,omitempty"`
 	Minority string `json:"minority,omitempty"`
+	Orphaned int    `json:"orphaned_blocks,omitempty"`
 	Survivor string `json:"survivor,omitempty"`
 }
 

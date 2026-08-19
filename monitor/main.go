@@ -22,10 +22,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -62,6 +64,9 @@ type config struct {
 	// root. It is the client-agnostic way to prove the chain really is on the binary
 	// tree; zero means "unchecked".
 	expectedGenesisRoot common.Hash
+	// disruptoor, when set, is consulted before a divergence is called a finding: a
+	// partition we applied on purpose is not a client bug.
+	disruptoor string
 }
 
 // elFlag collects one `--el name=engineURL,rpcURL` entry per execution client.
@@ -93,6 +98,7 @@ func main() {
 		verbose    = flag.Bool("v", false, "debug logging")
 		verifyOrac = flag.Bool("verify-oracle", true, "prove the oracle detects a corrupted state root before following the chain")
 		selfTest   = flag.Bool("self-test", false, "run only that proof, then exit")
+		disruptoor = flag.String("disruptoor", "", "disruptoor base URL; divergences while it has state applied are expected, not findings")
 		expRoot    = flag.String("expected-genesis-root", "", "assert every node's genesis state root equals this (proves the binary-tree commitment)")
 	)
 	flag.Var(&els, "el", "execution client as name=engineURL,rpcURL (repeatable; at least two)")
@@ -125,6 +131,7 @@ func main() {
 		probeEvery:   *probeEvery,
 		verifyOracle: *verifyOrac,
 	}
+	cfg.disruptoor = strings.TrimSuffix(*disruptoor, "/")
 	if *expRoot != "" {
 		if len(*expRoot) != 66 || !strings.HasPrefix(*expRoot, "0x") {
 			fatal("--expected-genesis-root must be a 0x-prefixed 32-byte hash, got %q", *expRoot)
@@ -135,7 +142,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	m := &Monitor{nodes: nodes, cfg: cfg}
+	// A short timeout on purpose: asking disruptoor whether a partition is applied must
+	// never delay reporting a divergence.
+	m := &Monitor{nodes: nodes, cfg: cfg, hc: &http.Client{Timeout: 3 * time.Second}}
 
 	if *selfTest {
 		if err := m.preflight(ctx); err != nil {
@@ -168,6 +177,13 @@ type Monitor struct {
 	finalized common.Hash
 
 	findings int
+	// expected counts divergences seen while disruptoor had a partition or shaping
+	// applied. They are real divergences and are logged, but they are ours, so they are
+	// counted apart from findings rather than mixed in with them.
+	expected     int
+	lastFinding  string
+	lastExpected string
+	hc           *http.Client
 	// stalled counts consecutive polls that saw no new block, so a chain that stops
 	// producing is reported once rather than every tick.
 	stalled int
@@ -317,13 +333,72 @@ func (m *Monitor) compareHeads(ctx context.Context) error {
 
 // finding records a divergence and keeps going. Halting on the first one ends a soak
 // at the least convenient moment; the count is what the exit status reports.
+// finding reports a divergence -- unless a disruption is applied, in which case the
+// divergence is the disruption doing its job.
+//
+// Without this the monitor cried wolf: one deliberate partition produced the identical
+// "clients disagree at block N" every 2s poll for the length of the split, fourteen times
+// for one event. That volume would bury a real divergence, which is the only thing this
+// process exists to find.
+//
+// Two rules keep it honest. A suppressed divergence is still logged and still counted, just
+// separately -- nothing is hidden. And repeats of the same message collapse, so one event
+// reads as one event.
 func (m *Monitor) finding(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+
+	if why := m.disrupted(); why != "" {
+		m.expected++
+		if m.lastExpected != msg {
+			m.lastExpected = msg
+			slog.Warn("divergence while "+why+" — expected, not a finding", "detail", msg)
+		}
+		return
+	}
+
 	m.findings++
-	slog.Error("FINDING: " + fmt.Sprintf(format, args...))
+	if m.lastFinding == msg {
+		return
+	}
+	m.lastFinding = msg
+	slog.Error("FINDING: " + msg)
+}
+
+// disrupted reports what disruptoor currently has applied, or "" when the network is whole.
+// An unreachable disruptoor means we cannot rule out a partition, but reporting nothing
+// would be worse than a false positive, so treat it as whole and say so once.
+func (m *Monitor) disrupted() string {
+	if m.cfg.disruptoor == "" {
+		return ""
+	}
+	resp, err := m.hc.Get(m.cfg.disruptoor + "/v1/state")
+	if err != nil {
+		m.degrade("disruptoor", "state", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	var st struct {
+		Partitions []json.RawMessage `json:"partitions"`
+		Shaping    []json.RawMessage `json:"shaping"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&st) != nil {
+		return ""
+	}
+	switch {
+	case len(st.Partitions) > 0 && len(st.Shaping) > 0:
+		return fmt.Sprintf("%d partition(s) and %d shaping rule(s) are applied",
+			len(st.Partitions), len(st.Shaping))
+	case len(st.Partitions) > 0:
+		return fmt.Sprintf("%d partition(s) are applied", len(st.Partitions))
+	case len(st.Shaping) > 0:
+		return fmt.Sprintf("%d shaping rule(s) are applied", len(st.Shaping))
+	}
+	return ""
 }
 
 func (m *Monitor) summarise() error {
-	slog.Info("stopping", "highest_block", m.headNum, "findings", m.findings)
+	slog.Info("stopping", "highest_block", m.headNum, "findings", m.findings,
+		"expected_divergences", m.expected)
 	if m.findings > 0 {
 		return fmt.Errorf("%d findings", m.findings)
 	}
