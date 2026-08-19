@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -141,4 +142,59 @@ func joinParts(p []string) string {
 		out += s
 	}
 	return out
+}
+
+// gasDisagreement collapses the eth_estimateGas difference between clients into one report
+// plus a periodic summary.
+//
+// It is a real client difference and worth knowing about -- geth and besu price the same
+// deployment 2.9% apart -- but it fires on nearly every estimate, and 188 identical findings
+// in one run is exactly the noise that buries the next real one. That is the same failure
+// the state-root monitor had.
+type gasDisagreement struct {
+	mu       sync.Mutex
+	seen     int
+	worstPct float64
+	worst    string
+	reported bool
+}
+
+var gasGap = &gasDisagreement{}
+
+func (d *gasDisagreement) note(first, other uint64, client int, call ethereum.CallMsg) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.seen++
+
+	lo, hi := first, other
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	pct := 0.0
+	if lo > 0 {
+		pct = float64(hi-lo) * 100 / float64(lo)
+	}
+	if pct > d.worstPct {
+		d.worstPct = pct
+		d.worst = fmt.Sprintf("client_0=%d client_%d=%d (%.2f%%, %d bytes of calldata)",
+			first, client, other, pct, len(call.Data))
+	}
+
+	// The first one carries the detail worth having; after that only the tally matters.
+	if !d.reported {
+		d.reported = true
+		slog.Error("FINDING: clients disagree on gas for the same call — reported once here, "+
+			"then as a periodic tally so it cannot bury a new finding",
+			"client_0", first, "client_"+fmt.Sprint(client), other,
+			"gap_pct", fmt.Sprintf("%.2f", pct), "data_len", len(call.Data))
+	}
+}
+
+func (d *gasDisagreement) report() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.seen == 0 {
+		return
+	}
+	slog.Warn("eth_estimateGas disagreements so far", "count", d.seen, "worst", d.worst)
 }

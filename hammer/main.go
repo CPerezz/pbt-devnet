@@ -242,6 +242,7 @@ func main() {
 		if round%25 == 0 {
 			slog.Info("sent", "total", total(stats), "by_workload", summary(stats))
 			audit.report(ctx, clients[0])
+			gasGap.report()
 			checkNonceDrift(ctx, clients, senders)
 			env.gasFeeCap = refreshFeeCap(ctx, clients[0], env.gasFeeCap, *gasTipCap)
 		}
@@ -507,8 +508,7 @@ func estimateEverywhere(ctx context.Context, clients []*ethclient.Client, call e
 		if !have {
 			first, have = g, true
 		} else if g != first {
-			slog.Error("FINDING: clients disagree on gas for the same call",
-				"client_0", first, "client_"+fmt.Sprint(i), g, "to", call.To, "data_len", len(call.Data))
+			gasGap.note(first, g, i, call)
 		}
 		if g > best {
 			best = g

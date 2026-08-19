@@ -153,8 +153,15 @@ block and compounds with nothing to stop it, until no transaction can be paid fo
 1-ether cap. The rates that hold it there, and the measurement behind them, are on `pbt_hammer` in
 `args/devnet.yaml` — check block fullness after changing them.
 
-The revert workload is expected to produce `status=0` receipts. Everything else should be
-`status=1`.
+The hammer samples receipts and reports a per-workload tally, so a shape that silently stops
+working is a finding rather than invisible traffic. A healthy run looks like this — every
+workload succeeding, and only `revert` reverting, which is its whole purpose:
+
+```
+receipts sampled (successful/total) by_workload="accesslist=19/19 callread=21/21 codedup=20/20
+delegate=18/18 destruct=18/18 extcode=22/22 fanout=19/19 legacy=23/23 revert=0/18
+storage=19/19 zeroize=20/20"
+```
 
 ## Chaos
 
@@ -203,9 +210,11 @@ make repeer                               # restart any client left with no peer
 ```
 
 `make chaos-status` reports `orphaned_blocks` per scenario — how much chain the partition
-threw away, which should match geth's own `Chain reorg detected … drop=N`. Depths of 5, 10 and
-13 blocks are normal for `DEPTH=6`, `20` and `30`; the periodic isolation forks are 1. While a
-scenario runs, the minority node is *expected* to show as Synchronizing and to sit behind the
+threw away, matching geth's own `Chain reorg detected … drop=N`. **It is roughly `DEPTH`
+divided by the number of nodes**, because the stranded node holds only its share of the
+proposers: `DEPTH=8` orphans 1-3 blocks on a four-node net, `DEPTH=30` orphaned 13. Ask for a
+large `DEPTH` if you want a deep abandoned branch. The periodic isolation forks are 1 block by
+construction. While a scenario runs, the minority node is *expected* to show as Synchronizing and to sit behind the
 tip for the length of the partition — deeper `DEPTH` means longer.
 
 A scenario that cannot confirm the clients reconverged reports `inconclusive` rather than a
