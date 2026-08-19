@@ -52,34 +52,34 @@ ui: ## print every web UI and API url
 	  pbtchaos   "$$(kurtosis port print $(ENCLAVE) pbtchaos http 2>/dev/null)"
 
 status: ## show every execution client's head and state root
-	@scripts/status.sh $(ENCLAVE)
+	@scripts/pbt.py status $(ENCLAVE)
 
 verify: ## compare every client at the same block number (BLOCKS=100)
-	@scripts/verify.py $(ENCLAVE) --blocks $(BLOCKS) --wait
+	@scripts/pbt.py verify $(ENCLAVE) --blocks $(BLOCKS) --wait
 
 forks: ## competing heads, how deep each branch is, and who is on which
-	@scripts/forks.py $(ENCLAVE)
+	@scripts/pbt.py forks $(ENCLAVE)
 
 proposals: ## who was due to propose each slot, and who missed
-	@scripts/proposals.py $(ENCLAVE)
+	@scripts/pbt.py proposals $(ENCLAVE)
 
 diagnose: ## where did the chain split, and what were the peers doing then
-	@scripts/diagnose.py $(ENCLAVE)
+	@scripts/pbt.py diagnose $(ENCLAVE)
 
 split: ## partition the network by hand: majority | last participant (el and cl)
-	@scripts/chaos.sh $(ENCLAVE) split
+	@scripts/pbt.py split $(ENCLAVE)
 
 heal: ## remove every partition and shaping rule
-	@scripts/chaos.sh $(ENCLAVE) heal
+	@scripts/pbt.py heal $(ENCLAVE)
 
 repeer: ## restart any consensus client left with no peers after a partition
-	@scripts/repeer.sh $(ENCLAVE)
+	@scripts/pbt.py repeer $(ENCLAVE)
 
 chaos-status: ## what pbtchaos is doing now, what is queued, and recent results
-	@scripts/chaos.sh $(ENCLAVE) status
+	@scripts/pbt.py chaos-status $(ENCLAVE)
 
 scenario: ## run one reorg scenario (NAME=code-shared DEPTH=20 [MINORITY=3])
-	@scripts/chaos.sh $(ENCLAVE) scenario $(NAME) $(DEPTH) $(MINORITY)
+	@scripts/pbt.py scenario $(ENCLAVE) $(NAME) $(DEPTH) $(MINORITY)
 
 build: ## build every local image the package expects
 	scripts/build-images.sh $(ARGS)
