@@ -69,8 +69,7 @@ def main():
         for b in range(1, top + 1):
             hs = {n: (rpc(urls[n], "eth_getBlockByNumber", [hex(b), False]) or {}).get("hash") for n in live}
             if len(set(hs.values())) == 1:
-                if first_bad is None:
-                    last_ok = b
+                last_ok = b
             else:
                 first_bad = b
                 break

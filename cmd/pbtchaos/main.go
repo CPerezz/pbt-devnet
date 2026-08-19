@@ -91,9 +91,6 @@ func (c *chaos) keysFor() (string, string) {
 	}
 	a := c.turn * 2 % len(c.keys)
 	b := (c.turn*2 + 1) % len(c.keys)
-	if a == b {
-		b = (b + 1) % len(c.keys)
-	}
 	return c.keys[a], c.keys[b]
 }
 

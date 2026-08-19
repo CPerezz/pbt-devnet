@@ -30,7 +30,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -189,9 +188,6 @@ type Monitor struct {
 	// stalled counts consecutive polls that saw no new block, so a chain that stops
 	// producing is reported once rather than every tick.
 	stalled int
-	// disputed is the block the clients last disagreed about, and the one evidence is
-	// collected for.
-	disputed common.Hash
 	// knownBad is the per-node set of blocks already rejected before this run started,
 	// so oracle 2 reports new rejections rather than history.
 	knownBad []map[common.Hash]bool
@@ -311,7 +307,6 @@ func (m *Monitor) compareHeads(ctx context.Context) error {
 	}
 	for i := 1; i < len(at); i++ {
 		if at[i].Hash != at[0].Hash {
-			m.disputed = at[0].Hash
 			m.finding("clients disagree at block %d: %s=%s (root %s) %s=%s (root %s)",
 				lowest,
 				m.nodes[0].Name, at[0].Hash, at[0].StateRoot,
@@ -534,7 +529,6 @@ func (m *Monitor) preflight(ctx context.Context) error {
 	m.head = heads[0].Hash
 	m.headNum = uint64(heads[0].Number)
 	m.headTime = uint64(heads[0].Timestamp)
-	m.finalized = common.Hash{}
 
 	m.baselineBadBlocks(ctx)
 
@@ -610,37 +604,6 @@ func (m *Monitor) buildPayload(ctx context.Context, slot uint64, n *Node, parent
 	}
 	return &envelope, nil
 }
-
-// newPayloadAll imports one payload into every node concurrently. Each node
-// re-executes it and compares its own computed state root against the one the
-// payload commits to, which is what makes this the primary oracle.
-func (m *Monitor) newPayloadAll(ctx context.Context, data *engine.ExecutableData) ([]engine.PayloadStatusV1, error) {
-	var (
-		statuses = make([]engine.PayloadStatusV1, len(m.nodes))
-		errs     = make([]error, len(m.nodes))
-		wg       sync.WaitGroup
-	)
-	beaconRoot := common.Hash{}
-	for i, n := range m.nodes {
-		wg.Add(1)
-		go func(i int, n *Node) {
-			defer wg.Done()
-			errs[i] = n.Engine(ctx, "engine_newPayloadV5", &statuses[i],
-				data, []common.Hash{}, &beaconRoot, []hexutil.Bytes{})
-		}(i, n)
-	}
-	wg.Wait()
-	for i := range errs {
-		if errs[i] != nil {
-			return statuses, fmt.Errorf("newPayloadV5 on %s: %w", m.nodes[i].Name, errs[i])
-		}
-	}
-	return statuses, nil
-}
-
-// maxTransient bounds how long the monitor waits out an unreachable node before it
-// treats the outage itself as the failure.
-const maxTransient = 40
 
 func deref(s *string) string {
 	if s == nil {

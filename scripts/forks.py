@@ -113,19 +113,19 @@ def consensus_forks(enclave, cls):
     def ancestry(root):
         nodes = next((n for n in dumps.values() if root in n), None)
         if not nodes:
-            return [], {}
+            return []
         chain, seen = [], set()
         while root in nodes and root not in seen:
             seen.add(root)
             chain.append(root)
             root = nodes[root].get("parent_root")
-        return chain, nodes
+        return chain
 
-    chains, owners = {}, {}
+    chains = {}
     for r in allroots:
-        c, nodes = ancestry(r)
+        c = ancestry(r)
         if c:
-            chains[r], owners[r] = c, nodes
+            chains[r] = c
     if len(chains) < 2:
         return
     common = set.intersection(*(set(c) for c in chains.values()))

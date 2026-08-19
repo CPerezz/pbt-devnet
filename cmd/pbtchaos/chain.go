@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -17,14 +18,13 @@ import (
 // el is one execution client, addressed by the name ethereum-package gave it.
 type el struct {
 	name string
-	rpc  string
 	c    *ethclient.Client
 }
 
 func dialELs(ctx context.Context, specs []string) ([]*el, error) {
 	var out []*el
 	for _, s := range specs {
-		name, url, ok := splitPair(s)
+		name, url, ok := strings.Cut(s, "=")
 		if !ok {
 			return nil, fmt.Errorf("--el wants name=url, got %q", s)
 		}
@@ -32,7 +32,7 @@ func dialELs(ctx context.Context, specs []string) ([]*el, error) {
 		if err != nil {
 			return nil, fmt.Errorf("dial %s: %w", name, err)
 		}
-		out = append(out, &el{name: name, rpc: url, c: c})
+		out = append(out, &el{name: name, c: c})
 	}
 	return out, nil
 }
@@ -50,7 +50,7 @@ func (e *el) head(ctx context.Context) (uint64, common.Hash, error) {
 // what makes a reorg observable: a changed hash at an unchanged height IS the reorg.
 func (e *el) hashAt(ctx context.Context, n uint64) common.Hash {
 	h, err := e.c.HeaderByNumber(ctx, new(big.Int).SetUint64(n))
-	if err != nil || h == nil {
+	if err != nil {
 		return common.Hash{}
 	}
 	return h.Hash()
@@ -116,19 +116,18 @@ func waitBlocks(ctx context.Context, els []*el, n uint64) error {
 
 // beacon is one consensus client's HTTP API.
 type beacon struct {
-	name string
-	url  string
-	hc   *http.Client
+	url string
+	hc  *http.Client
 }
 
 func newBeacons(specs []string) ([]*beacon, error) {
 	var out []*beacon
 	for _, s := range specs {
-		name, url, ok := splitPair(s)
+		_, url, ok := strings.Cut(s, "=")
 		if !ok {
 			return nil, fmt.Errorf("--cl wants name=url, got %q", s)
 		}
-		out = append(out, &beacon{name: name, url: url, hc: &http.Client{Timeout: 10 * time.Second}})
+		out = append(out, &beacon{url: url, hc: &http.Client{Timeout: 10 * time.Second}})
 	}
 	return out, nil
 }
@@ -194,13 +193,4 @@ func (b *beacon) duties(ctx context.Context, epoch uint64) ([]duty, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Slot < out[j].Slot })
 	return out, nil
-}
-
-func splitPair(s string) (string, string, bool) {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '=' {
-			return s[:i], s[i+1:], true
-		}
-	}
-	return "", "", false
 }
