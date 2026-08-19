@@ -36,23 +36,76 @@ const tipMargin = 4
 // minChainHeight is how much chain a scenario wants behind it before it starts.
 const minChainHeight = 24
 
-// diverged reports whether the minority and the majority are actually on different
-// chains, which is the whole premise of a partition scenario.
-func (c *chaos) diverged(ctx context.Context, minority *el, majority []*el) bool {
-	n, err := lowestHead(ctx, append([]*el{minority}, majority...))
-	if err != nil || n == 0 {
-		return false
-	}
-	mh := minority.hashAt(ctx, n)
-	if mh == (common.Hash{}) {
-		return false
-	}
-	for _, e := range majority {
-		if h := e.hashAt(ctx, n); h != (common.Hash{}) && h != mh {
-			return true
+// awaitDivergence waits until the minority and the majority are demonstrably on different
+// chains, which is the premise every scenario rests on.
+func (c *chaos) awaitDivergence(ctx context.Context, minority *el, majority []*el, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if n, err := lowestHead(ctx, append([]*el{minority}, majority...)); err == nil && n > 0 {
+			if mh := minority.hashAt(ctx, n); mh != (common.Hash{}) {
+				for _, e := range majority {
+					if h := e.hashAt(ctx, n); h != (common.Hash{}) && h != mh {
+						return true
+					}
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(2 * time.Second):
 		}
 	}
-	return false
+}
+
+// healQuietly clears disruptoor without letting a clear failure mask the reason the
+// scenario is being abandoned.
+func (c *chaos) healQuietly(ctx context.Context) {
+	if err := c.d.clear(); err != nil {
+		c.log.Error("could not clear disruptoor state", "err", err)
+	}
+}
+
+// checkGone asks the scenario's own predicate, on the surviving branch, whether the
+// doomed change is still there -- and separately whether anything that was supposed to
+// outlive the reorg did.
+func (c *chaos) checkGone(ctx context.Context, sc *scenario, r *run) (string, error) {
+	var still []string
+	for _, e := range r.all() {
+		on, err := sc.effect(ctx, r, e, r.at)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", e.name, err)
+		}
+		if on {
+			still = append(still, e.name)
+		}
+	}
+	if len(still) > 0 {
+		sort.Strings(still)
+		// Wrong is not the same as inconsistent. Every client giving the same wrong
+		// answer is a harness or specification question; clients differing is two
+		// implementations disagreeing, which is why this devnet exists.
+		kind := "clients DISAGREE"
+		if len(still) == len(r.all()) {
+			kind = "every client gives the same wrong answer"
+		}
+		return "", fmt.Errorf("%s: the reorged-out change is still present at block %s on %s",
+			kind, r.at, strings.Join(still, " "))
+	}
+
+	note := fmt.Sprintf("the doomed change is gone from every client at block %s", r.at)
+	if sc.survives != nil {
+		for _, e := range r.all() {
+			if err := sc.survives(ctx, r, e, r.at); err != nil {
+				return "", fmt.Errorf("state that should have outlived the reorg is missing: %w", err)
+			}
+		}
+		note += "; the shared blob still reads back on every client"
+	}
+	return note, nil
 }
 
 // awaitHeight waits for every client to have SOME block at n. A client that has just
@@ -184,39 +237,61 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 	}
 	c.log.Info("partitioned", "majority", majorityNodes, "minority", minorityNode)
 
+	// Send only once the two sides really are on different chains. disruptoor applies
+	// its rules asynchronously, so a transaction sent immediately after the partition
+	// call can still reach the majority and be mined on the branch that SURVIVES -- and
+	// then looks like state that refused to go away. code-sole reported exactly that
+	// against all four clients, anchored at block 2.
+	if !c.awaitDivergence(ctx, minority, majority, 90*time.Second) {
+		c.healQuietly(ctx)
+		res.Outcome = "inconclusive"
+		res.Detail = "the partition never separated the chains, so nothing could be doomed"
+		c.log.Warn("partition did not bite", "name", sc.name, "minority", minority.name)
+		return res
+	}
+
 	applyErr := sc.apply(ctx, r)
 	if applyErr != nil {
 		// Heal at once. Holding the split for the full depth when the doomed state was
 		// never written keeps the minority orphaned for minutes and verifies nothing --
 		// it just looks like the devnet is broken.
-		c.log.Error("scenario transactions failed on the minority; healing early",
-			"name", sc.name, "err", applyErr)
-	} else if err := waitBlocks(ctx, majority, depth); err != nil {
-		// Measure depth on the majority: the minority builds slowly while partitioned,
-		// so waiting on the slowest client would stretch a depth-10 scenario forever.
-		c.log.Warn("did not reach the requested depth", "err", err)
-	}
-
-	// The partition has to have actually bitten. Everything below assumes the scenario's
-	// writes are confined to the minority, and that is only true if the two sides really
-	// did build different chains -- disruptoor applies its rules asynchronously, so a
-	// transaction sent immediately after the call can still reach the majority and be
-	// mined on the branch that survives. It then looks like state that refused to go away.
-	if !c.diverged(ctx, minority, majority) {
-		if err := c.d.clear(); err != nil {
-			c.log.Error("could not clear after a partition that did not bite", "err", err)
-		}
+		c.healQuietly(ctx)
 		res.Outcome = "inconclusive"
-		res.Detail = "the partition never separated the chains, so nothing was doomed; " +
-			"the scenario's writes may have landed on the surviving branch"
-		c.log.Warn("partition did not bite", "name", sc.name, "minority", minority.name)
+		res.Detail = "the doomed transactions never landed: " + applyErr.Error()
+		c.log.Error("scenario transactions failed on the minority; healed early",
+			"name", sc.name, "err", applyErr)
 		return res
 	}
 
+	// The experiment has to have been set up before it is worth running. The doomed
+	// change must be visible on the minority -- otherwise a reverted transaction would
+	// let the scenario "pass" on an absence that was always there -- and invisible on the
+	// majority, which is what proves it is confined to the branch about to die.
+	if on, err := sc.effect(ctx, r, minority, nil); err != nil || !on {
+		c.healQuietly(ctx)
+		res.Outcome = "inconclusive"
+		res.Detail = fmt.Sprintf("the doomed change is not visible on the minority %s, so there is "+
+			"nothing for the reorg to remove (%s)", minority.name, r.describeEffect(ctx, sc, c.els, nil))
+		return res
+	}
+	if on, err := sc.effect(ctx, r, majority[0], nil); err != nil || on {
+		c.healQuietly(ctx)
+		res.Outcome = "inconclusive"
+		res.Detail = fmt.Sprintf("the doomed change is already visible on the majority %s, so it "+
+			"reached the surviving branch and was never doomed (%s)",
+			majority[0].name, r.describeEffect(ctx, sc, c.els, nil))
+		return res
+	}
+	c.log.Info("doomed state confirmed on the minority alone", "name", sc.name)
+
+	// Measure depth on the majority: the minority builds slowly while partitioned, so
+	// waiting on the slowest client would stretch a depth-10 scenario forever.
+	if err := waitBlocks(ctx, majority, depth); err != nil {
+		c.log.Warn("did not reach the requested depth", "err", err)
+	}
+
 	// Record the branch that is MEANT to survive, before healing, so survival is checked
-	// against a hash taken while the two branches still existed separately. Without this
-	// a scenario only ever checked state, and would read its assertions the wrong way
-	// round if the minority's branch happened to win.
+	// against a hash taken while the two branches still existed separately.
 	wantHeight, wantHash := majorityTip(ctx, majority)
 
 	if err := c.d.clear(); err != nil {
@@ -225,12 +300,6 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 		return res
 	}
 	c.log.Info("healed", "name", sc.name, "expect_height", wantHeight, "expect_hash", short(wantHash))
-
-	if applyErr != nil {
-		res.Outcome = "inconclusive"
-		res.Detail = "the doomed transactions never landed: " + applyErr.Error()
-		return res
-	}
 
 	height, ok := c.waitAgreement(ctx, 4*time.Minute)
 	if !ok {
@@ -244,8 +313,6 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 	res.Reorged = true
 	c.log.Info("reconverged", "name", sc.name, "height", height)
 
-	// The intended branch has to be the one that won. If the doomed branch survived
-	// instead, every state assertion below would be inverted, so say so and stop.
 	if wantHash == (common.Hash{}) {
 		// Without an anchor the only thing left to check against is head, where a
 		// re-mined transaction will have restored the doomed state -- so the check would
@@ -255,35 +322,39 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 			"no branch-anchored height to verify against"
 		return res
 	}
-	{
-		if !awaitHeight(ctx, c.els, wantHeight, 2*time.Minute) {
-			res.Outcome = "inconclusive"
-			res.Detail = fmt.Sprintf("not every client reached block %d after the heal", wantHeight)
-			return res
-		}
-		_, seen := agreed(ctx, c.els, wantHeight)
-		var wrong []string
-		for name, h := range seen {
-			if h != wantHash {
-				wrong = append(wrong, fmt.Sprintf("%s=%s", name, short(h)))
-			}
-		}
-		if len(wrong) > 0 {
-			sort.Strings(wrong)
-			res.Outcome = "FINDING"
-			res.Detail = fmt.Sprintf(
-				"the majority branch did not survive: block %d was %s on the majority before the heal; after: %s",
-				wantHeight, short(wantHash), strings.Join(wrong, " "))
-			c.log.Error("wrong branch survived", "name", sc.name, "height", wantHeight, "want", short(wantHash))
-			return res
-		}
-		res.Survivor = fmt.Sprintf("majority block %d %s", wantHeight, short(wantHash))
-		// Every assertion is evaluated here, on the surviving branch, rather than at head
-		// where a re-mined transaction would have put the doomed state back.
-		r.at = new(big.Int).SetUint64(wantHeight)
+	if !awaitHeight(ctx, c.els, wantHeight, 2*time.Minute) {
+		res.Outcome = "inconclusive"
+		res.Detail = fmt.Sprintf("not every client reached block %d after the heal", wantHeight)
+		return res
 	}
 
-	note, err := sc.verify(ctx, r)
+	// The intended branch has to be the one that won. If the doomed branch survived
+	// instead, every check below would be inverted, so say so and stop.
+	_, seen := agreed(ctx, c.els, wantHeight)
+	var wrong []string
+	for name, h := range seen {
+		if h != wantHash {
+			wrong = append(wrong, fmt.Sprintf("%s=%s", name, short(h)))
+		}
+	}
+	if len(wrong) > 0 {
+		sort.Strings(wrong)
+		res.Outcome = "FINDING"
+		res.Detail = fmt.Sprintf(
+			"the majority branch did not survive: block %d was %s on the majority before the heal; after: %s",
+			wantHeight, short(wantHash), strings.Join(wrong, " "))
+		c.log.Error("wrong branch survived", "name", sc.name, "height", wantHeight, "want", short(wantHash))
+		return res
+	}
+	res.Survivor = fmt.Sprintf("majority block %d %s", wantHeight, short(wantHash))
+	r.at = new(big.Int).SetUint64(wantHeight)
+
+	// The reorg happened, so the minority was made to unwind: count it, or a run of
+	// scenarios reads as no reorg coverage at all.
+	c.countReorg(minority.name)
+
+	note, err := c.checkGone(ctx, sc, r)
+
 	if err != nil {
 		res.Outcome = "FINDING"
 		res.Detail = err.Error()

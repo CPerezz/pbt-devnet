@@ -149,6 +149,24 @@ func (s *sender) send(ctx context.Context, e *el, r txReq) (common.Hash, common.
 	return tx.Hash(), created, nil
 }
 
+// awaitOK waits for a receipt and insists the transaction actually succeeded.
+//
+// Discarding the status is how four of six scenarios could pass without doing anything:
+// each asserts an ABSENCE afterwards -- no code, zero balance, slots cleared -- which is
+// trivially true when the write never landed. A revert, an out-of-gas or a rejected 7702
+// authorization all read as success.
+func (s *sender) awaitOK(ctx context.Context, e *el, h common.Hash, timeout time.Duration) error {
+	rec, err := s.await(ctx, e, h, timeout)
+	if err != nil {
+		return err
+	}
+	if rec.Status != types.ReceiptStatusSuccessful {
+		return fmt.Errorf("transaction %s reverted on %s (gas used %d of the limit)",
+			short(h), e.name, rec.GasUsed)
+	}
+	return nil
+}
+
 // await waits for a receipt on the client the transaction was sent to. A scenario that
 // carries on without confirming would put its state on neither branch.
 func (s *sender) await(ctx context.Context, e *el, h common.Hash, timeout time.Duration) (*types.Receipt, error) {

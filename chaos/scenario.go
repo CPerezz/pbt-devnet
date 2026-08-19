@@ -30,8 +30,22 @@ type scenario struct {
 	// apply runs DURING the split, through the minority only. Everything it writes is
 	// doomed.
 	apply func(context.Context, *run) error
-	// verify runs after the heal, against every client.
-	verify func(context.Context, *run) (string, error)
+	// effect answers one question -- is the doomed change visible on this client at this
+	// height? -- and the runner asks it three times: it must be TRUE on the minority
+	// before the heal, FALSE on the majority at that same moment, and FALSE on every
+	// client at the anchor afterwards.
+	//
+	// One predicate rather than an "assert absent" is what makes the scenarios honest.
+	// Absence is trivially true when nothing was written, so a reverted transaction used
+	// to read as a pass; and it cannot express storage-del, where the doomed change IS an
+	// absence and the surviving branch is the one holding values.
+	//
+	// A nil height means latest.
+	effect func(context.Context, *run, *el, *big.Int) (bool, error)
+	// survives is optional: state that must still be READABLE after the heal. Only
+	// code-shared needs it, and it is the half of go-ethereum#30 that says chunks stay
+	// when a surviving account still holds them.
+	survives func(context.Context, *run, *el, *big.Int) error
 }
 
 // run carries one scenario's state from setup through verification.
@@ -42,22 +56,19 @@ type run struct {
 	viaMin   *sender // sends through the minority
 	viaMaj   *sender // sends through the majority
 
-	doomed    []common.Address // must be empty/absent afterwards
-	survivor  common.Address   // must keep its state afterwards
-	code      []byte           // the runtime blob deployed on both sides
-	slots     []uint64
-	slotIsSet bool // true when the slots must READ BACK non-zero after the heal
+	doomed   []common.Address // written on the branch that dies
+	survivor common.Address   // written before the split, must outlive it
+	code     []byte           // the runtime blob deployed on both sides
+	slots    []uint64
 
-	// at is the height every assertion is evaluated at: the majority's tip recorded
-	// before the heal.
+	// at is the height the final check is evaluated at: the majority's tip, recorded
+	// before the heal and four blocks below its head.
 	//
 	// This has to be a fixed block, not "latest". A reorged-out transaction is still
 	// valid -- same sender, same nonce -- so it returns to the mempool and is re-mined on
 	// the surviving branch within a block or two, recreating the contract at the same
 	// address. Checking at head therefore measures how fast the pool re-broadcast, not
-	// whether the tree dropped the abandoned branch's writes. At `at`, the doomed branch
-	// was never canonical, so anything it wrote must be absent no matter what happens
-	// afterwards.
+	// whether the tree dropped the abandoned branch's writes.
 	at *big.Int
 }
 
@@ -74,9 +85,7 @@ var scenarios = map[string]*scenario{
 			r.doomed = append(r.doomed, addr)
 			return nil
 		},
-		verify: func(ctx context.Context, r *run) (string, error) {
-			return r.expectNoCode(ctx, r.doomed)
-		},
+		effect: hasCode,
 	},
 
 	"code-shared": {
@@ -101,15 +110,18 @@ var scenarios = map[string]*scenario{
 			r.doomed = append(r.doomed, addr)
 			return nil
 		},
-		verify: func(ctx context.Context, r *run) (string, error) {
-			gone, err := r.expectNoCode(ctx, r.doomed)
+		effect: hasCode,
+		// Dropping the doomed account must not take the shared chunks with it.
+		survives: func(ctx context.Context, r *run, e *el, at *big.Int) error {
+			code, err := e.c.CodeAt(ctx, r.survivor, at)
 			if err != nil {
-				return gone, err
+				return err
 			}
-			// This is the half that go-ethereum#30 is about: dropping the doomed
-			// account must not take the shared chunks with it.
-			kept, err := r.expectCode(ctx, r.survivor, r.code)
-			return gone + "; " + kept, err
+			if !bytes.Equal(code, r.code) {
+				return fmt.Errorf("%s has %d bytes at the surviving account %s, wanted %d",
+					e.name, len(code), r.survivor.Hex(), len(r.code))
+			}
+			return nil
 		},
 	},
 
@@ -150,13 +162,10 @@ var scenarios = map[string]*scenario{
 				r.doomed = append(r.doomed, authority)
 			}
 			// Nonces are sequential from one sender, so the last receipt implies the rest.
-			_, err := r.viaMin.await(ctx, r.minority, last, 120*time.Second)
-			return err
+			return r.viaMin.awaitOK(ctx, r.minority, last, 120*time.Second)
 		},
-		verify: func(ctx context.Context, r *run) (string, error) {
-			// A cleared delegation means no code at all: back to a plain EOA.
-			return r.expectNoCode(ctx, r.doomed)
-		},
+		// A delegation shows up as code: 0xef0100 followed by the target.
+		effect: hasCode,
 	},
 
 	"account": {
@@ -178,23 +187,19 @@ var scenarios = map[string]*scenario{
 				}
 				r.doomed = append(r.doomed, addr)
 			}
-			_, err := r.viaMin.await(ctx, r.minority, last, 120*time.Second)
-			return err
+			return r.viaMin.awaitOK(ctx, r.minority, last, 120*time.Second)
 		},
-		verify: func(ctx context.Context, r *run) (string, error) {
-			var bad []string
-			for _, e := range r.all() {
-				for _, a := range r.doomed {
-					b, err := e.c.BalanceAt(ctx, a, r.at)
-					if err != nil {
-						return "", err
-					}
-					if b.Sign() != 0 {
-						bad = append(bad, fmt.Sprintf("%s still funds %s (%s wei)", e.name, a.Hex(), b))
-					}
+		effect: func(ctx context.Context, r *run, e *el, at *big.Int) (bool, error) {
+			for _, a := range r.doomed {
+				b, err := e.c.BalanceAt(ctx, a, at)
+				if err != nil {
+					return false, err
+				}
+				if b.Sign() != 0 {
+					return true, nil
 				}
 			}
-			return finding(bad, fmt.Sprintf("%d reorged-out accounts are empty on every client", len(r.doomed)), len(r.all()))
+			return false, nil
 		},
 	},
 
@@ -217,8 +222,9 @@ var scenarios = map[string]*scenario{
 				return txkit.SlotKey(s + 1)
 			})
 		},
-		verify: func(ctx context.Context, r *run) (string, error) {
-			return r.expectSlots(ctx, r.survivor, r.slots, false)
+		// The doomed change is the slots being set.
+		effect: func(ctx context.Context, r *run, e *el, at *big.Int) (bool, error) {
+			return anySlot(ctx, e, r.survivor, r.slots, at, false)
 		},
 	},
 
@@ -227,7 +233,6 @@ var scenarios = map[string]*scenario{
 		doc:  "slots that existed before the split are DELETED on the doomed branch; the deletion must be undone",
 		setup: func(ctx context.Context, r *run) error {
 			r.slots = []uint64{1, 2, 3}
-			r.slotIsSet = true
 			// Seed in the initcode, so the values are already on the surviving branch
 			// before anything is partitioned.
 			init := txkit.DeployCodeAfter(txkit.SeedCode(r.slots), txkit.WriterRuntime())
@@ -245,10 +250,42 @@ var scenarios = map[string]*scenario{
 				return common.Hash{}
 			})
 		},
-		verify: func(ctx context.Context, r *run) (string, error) {
-			return r.expectSlots(ctx, r.survivor, r.slots, true)
+		// Here the doomed change is the slots being GONE, which is why effect has to be a
+		// predicate: on the surviving branch these read non-zero and that is correct.
+		effect: func(ctx context.Context, r *run, e *el, at *big.Int) (bool, error) {
+			return anySlot(ctx, e, r.survivor, r.slots, at, true)
 		},
 	},
+}
+
+// hasCode reports whether any doomed address holds code, which covers a deployment and a
+// 7702 delegation alike.
+func hasCode(ctx context.Context, r *run, e *el, at *big.Int) (bool, error) {
+	for _, a := range r.doomed {
+		code, err := e.c.CodeAt(ctx, a, at)
+		if err != nil {
+			return false, err
+		}
+		if len(code) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// anySlot reports whether any of the slots is zero (wantZero) or non-zero.
+func anySlot(ctx context.Context, e *el, addr common.Address, slots []uint64, at *big.Int, wantZero bool) (bool, error) {
+	for _, s := range slots {
+		got, err := e.c.StorageAt(ctx, addr, txkit.SlotKey(s), at)
+		if err != nil {
+			return false, err
+		}
+		isZero := common.BytesToHash(got) == (common.Hash{})
+		if isZero == wantZero {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func scenarioNames() []string {
@@ -263,17 +300,15 @@ func scenarioNames() []string {
 func (r *run) all() []*el { return append([]*el{r.minority}, r.majority...) }
 
 // deployGas sizes a deployment under EIP-8297's two-dimensional gas, where every byte of
-// deployed code costs 1530 state gas. A flat allowance silently made every scenario
-// unsendable: 3000 bytes alone needs 4.59M, well past the 3M that used to be passed.
+// deployed code costs 1530 state gas.
 //
-// The constant stays small on purpose. A transaction's maximum cost is feeCap*gas, and
-// the fee cap is derived by dividing a fixed budget by the gas, so an oversized limit
-// buys nothing and prices the transaction out on a chain whose base fee has risen.
+// 260k covers creating the account itself before a single byte of code is written: a fresh
+// account is about 207,391 state gas, and a deployment always makes one. At 120k the
+// writer contract -- eight bytes of runtime -- ran out and reverted, which reads as a
+// scenario bug rather than a gas one. The constant stays as small as it can be: cost is
+// feeCap*gas and the fee cap is a fixed budget divided by the gas, so an oversized limit
+// prices the transaction out on a chain whose base fee has risen.
 func deployGas(codeLen int) uint64 {
-	// 260k covers creating the account itself before a single byte of code is written:
-	// under EIP-8297 a fresh account costs about 207,391 state gas, and a deployment
-	// always makes one. At 120k the writer contract -- eight bytes of runtime -- ran out
-	// and reverted, which reads as a scenario bug rather than a gas one.
 	return 260_000 + uint64(codeLen)*1800
 }
 
@@ -282,12 +317,8 @@ func (r *run) deploy(ctx context.Context, e *el, s *sender, initcode []byte) (co
 	if err != nil {
 		return common.Address{}, err
 	}
-	rec, err := s.await(ctx, e, h, 120*time.Second)
-	if err != nil {
+	if err := s.awaitOK(ctx, e, h, 120*time.Second); err != nil {
 		return common.Address{}, err
-	}
-	if rec.Status != types.ReceiptStatusSuccessful {
-		return common.Address{}, fmt.Errorf("deployment reverted on %s", e.name)
 	}
 	return addr, nil
 }
@@ -304,81 +335,24 @@ func (r *run) writeAll(ctx context.Context, to common.Address, slots []uint64, v
 		}
 		last = h
 	}
-	_, err := r.viaMin.await(ctx, r.minority, last, 120*time.Second)
-	return err
+	return r.viaMin.awaitOK(ctx, r.minority, last, 120*time.Second)
 }
 
-func (r *run) expectNoCode(ctx context.Context, addrs []common.Address) (string, error) {
-	var bad []string
-	for _, e := range r.all() {
-		for _, a := range addrs {
-			code, err := e.c.CodeAt(ctx, a, r.at)
-			if err != nil {
-				return "", err
-			}
-			if len(code) > 0 {
-				bad = append(bad, fmt.Sprintf("%s still has %d bytes of code at %s", e.name, len(code), a.Hex()))
-			}
+// describeEffect reports which clients see the doomed change, for an error message.
+func (r *run) describeEffect(ctx context.Context, sc *scenario, els []*el, at *big.Int) string {
+	var yes, no []string
+	for _, e := range els {
+		on, err := sc.effect(ctx, r, e, at)
+		switch {
+		case err != nil:
+			no = append(no, e.name+"=?")
+		case on:
+			yes = append(yes, e.name)
+		default:
+			no = append(no, e.name)
 		}
 	}
-	return finding(bad, fmt.Sprintf("%d reorged-out accounts have no code on any client", len(addrs)), len(r.all()))
-}
-
-func (r *run) expectCode(ctx context.Context, addr common.Address, want []byte) (string, error) {
-	var bad []string
-	for _, e := range r.all() {
-		code, err := e.c.CodeAt(ctx, addr, r.at)
-		if err != nil {
-			return "", err
-		}
-		if !bytes.Equal(code, want) {
-			bad = append(bad, fmt.Sprintf("%s has %d bytes at the surviving account %s, wanted %d",
-				e.name, len(code), addr.Hex(), len(want)))
-		}
-	}
-	return finding(bad, fmt.Sprintf("the shared %d-byte blob is still readable at %s on every client",
-		len(want), addr.Hex()), len(r.all()))
-}
-
-// expectSlots checks each slot reads back as the seeded value (wantSet) or as zero.
-func (r *run) expectSlots(ctx context.Context, addr common.Address, slots []uint64, wantSet bool) (string, error) {
-	var bad []string
-	for _, e := range r.all() {
-		for _, s := range slots {
-			got, err := e.c.StorageAt(ctx, addr, txkit.SlotKey(s), r.at)
-			if err != nil {
-				return "", err
-			}
-			want := common.Hash{}
-			if wantSet {
-				want = txkit.SlotKey(s + 1) // what SeedCode wrote
-			}
-			if !bytes.Equal(got, want.Bytes()) {
-				bad = append(bad, fmt.Sprintf("%s reads slot %d as %s, wanted %s",
-					e.name, s, common.BytesToHash(got).Hex(), want.Hex()))
-			}
-		}
-	}
-	what := "are zero again"
-	if wantSet {
-		what = "are back to their pre-split values"
-	}
-	return finding(bad, fmt.Sprintf("slots %v %s on every client", slots, what), len(r.all()))
-}
-
-// finding turns a list of wrong answers into either a passing note or an error.
-//
-// Wrong is not the same as inconsistent. If every client gives the same wrong answer the
-// tree is being rolled back identically but not as expected -- a harness or specification
-// question. If they differ, two implementations disagree, which is the reason this devnet
-// exists. Say which.
-func finding(bad []string, ok string, clients int) (string, error) {
-	if len(bad) == 0 {
-		return ok, nil
-	}
-	kind := "every client gives the same wrong answer"
-	if len(bad) < clients {
-		kind = "clients DISAGREE"
-	}
-	return "", fmt.Errorf("%s: %s", kind, strings.Join(bad, "; "))
+	sort.Strings(yes)
+	sort.Strings(no)
+	return fmt.Sprintf("visible on [%s], absent on [%s]", strings.Join(yes, " "), strings.Join(no, " "))
 }
