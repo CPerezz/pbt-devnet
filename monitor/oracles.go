@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -343,7 +344,7 @@ func (m *Monitor) selfTest(ctx context.Context) error {
 
 	// Now prove the evidence path runs at all. It has otherwise never executed,
 	// because it only fires on a finding.
-	if err := m.captureDivergence(ctx, m.head); err != nil {
+	if err := m.captureDivergence(ctx); err != nil {
 		return fmt.Errorf("self-test: evidence capture failed: %w", err)
 	}
 	slog.Info("self-test passed: divergence detected and evidence captured")
@@ -352,33 +353,49 @@ func (m *Monitor) selfTest(ctx context.Context) error {
 
 // captureDivergence grabs everything that helps debug a finding, before the nodes are
 // torn down: bad blocks with RLP, and every client's head.
-func (m *Monitor) captureDivergence(ctx context.Context, disputed common.Hash) error {
+func (m *Monitor) captureDivergence(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	if disputed == (common.Hash{}) {
-		disputed = m.head // nothing was in flight; fall back to the head
-	}
 
+	saved := 0
 	for _, n := range m.nodes {
+		// Not every client serves debug_getBadBlocks, and a node that refuses it has not
+		// failed the capture -- the head snapshot below is the part that must work.
 		var bad []badBlock
 		if err := n.RPC(ctx, "debug_getBadBlocks", &bad); err == nil {
 			for _, bb := range bad {
-				m.saveArtifact(fmt.Sprintf("badblock-%s-%s.rlp", n.Name, bb.Hash.Hex()[:10]), bb.RLP)
-				m.saveArtifact(fmt.Sprintf("badblock-%s-%s.json", n.Name, bb.Hash.Hex()[:10]), bb.Blk)
+				if m.saveArtifact(fmt.Sprintf("badblock-%s-%s.rlp", n.Name, bb.Hash.Hex()[:10]), bb.RLP) {
+					saved++
+				}
+				if m.saveArtifact(fmt.Sprintf("badblock-%s-%s.json", n.Name, bb.Hash.Hex()[:10]), bb.Blk) {
+					saved++
+				}
 			}
 		}
-		if blk, err := getBlock(ctx, n, "latest"); err == nil {
-			blob, _ := json.MarshalIndent(blk, "", "  ")
-			m.saveArtifact(fmt.Sprintf("head-%s.json", n.Name), blob)
+		blk, err := getBlock(ctx, n, "latest")
+		if err != nil {
+			return fmt.Errorf("%s: %w", n.Name, err)
+		}
+		blob, err := json.MarshalIndent(blk, "", "  ")
+		if err != nil {
+			return fmt.Errorf("%s: %w", n.Name, err)
+		}
+		if m.saveArtifact(fmt.Sprintf("head-%s.json", n.Name), blob) {
+			saved++
 		}
 	}
-
+	if saved == 0 {
+		return errors.New("wrote no artifacts")
+	}
 	return nil
 }
 
-// artifactDir is where captured evidence lands: /artifacts in the container, where it
-// is mounted out so it survives teardown. Overridable because the same binary is run
-// directly on the host, where / is not writable.
+// artifactDir is where captured evidence lands: /artifacts inside the container. Nothing
+// mounts it out, so read it before tearing the enclave down:
+//
+//	kurtosis service exec pbt pbtmonitor -- ls /artifacts
+//
+// Overridable because the same binary is run directly on the host, where / is not writable.
 var artifactDir = envOr("PBT_ARTIFACT_DIR", "/artifacts")
 
 func envOr(key, fallback string) string {
@@ -388,21 +405,22 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func (m *Monitor) saveArtifact(name string, blob []byte) {
+func (m *Monitor) saveArtifact(name string, blob []byte) bool {
 	if len(blob) == 0 {
-		return
+		return false
 	}
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		// Losing the evidence for a real finding is serious enough to be loud.
 		slog.Error("CANNOT SAVE EVIDENCE: artifact dir unwritable", "dir", artifactDir, "err", err)
-		return
+		return false
 	}
 	path := filepath.Join(artifactDir, name)
 	if err := os.WriteFile(path, blob, 0o644); err != nil {
 		slog.Warn("cannot write artifact", "path", path, "err", err)
-		return
+		return false
 	}
 	slog.Info("saved artifact", "path", path, "bytes", len(blob))
+	return true
 }
 
 func jsonEqual(a, b json.RawMessage) bool {

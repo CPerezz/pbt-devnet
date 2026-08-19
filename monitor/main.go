@@ -252,6 +252,12 @@ func (m *Monitor) follow(ctx context.Context) error {
 		}
 		ticks++
 
+		// Sample disruptoor every tick, not only when a divergence is being judged. A
+		// partition that stays quiet while it is applied would otherwise leave no
+		// timestamp behind, and the loser unwinds just AFTER the heal -- exactly when
+		// the grace window is needed and exactly when it would not have been armed.
+		m.noteDisruption()
+
 		if err := m.compareHeads(ctx); err != nil {
 			if IsTransportError(err) {
 				slog.Warn("node unreachable", "err", err)
@@ -311,7 +317,7 @@ func (m *Monitor) compareHeads(ctx context.Context) error {
 				lowest,
 				m.nodes[0].Name, at[0].Hash, at[0].StateRoot,
 				m.nodes[i].Name, at[i].Hash, at[i].StateRoot)
-			if err := m.captureDivergence(ctx, at[0].Hash); err != nil {
+			if err := m.captureDivergence(ctx); err != nil {
 				slog.Warn("evidence capture failed", "err", err)
 			}
 			return nil
@@ -377,14 +383,24 @@ func (m *Monitor) finding(format string, args ...any) {
 // The window is deliberately short. Clients may disagree for as long as fork choice needs to
 // settle after a disruption of ours, and no longer.
 func (m *Monitor) disruptedRecently() string {
-	if why := m.disrupted(); why != "" {
-		m.lastDisruption = time.Now()
+	if why := m.noteDisruption(); why != "" {
 		return why
 	}
 	if !m.lastDisruption.IsZero() && time.Since(m.lastDisruption) < disruptionTail {
 		return "a disruption cleared moments ago and fork choice is still settling"
 	}
 	return ""
+}
+
+// noteDisruption records that disruptoor is holding state right now, and reports what.
+// Arming the window is the whole reason this is separate from disrupted(): it has to happen
+// on a plain poll tick, not only on the path that judges a divergence.
+func (m *Monitor) noteDisruption() string {
+	why := m.disrupted()
+	if why != "" {
+		m.lastDisruption = time.Now()
+	}
+	return why
 }
 
 // disruptionTail is how long after a disruption a divergence is still attributed to it.

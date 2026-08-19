@@ -44,4 +44,4 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
-replace github.com/ethereum/go-ethereum => github.com/CPerezz/go-ethereum v0.0.0-20260810122451-a00aab166b6a
+replace github.com/ethereum/go-ethereum => github.com/CPerezz/go-ethereum v0.0.0-20260818102504-bcf30164bf65

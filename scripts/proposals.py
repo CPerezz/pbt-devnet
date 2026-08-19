@@ -69,7 +69,7 @@ def main():
     cls = services(args.enclave, "cl-")
     if not cls:
         sys.exit(f"no consensus clients found in enclave '{args.enclave}'")
-    via = args.via or cls[1] if len(cls) > 1 else cls[0]
+    via = args.via or (cls[1] if len(cls) > 1 else cls[0])
     base = url(args.enclave, via, "http")
     if not base:
         sys.exit(f"could not reach {via}")

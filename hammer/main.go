@@ -82,10 +82,10 @@ func main() {
 		rpcURLs    multiFlag
 		senderKeys multiFlag
 		chainID    = flag.Int64("chainid", 0, "chain id (0 = ask the node)")
-		rate       = flag.Duration("interval", 400*time.Millisecond, "time between batches")
-		batch      = flag.Int("batch", 4, "transactions per batch")
-		slots      = flag.Int("slots-per-tx", 24, "storage slots written per storage tx")
-		codeSize   = flag.Int("code-size", 12_000, "runtime code size for the codedup and extcode targets")
+		rate       = flag.Duration("interval", time.Second, "time between batches")
+		batch      = flag.Int("batch", 2, "transactions per batch")
+		slots      = flag.Int("slots-per-tx", 20, "storage slots written per storage tx")
+		codeSize   = flag.Int("code-size", 6_000, "runtime code size for the codedup, extcode and delegate targets")
 		only       = flag.String("only", "", "run only this workload")
 		duration   = flag.Duration("for", 0, "stop after this long (0 = run forever)")
 		gasTipCap  = flag.Int64("tip", 1_000_000_000, "max priority fee per gas, wei")

@@ -37,6 +37,31 @@ provenance() {
   echo "$at"
 }
 
+# require_capability refuses to build a source tree that cannot express the fork.
+#
+# A checkout can be perfectly valid git and still be the wrong one: several PBT branches are
+# in flight and only some carry the timestamp-fork plumbing. A geth built without
+# BinaryTrieTime does not fail -- it ignores "binaryTrieTime" in genesis and starts on the
+# merkle-patricia trie, with the wrong state root and no error anywhere. That is the exact
+# silent mismatch this devnet exists to catch, so it must not be possible to build it.
+#
+# The test is whether the source can parse the key we ship, not whether its commit matches a
+# recorded one: a hash comparison only tells you the checkout moved, which is not the same
+# question and has a wrong answer available.
+require_capability() {
+  local name=$1 dir=$2 needle=$3 file=$4 fix=$5
+  [[ -d "$dir" ]] || return 0          # build_from reports a missing checkout
+  if [[ -f "$dir/$file" ]] && grep -q "$needle" "$dir/$file"; then
+    return 0
+  fi
+  echo "!! $name: $dir cannot express the binary tree." >&2
+  echo "   $file does not mention $needle, so the build would produce a client that" >&2
+  echo "   ignores \"binaryTrieTime\" in genesis and runs on the merkle-patricia trie." >&2
+  echo "   source is at $(provenance "$dir")" >&2
+  echo "   $fix" >&2
+  exit 1
+}
+
 build_from() {
   local name=$1 image=$2 dir=$3 note=$4
   if [[ ! -d "$dir" ]]; then
@@ -53,9 +78,13 @@ build_from() {
   echo
 }
 
+require_capability "geth (EIP-8297)" "$GETH_SRC" "BinaryTrieTime" "params/config.go" \
+  "fix: git -C $GETH_SRC checkout pbt"
 build_from "geth (EIP-8297)" "pbt-geth:local" "$GETH_SRC" \
   "clone CPerezz/go-ethereum at branch pbt, or set PBT_GETH_SRC"
 
+require_capability "genesis generator" "$EGG_SRC" "binaryTrieTime" "apps/el-gen/generate_genesis.sh" \
+  "fix: git -C $EGG_SRC checkout pbt"
 build_from "genesis generator" "pbt-egg:local" "$EGG_SRC" \
   "clone CPerezz/ethereum-genesis-generator at branch pbt, or set PBT_EGG_SRC"
 

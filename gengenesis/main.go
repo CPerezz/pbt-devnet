@@ -134,11 +134,16 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (chainid %d, binaryTrieTime=0, amsterdamTime=0)\n", *out, *chainID)
 
-	// Compute and print the genesis root as the tree commits it. Feed it to the monitor
-	// as pbt_monitor.expected_genesis_root in the args file, which is the only positive
-	// proof the clients are committing state with the binary tree at all:
-	// it is the client-agnostic check that a node really is on the binary tree, rather
-	// than silently having fallen back to the merkle-patricia trie.
+	// Print the genesis root as the tree commits it. This is for the standalone
+	// single-client path: run one client against THIS file and its root must match, which
+	// is the client-agnostic check that a node is really on the binary tree rather than
+	// having silently fallen back to the merkle-patricia trie.
+	//
+	// It is NOT the devnet's genesis root, and must not be pasted into
+	// pbt_monitor.expected_genesis_root. The devnet's genesis comes from pbt-egg, whose
+	// alloc carries the prefunded accounts ethereum-package hands to spamoor, assertoor and
+	// the hammer; this tool allocs its own smaller set. A state root commits to the alloc,
+	// so the two cannot agree.
 	block := genesis.ToBlock()
 	fmt.Fprintf(os.Stderr, "genesis block hash:  %s\n", block.Hash())
 	fmt.Fprintf(os.Stderr, "expected_genesis_root: %s\n", block.Root())

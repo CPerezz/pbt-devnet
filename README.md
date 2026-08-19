@@ -57,7 +57,6 @@ Clone them beside this repo, or point `PBT_GETH_SRC` / `PBT_BESU_ROOT` / `PBT_EG
 ```bash
 make besu     # once: besu-stateless -> mavenLocal, then besu installDist, then the image
 make up       # build the rest, start the devnet, follow the monitor
-make fast     # a two-node, low-traffic profile for a four-minute debug loop
 make down     # stop and remove
 ```
 

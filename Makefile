@@ -24,9 +24,6 @@ help:
 	@echo ""
 	@echo "  ENCLAVE=$(ENCLAVE)  ARGS=$(ARGS)"
 
-fast: ## two clients, minimal traffic, no extra tooling — a four-minute debug loop
-	@$(MAKE) --no-print-directory up ARGS=args/fast.yaml BLOCKS=40
-
 up: check build ## build the images and start the devnet, then follow the monitor
 	@kurtosis enclave rm -f $(ENCLAVE) >/dev/null 2>&1 || true
 	@# --privileged is for disruptoor only: it enters other containers' network namespaces
