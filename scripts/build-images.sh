@@ -88,14 +88,14 @@ require_capability "genesis generator" "$EGG_SRC" "binaryTrieTime" "apps/el-gen/
 build_from "genesis generator" "pbt-egg:local" "$EGG_SRC" \
   "clone CPerezz/ethereum-genesis-generator at branch pbt, or set PBT_EGG_SRC"
 
-echo "==> pbt-monitor:local"
-docker build --platform "$PLATFORM" -t pbt-monitor:local "$ROOT/monitor"
-echo "==> pbt-hammer:local"
-docker build --platform "$PLATFORM" -t pbt-hammer:local "$ROOT/hammer"
-# pbtchaos shares txkit with the hammer through a go.mod replace, so its build context
-# is the repository root rather than chaos/.
-echo "==> pbt-chaos:local"
-docker build --platform "$PLATFORM" -t pbt-chaos:local -f "$ROOT/chaos/Dockerfile" "$ROOT"
+# Our three services come out of one Dockerfile and one module; only the command differs.
+build_cmd() {
+  echo "==> $1"
+  docker build --platform "$PLATFORM" --build-arg "CMD=$2" -t "$1" "$ROOT"
+}
+build_cmd pbt-monitor:local pbtmonitor
+build_cmd pbt-hammer:local  pbthammer
+build_cmd pbt-chaos:local   pbtchaos
 
 echo
 if docker image inspect besu-pbt:local >/dev/null 2>&1; then

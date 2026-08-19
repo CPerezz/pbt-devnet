@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/CPerezz/pbt-devnet/internal/cli"
 	"io"
 	"net"
 	"net/http"
@@ -138,12 +139,12 @@ func (n *Node) call(ctx context.Context, url string, headers map[string]string, 
 		return fmt.Errorf("%s %s: read body: %w", n.Name, method, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s %s: http %d: %s", n.Name, method, resp.StatusCode, truncate(raw, 400))
+		return fmt.Errorf("%s %s: http %d: %s", n.Name, method, resp.StatusCode, cli.Trim(raw, 400))
 	}
 
 	var parsed rpcResponse
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return fmt.Errorf("%s %s: decode envelope: %w (body %s)", n.Name, method, err, truncate(raw, 400))
+		return fmt.Errorf("%s %s: decode envelope: %w (body %s)", n.Name, method, err, cli.Trim(raw, 400))
 	}
 	if parsed.Error != nil {
 		return fmt.Errorf("%s %s: %w", n.Name, method, parsed.Error)
@@ -152,7 +153,7 @@ func (n *Node) call(ctx context.Context, url string, headers map[string]string, 
 		return nil
 	}
 	if err := json.Unmarshal(parsed.Result, out); err != nil {
-		return fmt.Errorf("%s %s: decode result: %w (result %s)", n.Name, method, err, truncate(parsed.Result, 400))
+		return fmt.Errorf("%s %s: decode result: %w (result %s)", n.Name, method, err, cli.Trim(parsed.Result, 400))
 	}
 	return nil
 }
@@ -171,13 +172,6 @@ func (n *Node) WaitReady(ctx context.Context) error {
 		case <-time.After(time.Second):
 		}
 	}
-}
-
-func truncate(b []byte, n int) string {
-	if len(b) <= n {
-		return string(b)
-	}
-	return string(b[:n]) + "..."
 }
 
 // TransportError marks a failure to *reach* a node, as distinct from an answer the

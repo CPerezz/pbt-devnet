@@ -24,21 +24,18 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/CPerezz/pbt-devnet/internal/disruptoor"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/CPerezz/pbt-devnet/internal/cli"
 )
-
-type multiFlag []string
-
-func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
-func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 type config struct {
 	slotSeconds    time.Duration
@@ -54,7 +51,7 @@ type config struct {
 // chaos is the single owner of disruptoor state. Every disruption runs on the worker
 // goroutine, serialised through jobs.
 type chaos struct {
-	d    *disruptoor
+	d    *disruptoor.Client
 	els  []*el
 	cls  []*beacon
 	keys []string
@@ -130,7 +127,7 @@ type result struct {
 }
 
 func main() {
-	var els, cls, keys multiFlag
+	var els, cls, keys cli.MultiFlag
 	api := flag.String("disruptoor", "", "disruptoor base URL (required)")
 	flag.Var(&els, "el", "execution client as name=rpcURL (repeatable)")
 	flag.Var(&cls, "cl", "consensus client as name=beaconURL (repeatable)")
@@ -148,13 +145,13 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	if *api == "" {
-		fatal(log, "missing --disruptoor")
+		cli.Fatal(log, "missing --disruptoor")
 	}
 	if len(els) == 0 {
-		fatal(log, "missing --el")
+		cli.Fatal(log, "missing --el")
 	}
 	if *isoMin > *isoMax {
-		fatal(log, "--isolate-min-blocks (%d) is above --isolate-max-blocks (%d)", *isoMin, *isoMax)
+		cli.Fatal(log, "--isolate-min-blocks (%d) is above --isolate-max-blocks (%d)", *isoMin, *isoMax)
 	}
 
 	// Two slots by default. The isolation starts once the chain reaches the slot BEFORE
@@ -169,30 +166,30 @@ func main() {
 
 	elc, err := dialELs(ctx, els)
 	if err != nil {
-		fatal(log, "%v", err)
+		cli.Fatal(log, "%v", err)
 	}
 	clc, err := newBeacons(cls)
 	if err != nil {
-		fatal(log, "%v", err)
+		cli.Fatal(log, "%v", err)
 	}
 
-	d := newDisruptoor(*api)
+	d := disruptoor.New(*api, 15*time.Second)
 	// A selector matching nothing is accepted, changes no traffic, and leaves a healthy
 	// chain behind -- the one failure that is indistinguishable from success. Refuse to
 	// start rather than report imaginary reorgs for the rest of the run.
-	n, err := d.containers()
+	n, err := d.Containers()
 	if err != nil {
-		fatal(log, "disruptoor at %s is unreachable: %v", *api, err)
+		cli.Fatal(log, "disruptoor at %s is unreachable: %v", *api, err)
 	}
 	if n == 0 {
-		fatal(log, "disruptoor at %s sees no containers: every selector would match nothing", *api)
+		cli.Fatal(log, "disruptoor at %s sees no containers: every selector would match nothing", *api)
 	}
 	log.Info("disruptoor ready", "url", *api, "containers", n)
 
 	// Start from a clean slate: a partition left behind by a previous run would make
 	// the first scenario's verification meaningless.
-	if err := d.clear(); err != nil {
-		fatal(log, "could not clear disruptoor state: %v", err)
+	if err := d.Clear(); err != nil {
+		cli.Fatal(log, "could not clear disruptoor state: %v", err)
 	}
 
 	c := &chaos{
@@ -225,7 +222,7 @@ func main() {
 	c.work(ctx)
 
 	// Never leave the network disrupted on the way out.
-	if err := c.d.clear(); err != nil {
+	if err := c.d.Clear(); err != nil {
 		log.Error("could not clear disruptoor state on shutdown", "err", err)
 	}
 	log.Info("stopped")
@@ -257,7 +254,7 @@ func (c *chaos) work(ctx context.Context) {
 			c.mu.Unlock()
 
 			// Whatever happened, the network goes back to normal before the next job.
-			if err := c.d.clear(); err != nil {
+			if err := c.d.Clear(); err != nil {
 				c.log.Error("could not clear disruptoor state", "err", err)
 			}
 		}
@@ -297,7 +294,7 @@ func (c *chaos) serve(ctx context.Context, addr string) {
 			"minority_runs": c.minorityRuns,
 		}
 		c.mu.Unlock()
-		parts, shaping, err := c.d.state()
+		parts, shaping, err := c.d.State()
 		if err == nil {
 			body["applied_partitions"] = parts
 			body["applied_shaping"] = shaping
@@ -360,9 +357,4 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(body)
-}
-
-func fatal(log *slog.Logger, format string, args ...any) {
-	log.Error(fmt.Sprintf(format, args...))
-	os.Exit(1)
 }

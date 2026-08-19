@@ -90,16 +90,14 @@ besu: ## build besu-pbt:local (two Gradle stages, then the image; needs JDK 25)
 besu-image: ## rebuild besu-pbt:local from an existing build/install/besu
 	scripts/build-besu.sh --skip-gradle
 
-bin: ## build the monitor, hammer and chaos daemon as host binaries into bin/
+bin: ## build every command as a host binary into bin/
 	@mkdir -p bin
-	cd monitor && go build -o ../bin/pbtmonitor .
-	cd hammer  && go build -o ../bin/pbthammer .
-	cd chaos   && go build -o ../bin/pbtchaos .
-	@echo "==> bin/pbtmonitor bin/pbthammer bin/pbtchaos"
+	go build -o bin/ ./cmd/...
+	@echo "==> $$(ls bin | tr '\n' ' ')"
 
 genesis: ## regenerate genesis/genesis.json and print the root to paste into the args file
 	@mkdir -p bin
-	cd gengenesis && go build -o ../bin/gengenesis .
+	go build -o bin/gengenesis ./cmd/gengenesis
 	./bin/gengenesis --out genesis/genesis.json --gaslimit 200000000
 
 check: ## verify docker, kurtosis and a yaml reader are present

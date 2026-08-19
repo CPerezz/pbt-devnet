@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CPerezz/pbt-devnet/hammer/txkit"
+	"github.com/CPerezz/pbt-devnet/internal/txkit"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"

@@ -22,18 +22,19 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/CPerezz/pbt-devnet/internal/disruptoor"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/CPerezz/pbt-devnet/internal/cli"
 
 	"github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/common"
@@ -92,14 +93,14 @@ func main() {
 		els     elFlag
 		jwtPath = flag.String("jwt", "/jwt/jwtsecret", "path to the engine API jwt secret")
 
-		poll       = flag.Duration("poll", 2*time.Second, "how often to compare the clients' heads")
-		probeEvery = flag.Int("probe-every", 16, "run the deeper cross-node probes every N polls")
-		feeRecip   = flag.String("fee-recipient", "0x0000000000000000000000000000000000000001", "suggested fee recipient for the self-test payload")
-		verbose    = flag.Bool("v", false, "debug logging")
-		verifyOrac = flag.Bool("verify-oracle", true, "prove the oracle detects a corrupted state root before following the chain")
-		selfTest   = flag.Bool("self-test", false, "run only that proof, then exit")
-		disruptoor = flag.String("disruptoor", "", "disruptoor base URL; divergences while it has state applied are expected, not findings")
-		expRoot    = flag.String("expected-genesis-root", "", "assert every node's genesis state root equals this (proves the binary-tree commitment)")
+		poll          = flag.Duration("poll", 2*time.Second, "how often to compare the clients' heads")
+		probeEvery    = flag.Int("probe-every", 16, "run the deeper cross-node probes every N polls")
+		feeRecip      = flag.String("fee-recipient", "0x0000000000000000000000000000000000000001", "suggested fee recipient for the self-test payload")
+		verbose       = flag.Bool("v", false, "debug logging")
+		verifyOrac    = flag.Bool("verify-oracle", true, "prove the oracle detects a corrupted state root before following the chain")
+		selfTest      = flag.Bool("self-test", false, "run only that proof, then exit")
+		disruptoorURL = flag.String("disruptoor", "", "disruptoor base URL; divergences while it has state applied are expected, not findings")
+		expRoot       = flag.String("expected-genesis-root", "", "assert every node's genesis state root equals this (proves the binary-tree commitment)")
 	)
 	flag.Var(&els, "el", "execution client as name=engineURL,rpcURL (repeatable; at least two)")
 	flag.Parse()
@@ -114,13 +115,13 @@ func main() {
 	// disagree, and the whole design is that a block one node builds must satisfy
 	// every other node.
 	if len(els) < 2 {
-		fatal("need at least two --el entries, got %d", len(els))
+		cli.Fatal(slog.Default(), "need at least two --el entries, got %d", len(els))
 	}
 	var nodes []*Node
 	for _, el := range els {
 		n, err := NewNode(el.name, el.engine, el.rpc, *jwtPath)
 		if err != nil {
-			fatal("%s: %v", el.name, err)
+			cli.Fatal(slog.Default(), "%s: %v", el.name, err)
 		}
 		nodes = append(nodes, n)
 	}
@@ -131,10 +132,10 @@ func main() {
 		probeEvery:   *probeEvery,
 		verifyOracle: *verifyOrac,
 	}
-	cfg.disruptoor = strings.TrimSuffix(*disruptoor, "/")
+	cfg.disruptoor = strings.TrimSuffix(*disruptoorURL, "/")
 	if *expRoot != "" {
 		if len(*expRoot) != 66 || !strings.HasPrefix(*expRoot, "0x") {
-			fatal("--expected-genesis-root must be a 0x-prefixed 32-byte hash, got %q", *expRoot)
+			cli.Fatal(slog.Default(), "--expected-genesis-root must be a 0x-prefixed 32-byte hash, got %q", *expRoot)
 		}
 		cfg.expectedGenesisRoot = common.HexToHash(*expRoot)
 	}
@@ -142,28 +143,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// A short timeout on purpose: asking disruptoor whether a partition is applied must
-	// never delay reporting a divergence.
-	m := &Monitor{nodes: nodes, cfg: cfg, hc: &http.Client{Timeout: 3 * time.Second}}
+	m := &Monitor{nodes: nodes, cfg: cfg}
+	if cfg.disruptoor != "" {
+		// A short timeout on purpose: asking disruptoor whether a partition is applied must
+		// never delay reporting a divergence.
+		m.dis = disruptoor.New(cfg.disruptoor, 3*time.Second)
+	}
 
 	if *selfTest {
 		if err := m.preflight(ctx); err != nil {
-			fatal("%v", err)
+			cli.Fatal(slog.Default(), "%v", err)
 		}
 		if err := m.proveOracle(ctx); err != nil {
-			fatal("%v", err)
+			cli.Fatal(slog.Default(), "%v", err)
 		}
 		return
 	}
 
 	if err := m.Run(ctx); err != nil {
-		fatal("%v", err)
+		cli.Fatal(slog.Default(), "%v", err)
 	}
-}
-
-func fatal(format string, args ...any) {
-	slog.Error(fmt.Sprintf(format, args...))
-	os.Exit(1)
 }
 
 // Monitor owns the execution clients and the highest block they have all agreed on.
@@ -186,7 +185,7 @@ type Monitor struct {
 	// lastDisruption is when disruptoor was last seen holding state, so a divergence that
 	// outlives the partition that caused it is still recognised as ours.
 	lastDisruption time.Time
-	hc             *http.Client
+	dis            *disruptoor.Client
 	// stalled counts consecutive polls that saw no new block, so a chain that stops
 	// producing is reported once rather than every tick.
 	stalled int
@@ -411,30 +410,21 @@ const disruptionTail = 18 * time.Second
 // An unreachable disruptoor means we cannot rule out a partition, but reporting nothing
 // would be worse than a false positive, so treat it as whole and say so once.
 func (m *Monitor) disrupted() string {
-	if m.cfg.disruptoor == "" {
+	if m.dis == nil {
 		return ""
 	}
-	resp, err := m.hc.Get(m.cfg.disruptoor + "/v1/state")
+	partitions, shaping, err := m.dis.State()
 	if err != nil {
 		m.degrade("disruptoor", "state", err)
 		return ""
 	}
-	defer resp.Body.Close()
-	var st struct {
-		Partitions []json.RawMessage `json:"partitions"`
-		Shaping    []json.RawMessage `json:"shaping"`
-	}
-	if json.NewDecoder(resp.Body).Decode(&st) != nil {
-		return ""
-	}
 	switch {
-	case len(st.Partitions) > 0 && len(st.Shaping) > 0:
-		return fmt.Sprintf("%d partition(s) and %d shaping rule(s) are applied",
-			len(st.Partitions), len(st.Shaping))
-	case len(st.Partitions) > 0:
-		return fmt.Sprintf("%d partition(s) are applied", len(st.Partitions))
-	case len(st.Shaping) > 0:
-		return fmt.Sprintf("%d shaping rule(s) are applied", len(st.Shaping))
+	case partitions > 0 && shaping > 0:
+		return fmt.Sprintf("%d partition(s) and %d shaping rule(s) are applied", partitions, shaping)
+	case partitions > 0:
+		return fmt.Sprintf("%d partition(s) are applied", partitions)
+	case shaping > 0:
+		return fmt.Sprintf("%d shaping rule(s) are applied", shaping)
 	}
 	return ""
 }
