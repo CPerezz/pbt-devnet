@@ -87,9 +87,8 @@ make ui       # prints the live URLs
 |---|---|---|
 | dora | http://127.0.0.1:36000 | block explorer — slots, epochs, the chain itself |
 | spamoor | http://127.0.0.1:36002 | transaction spammer; its scenarios and throughput |
-| assertoor | http://127.0.0.1:36004 | its built-in checks (custom playbooks cannot be mounted from a package) |
-| forky | http://127.0.0.1:36006 | fork-choice / reorg visualiser across all consensus clients |
-| disruptoor | http://127.0.0.1:36008 | chaos control; `/containers` and `/events` |
+| assertoor | http://127.0.0.1:36004 | block-proposal and EOA-transaction checks, plus upstream's synchronized-check by URL |
+| disruptoor | http://127.0.0.1:36006 | chaos control; `/containers` and `/events` |
 | pbtchaos | *(dynamic)* | scenario control: `GET /status`, `POST /scenario/{name}` |
 
 Ports are `public_port_start + 2×index` over `additional_services`, so **reordering that list in
@@ -102,7 +101,15 @@ make status     # every client's head and state root, side by side
 make verify     # compare every client at the SAME block number  (BLOCKS=100)
 make diagnose   # where the chain split, and what the peers were doing
 make proposals  # who was due to propose each slot, and who missed
+make forks      # competing heads, how deep each branch is, and who is on which
 ```
+
+`make forks` exists because **forky cannot work on this chain**: under Gloas the beacon block
+carries no execution payload, so lighthouse reports `validity: null` for every fork-choice
+node and forky's parser discards the whole dump — it renders nothing and logs an error per
+node per slot. The newest image is the one that fails and upstream has no fix, so it is not
+installed. Everything else in that dump is intact, so `make forks` rebuilds the tree itself.
+Dora's `/forks` page is the equivalent UI and has real history.
 
 `make verify` compares the most recent N blocks, not blocks 1..N. That distinction is
 load-bearing: a divergence is permanent once it happens, so anchoring at block 1 lets early
@@ -194,6 +201,12 @@ make chaos-status                         # running, queued, per-client coverage
 make split ; make heal                    # partition by hand, outside the queue
 make repeer                               # restart any client left with no peers
 ```
+
+`make chaos-status` reports `orphaned_blocks` per scenario — how much chain the partition
+threw away, which should match geth's own `Chain reorg detected … drop=N`. Depths of 5, 10 and
+13 blocks are normal for `DEPTH=6`, `20` and `30`; the periodic isolation forks are 1. While a
+scenario runs, the minority node is *expected* to show as Synchronizing and to sit behind the
+tip for the length of the partition — deeper `DEPTH` means longer.
 
 A scenario that cannot confirm the clients reconverged reports `inconclusive` rather than a
 finding: state that differs across a network which never healed says nothing about anyone's reorg
