@@ -23,7 +23,6 @@ import (
 // another drops it is exactly the divergence two implementations are here to expose.
 type scenario struct {
 	name string
-	doc  string
 	// setup runs BEFORE the split, through the majority, so whatever it creates lives
 	// on the branch that survives.
 	setup func(context.Context, *run) error
@@ -75,7 +74,6 @@ type run struct {
 var scenarios = map[string]*scenario{
 	"code-sole": {
 		name: "code-sole",
-		doc:  "unique bytecode deployed only on the doomed branch; its code-zone chunks have no other owner",
 		apply: func(ctx context.Context, r *run) error {
 			r.code = txkit.PatternCode(400, 0xa1)
 			addr, err := r.deploy(ctx, r.minority, r.viaMin, txkit.DeployCodeAfter(nil, r.code))
@@ -90,7 +88,6 @@ var scenarios = map[string]*scenario{
 
 	"code-shared": {
 		name: "code-shared",
-		doc:  "the same bytecode exists on the surviving branch; the doomed copy goes but the chunks must stay reachable",
 		setup: func(ctx context.Context, r *run) error {
 			// A different fill would make this a second code-sole. The whole point is
 			// that both accounts hold the IDENTICAL blob.
@@ -127,7 +124,6 @@ var scenarios = map[string]*scenario{
 
 	"delegate": {
 		name: "delegate",
-		doc:  "7702 delegations set on the doomed branch; the delegation leaf must not survive",
 		setup: func(ctx context.Context, r *run) error {
 			r.code = txkit.PatternCode(300, 0xc3)
 			addr, err := r.deploy(ctx, r.majority[0], r.viaMaj, txkit.DeployCodeAfter(nil, r.code))
@@ -170,7 +166,6 @@ var scenarios = map[string]*scenario{
 
 	"account": {
 		name: "account",
-		doc:  "fresh accounts funded on the doomed branch; their header stems must go with it",
 		apply: func(ctx context.Context, r *run) error {
 			var last common.Hash
 			for i := 0; i < 5; i++ {
@@ -209,7 +204,6 @@ var scenarios = map[string]*scenario{
 
 	"storage-add": {
 		name: "storage-add",
-		doc:  "slots written on the doomed branch below and above HEADER_STORAGE_OFFSET; both must vanish",
 		setup: func(ctx context.Context, r *run) error {
 			// 7 shares the header stem, 70 gets a dedicated storage stem. One scenario
 			// covers both sides of the boundary because they are different code paths.
@@ -234,7 +228,6 @@ var scenarios = map[string]*scenario{
 
 	"storage-del": {
 		name: "storage-del",
-		doc:  "slots that existed before the split are DELETED on the doomed branch; the deletion must be undone",
 		setup: func(ctx context.Context, r *run) error {
 			r.slots = []uint64{1, 2, 3}
 			// Seed in the initcode, so the values are already on the surviving branch

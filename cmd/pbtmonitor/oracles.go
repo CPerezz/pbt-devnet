@@ -50,37 +50,6 @@ func getBlockByHash(ctx context.Context, n *Node, hash common.Hash) (*rpcBlock, 
 	return blk, nil
 }
 
-// assertHeadsAgree is oracle 3: every node must sit on the same head, at the
-// expected height, with the same state root.
-func (m *Monitor) assertHeadsAgree(ctx context.Context, want common.Hash, wantNum uint64) error {
-	heads := make([]*rpcBlock, len(m.nodes))
-	for i, n := range m.nodes {
-		blk, err := getBlock(ctx, n, "latest")
-		if err != nil {
-			return err
-		}
-		heads[i] = blk
-	}
-	for i := 1; i < len(m.nodes); i++ {
-		if heads[i].Hash != heads[0].Hash {
-			return fmt.Errorf("head divergence: %s=%s@%d (root %s) vs %s=%s@%d (root %s)",
-				m.nodes[0].Name, heads[0].Hash, heads[0].Number, heads[0].StateRoot,
-				m.nodes[i].Name, heads[i].Hash, heads[i].Number, heads[i].StateRoot)
-		}
-		if heads[i].StateRoot != heads[0].StateRoot {
-			// Should be unreachable while the hashes match, since the hash commits to
-			// the root. If it ever fires, block hashing itself is wrong.
-			return fmt.Errorf("same head %s but different state roots: %s=%s %s=%s",
-				heads[0].Hash, m.nodes[0].Name, heads[0].StateRoot, m.nodes[i].Name, heads[i].StateRoot)
-		}
-	}
-	if heads[0].Hash != want || uint64(heads[0].Number) != wantNum {
-		return fmt.Errorf("head is %s at %d, expected %s at %d",
-			heads[0].Hash, heads[0].Number, want, wantNum)
-	}
-	return m.assertNoBadBlocks(ctx)
-}
-
 // badBlock mirrors geth's BadBlockArgs. The RLP is the reason this oracle matters:
 // it hands back a reproducible artifact rather than a log line.
 type badBlock struct {
