@@ -178,6 +178,14 @@ pbt_hammer:
   senders: 4
   # only: zeroize        # restrict to one workload; see the README for the list
 
+# Reorgs. On by default: expect one every 15-30 blocks, and the six state scenarios on
+# demand via `make scenario`. Set enabled: false for a quiet baseline, which is what
+# `make proposals` needs to measure a proposer's miss rate.
+pbt_chaos:
+  enabled: true
+  isolate_min_blocks: 15
+  isolate_max_blocks: 30
+
 pbt_monitor:
   enabled: true
   # Corrupt a state root on purpose at startup and require every other client to reject

@@ -140,7 +140,7 @@ func main() {
 	isolation := flag.Bool("isolation", true, "run the periodic proposer-isolation forks")
 	isoMin := flag.Uint64("isolate-min-blocks", 15, "minimum blocks between isolation forks")
 	isoMax := flag.Uint64("isolate-max-blocks", 30, "maximum blocks between isolation forks")
-	isolateFor := flag.Duration("isolate-for", 0, "how long to isolate the proposer (default: one slot)")
+	isolateFor := flag.Duration("isolate-for", 0, "how long to isolate the proposer (default: two slots)")
 	depth := flag.Uint64("depth", 10, "default scenario depth in blocks")
 	flag.Parse()
 

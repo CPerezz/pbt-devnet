@@ -85,10 +85,14 @@ def main():
 
     stats = {n: {"due": 0, "missed": 0, "slots": []} for n in names}
     unmapped = 0
-    for epoch in range(first, head_epoch + 1):
+    got, asked = [], list(range(first, head_epoch + 1))
+    for epoch in asked:
         duties = get(base, f"/eth/v1/validator/duties/proposer/{epoch}")
         if not duties:
+            # The beacon API only serves duties for a narrow recent window; older epochs
+            # 404. Skipping them silently once made 2 epochs of data print as 151.
             continue
+        got.append(epoch)
         for duty in duties["data"]:
             slot = int(duty["slot"])
             if slot == 0 or slot > head:
@@ -102,7 +106,10 @@ def main():
                 stats[node]["missed"] += 1
                 stats[node]["slots"].append(slot)
 
-    print(f"epochs {first}..{head_epoch} (slots up to {head}), as seen by {via}\n")
+    if not got:
+        sys.exit(f"{via} served no proposer duties for epochs {first}..{head_epoch}")
+    print(f"epochs {got[0]}..{got[-1]} ({len(got)} of the {len(asked)} asked for; the beacon API "
+          f"only keeps recent duties), slots up to {head}, as seen by {via}\n")
     print(f"{'proposer':30} {'due':>5} {'missed':>7} {'miss %':>8}   missed slots")
     worst = 0.0
     for node, name in names.items():

@@ -4,16 +4,13 @@ A mixed-client PBT (EIP-8297) devnet, driven by real consensus clients.
 This composes ethpandaops/ethereum-package rather than launching clients itself: that
 package already knows how to run geth, besu and lighthouse together, wire the engine API,
 generate genesis and hand out validator keys. What it does not know is the binary tree, and
-that gap is closed with two forks and one config value, with no patch to the package:
+that gap is closed with one fork and one load-bearing config value, with no patch to the package:
 
   * pbt-egg:local  — a fork of ethereum-genesis-generator that emits the tree keys AND
     bundles a fork of eth-beacon-genesis whose go.mod replaces go-ethereum with the
     EIP-8297 branch. Without it the consensus genesis embeds a merkle-patricia block hash
     the execution layer will never produce, and the chain never starts. Reached through the
     supported `ethereum_genesis_generator_params.image` hook.
-  * network_params.network stays "kurtosis". This is load-bearing: both el launchers pick
-    full sync only for that network name, and the binary tree refuses snap sync outright.
-    A custom network name silently gets --syncmode=snap and the engine API dies.
 
 On top of the network this adds three services of our own:
 
@@ -46,10 +43,13 @@ OURS = [
 DEFAULT_HAMMER = {
     "enabled": True,
     "image": "pbt-hammer:local",
-    "interval": "400ms",
-    "batch": 4,
+    # These are the settings measured safe: at 400ms/batch 4/code_size 12000 blocks ran
+    # 74.9% full against a 50% gas target, so the base fee compounded until nothing could
+    # pay for a transaction. See the comment on pbt_hammer in args/devnet.yaml.
+    "interval": "1s",
+    "batch": 2,
     "slots_per_tx": 20,
-    "code_size": 12000,
+    "code_size": 6000,
     # How many of the package's prefunded accounts to send from. They come with private
     # keys, so the hammer needs no premine of its own.
     "senders": 4,
@@ -67,7 +67,8 @@ DEFAULT_CHAOS = {
     "isolation": True,
     "isolate_min_blocks": 15,
     "isolate_max_blocks": 30,
-    # Empty means one slot, which is what this wants in almost every case.
+    # Empty means two slots: the isolation starts once the chain reaches the slot BEFORE
+    # the duty, so it has to span the rest of that slot and the whole proposal slot.
     "isolate_for": "",
     # Default depth for `make scenario` when none is given.
     "depth": 10,
