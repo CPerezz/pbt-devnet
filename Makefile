@@ -51,7 +51,6 @@ ui: ## print every web UI and API url
 	  dora       "$$(kurtosis port print $(ENCLAVE) dora http 2>/dev/null)" \
 	  spamoor    "$$(kurtosis port print $(ENCLAVE) spamoor http 2>/dev/null)" \
 	  assertoor  "$$(kurtosis port print $(ENCLAVE) assertoor http 2>/dev/null)" \
-	  forky      "$$(kurtosis port print $(ENCLAVE) forky http 2>/dev/null)" \
 	  disruptoor "$$(kurtosis port print $(ENCLAVE) disruptoor http 2>/dev/null)" \
 	  pbtchaos   "$$(kurtosis port print $(ENCLAVE) pbtchaos http 2>/dev/null)"
 
@@ -60,6 +59,9 @@ status: ## show every execution client's head and state root
 
 verify: ## compare every client at the same block number (BLOCKS=100)
 	@scripts/verify.py $(ENCLAVE) --blocks $(BLOCKS) --wait
+
+forks: ## competing heads, how deep each branch is, and who is on which
+	@scripts/forks.py $(ENCLAVE)
 
 proposals: ## who was due to propose each slot, and who missed
 	@scripts/proposals.py $(ENCLAVE)

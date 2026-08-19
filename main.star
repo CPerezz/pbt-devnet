@@ -162,6 +162,10 @@ def _launch_monitor(plan, cfg, els):
         cmd += ["--el", "{0}=http://{1}:{2},{3}".format(
             el.service_name, el.ip_addr, el.engine_rpc_port_num, el.rpc_http_url)]
     cmd += ["--jwt", JWT_PATH, "--poll", cfg["poll"], "--probe-every", str(cfg["probe_every"])]
+    # So the monitor can tell a partition we applied from a client that is actually wrong.
+    if DISRUPTOOR_SERVICE in args.get("additional_services", []):
+        disruptoor = plan.get_service(name=DISRUPTOOR_SERVICE)
+        cmd += ["--disruptoor", "http://{0}:{1}".format(disruptoor.ip_address, DISRUPTOOR_PORT)]
     if cfg["expected_genesis_root"] != "":
         cmd += ["--expected-genesis-root", cfg["expected_genesis_root"]]
     if not cfg["verify_oracle"]:

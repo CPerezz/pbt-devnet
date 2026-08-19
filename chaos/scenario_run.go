@@ -33,6 +33,26 @@ func majorityTip(ctx context.Context, majority []*el) (uint64, common.Hash) {
 // tipMargin is how far below the majority's head the survival check anchors itself.
 const tipMargin = 4
 
+// orphanDepth counts the blocks on the minority's chain that the majority does not share.
+func (c *chaos) orphanDepth(ctx context.Context, minority *el, majority []*el) int {
+	n, _, err := minority.head(ctx)
+	if err != nil {
+		return 0
+	}
+	ref := majority[0]
+	for depth := 0; depth < 256 && n > 0; depth, n = depth+1, n-1 {
+		mine := minority.hashAt(ctx, n)
+		theirs := ref.hashAt(ctx, n)
+		if mine == (common.Hash{}) || theirs == (common.Hash{}) {
+			continue
+		}
+		if mine == theirs {
+			return depth
+		}
+	}
+	return 0
+}
+
 // minChainHeight is how much chain a scenario wants behind it before it starts.
 const minChainHeight = 24
 
@@ -289,6 +309,15 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 	if err := waitBlocks(ctx, majority, depth); err != nil {
 		c.log.Warn("did not reach the requested depth", "err", err)
 	}
+
+	// How much chain is about to be thrown away. Walk back from the minority's head until
+	// it agrees with the majority; the gap is the branch that dies. This is the number
+	// that answers "are we only ever getting one-block forks?" without needing a UI, and
+	// it should match geth's own `Chain reorg detected ... drop=N`.
+	orphaned := c.orphanDepth(ctx, minority, majority)
+	res.Orphaned = orphaned
+	c.log.Info("branch about to be abandoned", "name", sc.name, "blocks", orphaned,
+		"on", minority.name)
 
 	// Record the branch that is MEANT to survive, before healing, so survival is checked
 	// against a hash taken while the two branches still existed separately.

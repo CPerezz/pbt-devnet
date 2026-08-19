@@ -111,8 +111,13 @@ additional_services:
   - dora        # 36000  block explorer
   - spamoor     # 36002  transaction spammer + UI
   - assertoor   # 36004  test playbooks + UI
-  - forky       # 36006  fork / reorg visualiser
-  - disruptoor  # 36008  partition and latency injection (needs `kurtosis run --privileged`)
+  - disruptoor  # 36006  partition and latency injection (needs `kurtosis run --privileged`)
+  #
+  # forky is deliberately absent. Under Gloas the beacon block carries no execution payload,
+  # so lighthouse reports `validity: null` for every fork-choice node and forky's parser
+  # discards the whole dump -- it renders nothing and logs an error per node per slot. The
+  # newest image is the one that fails and upstream has no fix. Use `make forks`, and Dora's
+  # /forks page, both of which read APIs that Gloas did not change.
 
 port_publisher:
   additional_services:
@@ -147,12 +152,37 @@ spamoor_params:
       config: {throughput: 3, max_pending: 6, max_wallets: 10, base_fee: 20}
 
 assertoor_params:
-  run_stability_check: true
+  # Stability is off because this devnet destabilises itself: pbtchaos reorgs every 15-30
+  # blocks, and the check asserts <=2 reorgs per epoch and a fork distance <=3. It failed for
+  # the one honest reason a check can, so asserting it proves nothing.
+  run_stability_check: false
+  # This one is safe under reorgs: it watches the block-event stream rather than the
+  # canonical chain, so a proposal still counts after being orphaned.
   run_block_proposal_check: true
-  # Built-in checks only. Custom playbooks cannot be mounted from this package — the
-  # launcher only uploads its own baked-in /tests directory — and reorgs are pbtchaos's
-  # job, with verification a playbook could not do.
-  tests: []
+  # Independent execution coverage: EOA transfers in legacy and dynamic-fee envelopes, from
+  # and via every client pair.
+  run_transaction_test: true
+  # Entries may be a path OR an http(s) URL: assertoor fetches remote playbooks, and the
+  # launcher passes each string through as {"file": ...}. So a curated upstream check needs
+  # no file mounting.
+  #
+  # synchronized-check is the one that matters here. It watches every client pair's CL and EL
+  # sync status for the length of the run, which is exactly the failure this devnet produces
+  # on its own: a node that is partitioned, healed, and then never rebuilds its peer set sits
+  # quietly behind forever. `make repeer` is the repair; this is what notices.
+  tests:
+    - https://raw.githubusercontent.com/ethpandaops/assertoor/master/playbooks/dev/synchronized-check.yaml
+
+  # Deliberately NOT enabled:
+  #   run_opcodes_transaction_test  — ends with a fork check whose maxForkDistance defaults to
+  #     1, and chains each call through the previous deploy's address, so a reorg that unwinds
+  #     the deploy leaves the rest calling an empty account. It fails for our reasons, not the
+  #     client's. Worth running by hand in a quiet window: it is the best EVM-semantics check
+  #     available for a custom fork.
+  #   run_blob_transaction_test     — blob sidecars have a short availability window and are
+  #     gossiped separately, so an orphaned blob block can never satisfy minBlobCount.
+  #   run_lifecycle_test            — wants ~500 validators, a mainnet deposit contract, and
+  #     48-72h; its success criteria are finality transitions our reorger destroys.
 
 # Chaos sidecar. pbtchaos owns its state exclusively and drives it continuously, so the
 # default devnet is NOT quiet: expect a reorg every 15-30 blocks. `make split` / `make heal`
