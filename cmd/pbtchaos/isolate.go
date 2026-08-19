@@ -79,7 +79,7 @@ func (c *chaos) isolationFork(ctx context.Context) result {
 	// recorded as canonical when it disappears.
 	watch := c.watchReorg(ctx, 10*c.cfg.slotSeconds)
 
-	if err := c.d.partition(fmt.Sprintf("proposer-%d", slot), others, []int{node}); err != nil {
+	if err := c.d.Partition(fmt.Sprintf("proposer-%d", slot), others, []int{node}); err != nil {
 		res.Outcome = "error"
 		res.Detail = fmt.Sprintf("could not isolate node %d: %v", node, err)
 		return res
@@ -87,7 +87,7 @@ func (c *chaos) isolationFork(ctx context.Context) result {
 	c.log.Info("isolating proposer", "node", node, "slot", slot, "for", c.cfg.isolateFor)
 
 	sleep(ctx, c.cfg.isolateFor)
-	if err := c.d.clear(); err != nil {
+	if err := c.d.Clear(); err != nil {
 		c.log.Error("could not clear the isolation", "err", err)
 	}
 

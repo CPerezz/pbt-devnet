@@ -88,7 +88,7 @@ func (c *chaos) awaitDivergence(ctx context.Context, minority *el, majority []*e
 // healQuietly clears disruptoor without letting a clear failure mask the reason the
 // scenario is being abandoned.
 func (c *chaos) healQuietly(ctx context.Context) {
-	if err := c.d.clear(); err != nil {
+	if err := c.d.Clear(); err != nil {
 		c.log.Error("could not clear disruptoor state", "err", err)
 	}
 }
@@ -254,7 +254,7 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 		c.log.Info("scenario setup on the surviving branch", "name", sc.name, "survivor", r.survivor.Hex())
 	}
 
-	if err := c.d.partition("pbt-"+sc.name, majorityNodes, []int{minorityNode}); err != nil {
+	if err := c.d.Partition("pbt-"+sc.name, majorityNodes, []int{minorityNode}); err != nil {
 		res.Outcome = "error"
 		res.Detail = "partition: " + err.Error()
 		return res
@@ -327,7 +327,7 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 	// against a hash taken while the two branches still existed separately.
 	wantHeight, wantHash := majorityTip(ctx, majority)
 
-	if err := c.d.clear(); err != nil {
+	if err := c.d.Clear(); err != nil {
 		res.Outcome = "error"
 		res.Detail = "heal: " + err.Error()
 		return res

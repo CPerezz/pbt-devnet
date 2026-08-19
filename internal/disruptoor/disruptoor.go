@@ -1,4 +1,12 @@
-package main
+// Package disruptoor speaks the native disruptoor API, which takes label selectors rather
+// than the friendlier participant numbers ethereum-package accepts at start-up:
+//
+//	{"node-index": [1,2], "client-type": ["execution","beacon"]}
+//
+// A group matching no container is rejected with 500 and the whole state rolls back, so a
+// disruption either applies or fails loudly. What the API cannot report is whether it had any
+// EFFECT; that is what pbtchaos's own verification is for.
+package disruptoor
 
 import (
 	"bytes"
@@ -7,26 +15,26 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/CPerezz/pbt-devnet/internal/cli"
 )
 
-// disruptoor speaks the native disruptoor API, which takes label selectors rather than
-// the friendlier participant numbers ethereum-package accepts at start-up:
-//
-//	{"node-index": [1,2], "client-type": ["execution","beacon"]}
-//
-// A group matching no container is rejected with 500 and the whole state rolls back, so
-// a disruption either applies or fails loudly. What the API cannot tell us is whether it
-// had any EFFECT; that is what the verification in scenario.go and isolate.go is for.
-type disruptoor struct {
+// Client is a disruptoor endpoint.
+type Client struct {
 	base string
 	hc   *http.Client
 }
 
-func newDisruptoor(base string) *disruptoor {
-	return &disruptoor{base: base, hc: &http.Client{Timeout: 15 * time.Second}}
+// New returns a client for the disruptoor at base.
+//
+// The timeout is a parameter because the callers genuinely disagree: pbtchaos is applying a
+// disruption and can afford to wait, while pbtmonitor is only asking whether one is applied
+// and must never let that question delay reporting a divergence.
+func New(base string, timeout time.Duration) *Client {
+	return &Client{base: base, hc: &http.Client{Timeout: timeout}}
 }
 
-func (d *disruptoor) do(method, path string, body any) ([]byte, error) {
+func (d *Client) do(method, path string, body any) ([]byte, error) {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -49,7 +57,7 @@ func (d *disruptoor) do(method, path string, body any) ([]byte, error) {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, trim(out, 200))
+		return nil, fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, cli.Trim(out, 200))
 	}
 	return out, nil
 }
@@ -57,7 +65,7 @@ func (d *disruptoor) do(method, path string, body any) ([]byte, error) {
 // containers reports how many containers disruptoor can see. Zero means every selector
 // we send will match nothing, which is the one failure mode that looks like success: the
 // partition is "applied", no traffic changes, and the chain looks healthy throughout.
-func (d *disruptoor) containers() (int, error) {
+func (d *Client) Containers() (int, error) {
 	raw, err := d.do(http.MethodGet, "/webui/api/containers", nil)
 	if err != nil {
 		return 0, err
@@ -68,7 +76,7 @@ func (d *disruptoor) containers() (int, error) {
 	}
 	var asMap map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &asMap); err != nil {
-		return 0, fmt.Errorf("unrecognised container listing: %s", trim(raw, 120))
+		return 0, fmt.Errorf("unrecognised container listing: %s", cli.Trim(raw, 120))
 	}
 	if inner, ok := asMap["containers"]; ok {
 		var list []json.RawMessage
@@ -91,7 +99,7 @@ func nodes(idx ...int) group {
 
 // partition cuts p2p between the two groups in both directions. Engine API is untouched,
 // so each side keeps driving its own execution client and the two branches grow apart.
-func (d *disruptoor) partition(name string, a, b []int) error {
+func (d *Client) Partition(name string, a, b []int) error {
 	_, err := d.do(http.MethodPut, "/v1/state", map[string]any{
 		"partitions": []any{map[string]any{
 			"name":      name,
@@ -103,38 +111,14 @@ func (d *disruptoor) partition(name string, a, b []int) error {
 	return err
 }
 
-// delay shapes ALL egress from the named nodes, including the engine API: disruptoor v0
-// rejects every scope except ["include_control"], so p2p cannot be slowed on its own.
-//
-// That makes it useless for producing reorgs -- a proposer whose engine API is slowed
-// cannot assemble a payload in time and skips the slot outright, and a missed slot
-// reorgs nothing. It is kept because it is the one disruption that always recovers:
-// unlike a partition it never severs a connection, so clearing it restores the network
-// immediately.
-func (d *disruptoor) delay(name string, idx []int, dur string) error {
-	ids := make([]any, len(idx))
-	for i, n := range idx {
-		ids[i] = n
-	}
-	_, err := d.do(http.MethodPut, "/v1/state", map[string]any{
-		"shaping": []any{map[string]any{
-			"name":   name,
-			"target": group{"node-index": ids},
-			"scope":  []string{"include_control"},
-			"delay":  dur,
-		}},
-	})
-	return err
-}
-
-func (d *disruptoor) clear() error {
+func (d *Client) Clear() error {
 	_, err := d.do(http.MethodPost, "/v1/state/clear", nil)
 	return err
 }
 
 // state reports how many partitions and shaping rules are currently APPLIED. Note this
 // is applied state only: it says nothing about what those rules are doing.
-func (d *disruptoor) state() (partitions, shaping int, err error) {
+func (d *Client) State() (partitions, shaping int, err error) {
 	raw, err := d.do(http.MethodGet, "/v1/state", nil)
 	if err != nil {
 		return 0, 0, err
@@ -147,11 +131,4 @@ func (d *disruptoor) state() (partitions, shaping int, err error) {
 		return 0, 0, err
 	}
 	return len(s.Partitions), len(s.Shaping), nil
-}
-
-func trim(b []byte, n int) string {
-	if len(b) <= n {
-		return string(b)
-	}
-	return string(b[:n]) + "..."
 }

@@ -1,0 +1,7 @@
+# The build needs go.mod, go.sum, cmd/ and internal/ -- nothing else. Everything below is
+# either large or regenerated, and .git alone is tens of megabytes.
+.git/
+bin/
+artifacts/
+genesis/
+**/*.log

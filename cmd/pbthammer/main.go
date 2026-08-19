@@ -40,7 +40,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CPerezz/pbt-devnet/hammer/txkit"
+	"github.com/CPerezz/pbt-devnet/internal/cli"
+
+	"github.com/CPerezz/pbt-devnet/internal/txkit"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -79,8 +81,8 @@ type sender struct {
 
 func main() {
 	var (
-		rpcURLs    multiFlag
-		senderKeys multiFlag
+		rpcURLs    cli.MultiFlag
+		senderKeys cli.MultiFlag
 		chainID    = flag.Int64("chainid", 0, "chain id (0 = ask the node)")
 		rate       = flag.Duration("interval", time.Second, "time between batches")
 		batch      = flag.Int("batch", 2, "transactions per batch")
@@ -98,13 +100,13 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	if len(rpcURLs) == 0 {
-		rpcURLs = multiFlag{"http://127.0.0.1:8545"}
+		rpcURLs = cli.MultiFlag{"http://127.0.0.1:8545"}
 	}
 	// EIP-170 caps deployed code at 24576 bytes. Past that every codedup transaction
 	// fails gas estimation forever, which looks like a stuck generator rather than a
 	// bad flag.
 	if *codeSize < 1 || *codeSize > 24576 {
-		fatal("--code-size %d is outside 1..24576 (EIP-170 max deployed code size)", *codeSize)
+		cli.Fatal(slog.Default(), "--code-size %d is outside 1..24576 (EIP-170 max deployed code size)", *codeSize)
 	}
 
 	ctx := context.Background()
@@ -112,7 +114,7 @@ func main() {
 	for _, u := range rpcURLs {
 		c, err := ethclient.DialContext(ctx, u)
 		if err != nil {
-			fatal("dial %s: %v", u, err)
+			cli.Fatal(slog.Default(), "dial %s: %v", u, err)
 		}
 		clients = append(clients, c)
 		slog.Info("connected", "rpc", u)
@@ -124,7 +126,7 @@ func main() {
 	if *chainID == 0 {
 		got, err := chainIDWhenReady(ctx, clients[0])
 		if err != nil {
-			fatal("could not read the chain id: %v", err)
+			cli.Fatal(slog.Default(), "could not read the chain id: %v", err)
 		}
 		chain = got
 		slog.Info("chain id from node", "chainid", chain)
@@ -141,14 +143,14 @@ func main() {
 	for _, hexKey := range keys {
 		key, err := crypto.HexToECDSA(hexKey)
 		if err != nil {
-			fatal("bad dev key: %v", err)
+			cli.Fatal(slog.Default(), "bad dev key: %v", err)
 		}
 		addr := crypto.PubkeyToAddress(key.PublicKey)
 		// Wait for the node rather than exiting: the generator is normally started
 		// alongside the nodes and will lose the race to bind otherwise.
 		nonce, err := nonceWhenReady(ctx, clients[0], addr)
 		if err != nil {
-			fatal("nonce for %s: %v", addr, err)
+			cli.Fatal(slog.Default(), "nonce for %s: %v", addr, err)
 		}
 		senders = append(senders, &sender{key: key, addr: addr, nonce: nonce})
 		slog.Info("sender ready", "addr", addr, "nonce", nonce)
@@ -161,7 +163,7 @@ func main() {
 
 	head, err := clients[0].HeaderByNumber(ctx, nil)
 	if err != nil {
-		fatal("head: %v", err)
+		cli.Fatal(slog.Default(), "head: %v", err)
 	}
 	baseFee := head.BaseFee
 	if baseFee == nil {
@@ -172,7 +174,7 @@ func main() {
 	workloads := allWorkloads
 	if *only != "" {
 		if !slices.Contains(allWorkloads, *only) {
-			fatal("--only %q is not a workload; choose from %v", *only, allWorkloads)
+			cli.Fatal(slog.Default(), "--only %q is not a workload; choose from %v", *only, allWorkloads)
 		}
 		workloads = []string{*only}
 	}
@@ -189,7 +191,7 @@ func main() {
 		code:      sharedCode,
 	}
 	if err := env.deployTargets(ctx, clients, senders[0], *startWait); err != nil {
-		fatal("startup targets: %v", err)
+		cli.Fatal(slog.Default(), "startup targets: %v", err)
 	}
 	env.authorities = newAuthorities(16)
 
@@ -300,7 +302,7 @@ func newAuthorities(n int) []*authority {
 	for i := 0; i < n; i++ {
 		key, err := crypto.GenerateKey()
 		if err != nil {
-			fatal("generating an authority key: %v", err)
+			cli.Fatal(slog.Default(), "generating an authority key: %v", err)
 		}
 		out = append(out, &authority{key: key, addr: crypto.PubkeyToAddress(key.PublicKey)})
 	}
@@ -847,14 +849,4 @@ func summary(stats map[string]int) string {
 		parts = append(parts, fmt.Sprintf("%s=%d", k, stats[k]))
 	}
 	return strings.Join(parts, " ")
-}
-
-type multiFlag []string
-
-func (m *multiFlag) String() string     { return fmt.Sprint(*m) }
-func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
-
-func fatal(format string, args ...any) {
-	slog.Error(fmt.Sprintf(format, args...))
-	os.Exit(1)
 }

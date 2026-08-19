@@ -146,5 +146,5 @@ func main() {
 	// so the two cannot agree.
 	block := genesis.ToBlock()
 	fmt.Fprintf(os.Stderr, "genesis block hash:  %s\n", block.Hash())
-	fmt.Fprintf(os.Stderr, "expected_genesis_root: %s\n", block.Root())
+	fmt.Fprintf(os.Stderr, "genesis state root:  %s\n", block.Root())
 }
