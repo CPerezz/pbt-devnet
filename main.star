@@ -145,7 +145,7 @@ def run(plan, args={}):
         plan.print("  {0} [{1}] {2}".format(el.service_name, el.client_name, el.rpc_http_url))
 
     if monitor["enabled"]:
-        _launch_monitor(plan, monitor, els)
+        _launch_monitor(plan, monitor, args, els)
     if hammer["enabled"]:
         _launch_hammer(plan, hammer, els, net.pre_funded_accounts)
     if chaos["enabled"]:
@@ -154,7 +154,7 @@ def run(plan, args={}):
     return net
 
 
-def _launch_monitor(plan, cfg, els):
+def _launch_monitor(plan, cfg, args, els):
     cmd = []
     for el in els:
         # name=engineURL,rpcURL — the monitor needs the engine API for its self-test, and
