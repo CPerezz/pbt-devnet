@@ -15,12 +15,6 @@ import (
 
 // receiptAudit samples what actually happened to the transactions this process sent.
 //
-// Without it the hammer is blind in the way the reorg scenarios used to be. It checked
-// receipts for its three startup deployments and nothing else, so a workload whose
-// transactions all reverted -- gas too low for a two-dimensional-gas operation is the easy
-// way to get there -- kept sending forever and reported nothing. The devnet looks busy, the
-// send counters climb, and a whole transaction shape is silently untested.
-//
 // Only a sample is followed: at a few transactions a second, checking every receipt would
 // cost more RPC than the sending does, and a systematic failure shows up in a sample just as
 // clearly as in the whole population.
@@ -148,9 +142,8 @@ func joinParts(p []string) string {
 // plus a periodic summary.
 //
 // It is a real client difference and worth knowing about -- geth and besu price the same
-// deployment 2.9% apart -- but it fires on nearly every estimate, and 188 identical findings
-// in one run is exactly the noise that buries the next real one. That is the same failure
-// the state-root monitor had.
+// deployment 2.9% apart -- but it fires on nearly every estimate,, but it fires on nearly every estimate, and repeating it
+// buries the next real finding.
 type gasDisagreement struct {
 	mu       sync.Mutex
 	seen     int

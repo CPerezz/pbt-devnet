@@ -35,8 +35,8 @@ type scenario struct {
 	// client at the anchor afterwards.
 	//
 	// One predicate rather than an "assert absent" is what makes the scenarios honest.
-	// Absence is trivially true when nothing was written, so a reverted transaction used
-	// to read as a pass; and it cannot express storage-del, where the doomed change IS an
+	// Absence is trivially true when nothing was written, and it cannot express
+	// storage-del, where the doomed change IS an
 	// absence and the surviving branch is the one holding values.
 	//
 	// A nil height means latest.
@@ -175,9 +175,7 @@ var scenarios = map[string]*scenario{
 				}
 				var err error
 				// Funding a fresh address CREATES an account, and under EIP-8297 that
-				// is 207,391 state gas on top of the 21,000 intrinsic. At 60,000 every
-				// one of these reverted -- which is exactly why this scenario used to
-				// "pass": the balances it then asserted were zero had never been set.
+				// is 207,391 state gas on top of the 21,000 intrinsic.
 				last, _, err = r.viaMin.send(ctx, r.minority, txReq{
 					to: &addr, value: big.NewInt(1_000_000_000_000_000), gas: 300_000,
 				})
@@ -296,13 +294,14 @@ func scenarioNames() []string {
 
 func (r *run) all() []*el { return append([]*el{r.minority}, r.majority...) }
 
-// deployGas sizes a deployment under EIP-8297's two-dimensional gas, where every byte of
-// deployed code costs 1530 state gas.
+// deployGas sizes a deployment under EIP-8297's two-dimensional gas.
+//
+// EIP-8297 charges 1530 state gas per byte of new state; this multiplies by 1800, because
+// the argument is the INITCODE length and the gas has to cover the account the deployment
+// creates plus the chunking overhead, not just the runtime that ends up stored.
 //
 // 260k covers creating the account itself before a single byte of code is written: a fresh
-// account is about 207,391 state gas, and a deployment always makes one. At 120k the
-// writer contract -- eight bytes of runtime -- ran out and reverted, which reads as a
-// scenario bug rather than a gas one. The constant stays as small as it can be: cost is
+// account is about 207,391 state gas, and a deployment always makes one. The constant stays as small as it can be: cost is
 // feeCap*gas and the fee cap is a fixed budget divided by the gas, so an oversized limit
 // prices the transaction out on a chain whose base fee has risen.
 func deployGas(codeLen int) uint64 {

@@ -227,11 +227,6 @@ func (m *Monitor) Run(ctx context.Context) error {
 // follow watches the chain the consensus clients are driving. It never proposes and
 // never sets a head: the only engine API calls this process makes after startup are
 // the self-test's, and those neither move forkchoice nor persist a block.
-//
-// That restraint is the point. An earlier version drove the chain itself while real
-// consensus clients drove it too, which manufactured competing blocks at every height,
-// wedged one execution client, and then reported the resulting fork as a finding
-// against the clients rather than against itself.
 func (m *Monitor) follow(ctx context.Context) error {
 	ticker := time.NewTicker(m.cfg.pollInterval)
 	defer ticker.Stop()
@@ -339,11 +334,6 @@ func (m *Monitor) compareHeads(ctx context.Context) error {
 // finding reports a divergence -- unless a disruption is applied, in which case the
 // divergence is the disruption doing its job.
 //
-// Without this the monitor cried wolf: one deliberate partition produced the identical
-// "clients disagree at block N" every 2s poll for the length of the split, fourteen times
-// for one event. That volume would bury a real divergence, which is the only thing this
-// process exists to find.
-//
 // Two rules keep it honest. A suppressed divergence is still logged and still counted, just
 // separately -- nothing is hidden. And repeats of the same message collapse, so one event
 // reads as one event.
@@ -372,7 +362,7 @@ func (m *Monitor) finding(format string, args ...any) {
 // The tail matters: a partition causes a reorg, and the reorg resolves AFTER the partition
 // is cleared -- the isolation fork lifts its rules and only then does the loser unwind. Ask
 // disruptoor at the instant the divergence appears and it truthfully answers "nothing
-// applied", so the divergence we caused gets reported as a finding. One per run, reliably.
+// applied", so the divergence we caused gets reported as a finding.
 //
 // The window is deliberately short. Clients may disagree for as long as fork choice needs to
 // settle after a disruption of ours, and no longer.
@@ -493,12 +483,6 @@ func (m *Monitor) preflight(ctx context.Context) error {
 
 	// Positive proof of the commitment, portable across clients: the genesis state
 	// root must equal the expected binary-tree root.
-	//
-	// This replaces an earlier probe that called debug_dumpBlock and treated an error
-	// as success, on the grounds that this geth branch refuses account dumping on the
-	// tree. That inferred a property of the tree from one client's error string, and it
-	// hard-failed any client that happens to serve the method — a barrier that had
-	// nothing to do with whether the client implements PBT.
 	if m.cfg.expectedGenesisRoot != (common.Hash{}) {
 		if genesis[0].StateRoot != m.cfg.expectedGenesisRoot {
 			return fmt.Errorf("genesis state root is %s, expected %s — the nodes are not committing state with the binary tree (is binaryTrieTime scheduled in genesis?)",
@@ -582,7 +566,7 @@ func (m *Monitor) buildPayload(ctx context.Context, slot uint64, n *Node, parent
 
 	// Give the builder a moment to pack transactions; asking immediately yields an
 	// empty block. This runs once, in the self-test, so the wait is a fixed small
-	// value rather than a fraction of a slot we no longer control.
+	// value.
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()

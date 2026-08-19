@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
 """Attribute every slot to the node that was due to propose it, and report who missed.
 
-This exists because "besu orphans a lot of blocks" turned out to be false, and nothing in
-the repo could show that. Reading Dora, besu appeared to miss most of its slots; measured
-here over a window with no disruption, it misses about as often as geth. The difference
-was that every reorg scenario used to strand besu, so its blocks never reached the node
-being asked.
-
 Two things make the number trustworthy:
 
   * Duties are read per epoch and mapped to a participant by validator index, since
@@ -90,7 +84,7 @@ def main():
         duties = get(base, f"/eth/v1/validator/duties/proposer/{epoch}")
         if not duties:
             # The beacon API only serves duties for a narrow recent window; older epochs
-            # 404. Skipping them silently once made 2 epochs of data print as 151.
+            # 404.
             continue
         got.append(epoch)
         for duty in duties["data"]:

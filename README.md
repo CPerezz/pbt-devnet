@@ -68,8 +68,8 @@ Within a minute or so the monitor should be following a chain all four clients a
 long a reorg:
 
 ```
-chain number=412 hash=9f59de..701857 state_root=422e45..74488b clients=4
-reorg observed client=el-2-geth-lighthouse height=30 before=0xf3c58abc64 after=0x26cd600406
+chain number=<n> hash=<block> state_root=<root> clients=4
+reorg observed client=el-2-geth-lighthouse height=<n> before=<hash> after=<hash>
 ```
 
 **The devnet is not quiet by default** — chaos is on and reorgs happen without asking. Set
@@ -115,9 +115,9 @@ load-bearing: a divergence is permanent once it happens, so anchoring at block 1
 agreeing blocks outvote a chain that has been split for twenty minutes. This script used to do
 exactly that and reported a confident PASS on a devnet running three separate chains.
 
-`make proposals` refuses to report while disruptoor has any state applied — asking a majority node
-whether a partitioned node's slots have blocks measures the partition, not the proposer. An early
-93% miss rate for besu was exactly that mistake; measured quietly, every node misses nothing.
+`make proposals` warns when disruptoor has state applied — asking a majority node
+whether a partitioned node's slots have blocks measures the partition, not the proposer. Measure
+a proposer's misses on a quiet chain, or the number describes the harness.
 
 `pbtmonitor` runs the same comparison continuously and additionally **proves its own oracle** at
 startup: it builds a payload, corrupts one byte of the state root, and requires every other client
@@ -125,8 +125,8 @@ to reject it. Without that, "0 findings" from a broken oracle looks exactly like
 a healthy chain. Both implementations reject it independently, with their own error text:
 
 ```
-geth  invalid merkle root (remote: 6e9d20e5dc69… local: 6e9d20e5dcf8…)
-besu  World State Root does not match expected value, header 0x6e9d20e5dc69… calculated 0x6e9d20e5dcf8…
+geth  invalid merkle root (remote: <sent> local: <computed>)
+besu  World State Root does not match expected value, header <sent> calculated <computed>
 ```
 
 The monitor observes only. It never proposes and never sets a head — a second thing driving
@@ -153,14 +153,8 @@ block and compounds with nothing to stop it, until no transaction can be paid fo
 `args/devnet.yaml` — check block fullness after changing them.
 
 The hammer samples receipts and reports a per-workload tally, so a shape that silently stops
-working is a finding rather than invisible traffic. A healthy run looks like this — every
-workload succeeding, and only `revert` reverting, which is its whole purpose:
-
-```
-receipts sampled (successful/total) by_workload="accesslist=19/19 callread=21/21 codedup=20/20
-delegate=18/18 destruct=18/18 extcode=22/22 fanout=19/19 legacy=23/23 revert=0/18
-storage=19/19 zeroize=20/20"
-```
+working is a finding rather than invisible traffic. A healthy run has every workload succeeding
+and only `revert` reverting, which is its whole purpose.
 
 ## Chaos
 
@@ -209,12 +203,11 @@ make repeer                               # restart any client left with no peer
 ```
 
 `make chaos-status` reports `orphaned_blocks` per scenario — how much chain the partition
-threw away, matching geth's own `Chain reorg detected … drop=N`. **It is roughly `DEPTH`
-divided by the number of nodes**, because the stranded node holds only its share of the
-proposers: `DEPTH=8` orphans 1-3 blocks on a four-node net, `DEPTH=30` orphaned 13. Ask for a
-large `DEPTH` if you want a deep abandoned branch. The periodic isolation forks are 1 block by
-construction. While a scenario runs, the minority node is *expected* to show as Synchronizing and to sit behind the
-tip for the length of the partition — deeper `DEPTH` means longer.
+threw away, matching geth's own `Chain reorg detected … drop=N`. It is well below `DEPTH`,
+because the stranded node proposes only its share of the slots; ask for a large `DEPTH` if you
+want a deep abandoned branch. The periodic isolation forks are one block by construction.
+While a scenario runs the minority node is *expected* to report as Synchronizing and to sit
+behind the tip for the length of the partition — a deeper `DEPTH` means longer.
 
 A scenario that cannot confirm the clients reconverged reports `inconclusive` rather than a
 finding: state that differs across a network which never healed says nothing about anyone's reorg
@@ -252,16 +245,17 @@ docker run --rm -v $PWD/genesis:/g besu-pbt:local \
   --rpc-http-enabled --p2p-enabled=false
 ```
 
-then compare `eth_getBlockByNumber(0)` against geth's. Both must produce:
+then compare `eth_getBlockByNumber(0)` against geth's, and against the root `make genesis`
+prints — it computes the genesis as the tree commits it, so it is the reference rather than
+anything pasted here. All three must agree.
 
-```
-state root  0x7e16e8798b8f3d27d4bea3c13cac4b459fdaa8e0baca8089ce1fb834f2b2820a
-block hash  0x52327d2df655a26b98cf29f76232c9568f4ce10c3753e39729f1a8b43ae71c55
-```
+A client whose genesis root disagrees built a merkle-patricia genesis — see Configuration.
+A single-client enclave is supported for the same debugging reason: set
+`pbt_monitor.enabled: false` and run one participant.
 
-Seeing `0x16f3bf8b…c70145` instead means the client built a merkle-patricia genesis — see
-Configuration. This is how the first besu bug was isolated, and a single-client enclave is
-supported for the same reason: set `pbt_monitor.enabled: false` and run one participant.
+`make genesis`'s root belongs to *this* file, not to the devnet: the devnet's genesis comes
+from `pbt-egg` with a different set of prefunded accounts, so do not paste it into
+`pbt_monitor.expected_genesis_root`.
 
 ## Configuration
 
@@ -284,23 +278,26 @@ a fork; [PR #26](https://github.com/CPerezz/go-ethereum/pull/26) made it a times
 adopted besu's key, and mid-chain schedules are now accepted by both.
 
 **A genesis still carrying `"pbt": true` is worse than one carrying nothing.** It decodes
-fork-less, so the chain comes up on the merkle-patricia trie with no error anywhere — the genesis
-hash is `0x16f3bf8b…c70145` instead of `0x52327d2d…ae71c55`, and nothing says why. The fork-order
+fork-less, so the chain comes up on the merkle-patricia trie with no error anywhere: a genesis
+hash that is simply not the one `make genesis` computes, and nothing to say why. The fork-order
 check requires Amsterdam scheduled with `binaryTrieTime` no earlier than `amsterdamTime`.
+
+`scripts/build-images.sh` refuses to build a geth whose source has no `BinaryTrieTime` at all,
+which is the same failure reached from the other end — several PBT branches are in flight and
+only some carry the timestamp fork.
 
 ## What this has found
 
 - **besu: NPE on binary-trie node deletion** — [matkt/besu#31](https://github.com/matkt/besu/pull/31).
-  The PBT commit visitor signals a deleted node as `store(location, null, null)` because
-  `NodeUpdater` has no remove method; `BinaryStateRootCommitter` forwarded that to `putTrieNode`,
-  which dereferences the hash. It fires only on the forkchoice path — `newPayload` validates with
-  storage frozen, so the commit is skipped and the state root comes out correct — which is why the
-  root matched geth while the chain never moved. Fixed by routing deletions to `removeTrieNode`.
+  The PBT commit visitor signals a deletion as `store(location, null, null)` because `NodeUpdater`
+  has no remove method, and `BinaryStateRootCommitter` forwarded that to `putTrieNode`. It fires
+  only on the forkchoice path, so the state root matched geth while the chain never moved. Fixed
+  by routing deletions to `removeTrieNode`.
 - **besu: cross-fork world-state roll produces the wrong root** — `StateRootMismatchException` on
   a roll across a fork, after which the node is permanently wedged. Besu reverses via trie logs
   where geth replaces layers. Tracked in [#7](https://github.com/CPerezz/pbt-devnet/issues/7).
-- **geth/besu disagree on `eth_estimateGas`** — 18,915,434 vs 19,491,192 on a 12,015-byte
-  deployment, a 3.04% gap. Execution agrees, so it is estimation only. Unexplained.
+- **geth/besu disagree on `eth_estimateGas`** for the same large deployment. Execution agrees,
+  so it is estimation only. Unexplained; the hammer reports it as a finding with the live figures.
 - **lighthouse and teku need mutually exclusive Gloas-at-genesis states** —
   [#6](https://github.com/CPerezz/pbt-devnet/issues/6). Teku follows the specification; lighthouse
   does not; no single `genesis.ssz` satisfies both. This devnet targets lighthouse.

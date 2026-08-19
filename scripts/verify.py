@@ -68,10 +68,8 @@ def main():
 
     # Compare the MOST RECENT `target` blocks, not blocks 1..target.
     #
-    # Anchoring at block 1 is how this script once reported PASS on a devnet whose
-    # clients had been on three separate chains for twenty minutes: the early blocks
-    # agreed, they outnumbered the diverging ones, and the summary averaged the failure
-    # away. A divergence is permanent once it happens, so what matters is the tip.
+    # A divergence is permanent once it happens, so what matters is the tip: early
+    # agreeing blocks would otherwise outvote a chain that has been split for an hour.
     top = low
     bottom = max(1, top - target + 1)
     print(f"comparing blocks {bottom}..{top} (the most recent {top - bottom + 1}) across {len(names)} clients")

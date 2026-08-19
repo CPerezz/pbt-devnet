@@ -1,4 +1,4 @@
-# Config for the PBT devnet. Everything except the two pbt_* blocks at the bottom is
+# Config for the PBT devnet. Everything except the three pbt_* blocks at the bottom is
 # ethpandaops/ethereum-package's own schema — it sanity-checks its input and fails on any
 # key it does not recognise, so consult its README rather than inventing fields here.
 
@@ -70,9 +70,8 @@ network_params:
   # half minutes, then lose every peer within the same second and never reconnect. Each
   # one then computes its own proposer schedule and drives its own execution client down
   # its own chain, so the devnet silently becomes N separate chains that each look healthy.
-  # Measured: divergence at block 35 exactly, with both two and three participants, so it
-  # is deterministic and not a race or a node-count effect. Under mainnet the same config
-  # runs past block 67 with peers stable.
+  # It is deterministic rather than a race: the same config diverges at the same height
+  # every time, and runs with peers stable under mainnet.
   #
   # The mechanism inside lighthouse is not identified; the ethpandaops glamsterdam-devnet-8
   # images are built for mainnet-preset devnets and that is what the working reference
@@ -133,8 +132,7 @@ spamoor_params:
   # hammer covers the shapes spamoor has no scenario for (zeroization, shared code,
   # 7702 clear-to-zero).
   # The built-in chain-load group is off: it adds unmeasured traffic on top of the four
-  # spammers below, and it is what backs up into a partitioned minority. A healthy chain
-  # here runs about 14% of the 200M gas limit, so there is nothing else to trim.
+  # spammers below, and it is what backs up into a partitioned minority.
   start_chainload: false
   start_fuzzing: false
   spammers:
@@ -191,35 +189,20 @@ disruptoor_params:
   image: ethpandaops/disruptoor:latest
 
 ### Everything below is ours, not ethereum-package's.
-
-pbt_hammer:
-  enabled: true
-  # Measured at interval 400ms / batch 4 / code_size 12000: blocks ran 74.9% full against a
-  # 50% gas target, so the base fee compounded 12.5% a block -- 3,600 to 6,400 gwei in
-  # eight blocks -- until scenario transactions could not be paid for within the node's
-  # 1 ether cap. Nothing pushes back before that point, so the rate has to.
-  #
-  # 10 tx/s at 12,000 bytes a deploy is ~18M state gas each (1530 per byte); this is 2 tx/s
-  # at half the size.
-  interval: "1s"
-  batch: 2
-  slots_per_tx: 20
-  code_size: 6000
-  senders: 4
-  # only: zeroize        # restrict to one workload; see the README for the list
-
-# Reorgs. On by default: expect one every 15-30 blocks, and the six state scenarios on
-# demand via `make scenario`. Set enabled: false for a quiet baseline, which is what
-# `make proposals` needs to measure a proposer's miss rate.
-pbt_chaos:
-  enabled: true
-  isolate_min_blocks: 15
-  isolate_max_blocks: 30
-
-pbt_monitor:
-  enabled: true
-  # Corrupt a state root on purpose at startup and require every other client to reject
-  # it. Without it a later "0 findings" is indistinguishable from a broken oracle.
-  verify_oracle: true
-  poll: "2s"
-  probe_every: 8
+#
+# The defaults live in main.star (DEFAULT_HAMMER, DEFAULT_CHAOS, DEFAULT_MONITOR) and this
+# devnet runs entirely on them, so nothing is set here. Add a block only to override a key.
+#
+#   pbt_hammer   Transaction load shaped at what the tree changed rather than at throughput.
+#                `only: zeroize` restricts it to a single workload. Raising interval, batch
+#                or code_size raises block fullness -- keep blocks under HALF the gas limit,
+#                or the base fee rises 12.5% per block and compounds with nothing to stop it
+#                until no transaction can be paid for within a node's 1 ether cap.
+#
+#   pbt_chaos    Reorgs, and they are ON by default: one every 15-30 blocks, plus the six
+#                state scenarios on demand through `make scenario`. Set `enabled: false` for
+#                the quiet baseline `make proposals` needs to measure a proposer's misses.
+#
+#   pbt_monitor  The state-root divergence watch. `verify_oracle` corrupts a root at startup
+#                and requires every other client to reject it, so that a later "0 findings"
+#                cannot be coming from a broken oracle.

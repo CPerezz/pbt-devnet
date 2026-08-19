@@ -205,7 +205,7 @@ func main() {
 
 	stats := map[string]int{}
 	// Follow one in twelve transactions to a receipt. See audit.go for why sampling is
-	// enough, and why not doing this at all was a real gap.
+	// enough.
 	audit := newReceiptAudit(12)
 	round := 0
 	for range ticker.C {
@@ -372,8 +372,8 @@ func (w *world) deployTargets(ctx context.Context, clients []*ethclient.Client, 
 // is not producing blocks looks stuck rather than silent.
 //
 // Every error is retried, not just ethereum.NotFound. A node that has just started also
-// answers "transaction indexing is in progress", and treating anything other than
-// NotFound as fatal turned that into a hammer that refused to start.
+// answers "transaction indexing is in progress", so anything
+// other than NotFound is worth retrying rather than treating as fatal.
 func waitReceipt(ctx context.Context, cl *ethclient.Client, hash common.Hash, deadline time.Time) (*types.Receipt, error) {
 	var last error
 	lastLog := time.Time{}
@@ -401,7 +401,7 @@ func waitReceipt(ctx context.Context, cl *ethclient.Client, hash common.Hash, de
 // broadcast sends to EVERY node, not one of them. The nodes are unpeered, so a
 // transaction submitted to only one leaves the other with a nonce gap; the gapped
 // transaction sits in the queued subpool, is capped at 64 per account, and the surplus is
-// dropped — with no error returned. Two thirds of the load used to disappear this way.
+// dropped — with no error returned.
 // Broadcasting is what devp2p gossip would have done for us.
 func broadcast(ctx context.Context, clients []*ethclient.Client, tx *types.Transaction, kind string, s *sender) bool {
 	accepted := false
@@ -524,8 +524,7 @@ func estimateEverywhere(ctx context.Context, clients []*ethclient.Client, call e
 
 // envelope selects the transaction type. It is deliberately NOT types.LegacyTxType and
 // friends: those start at 0, so a shape that forgot to set one would silently become a
-// legacy transaction. It happened — nine of the eleven workloads went out as type 0 and
-// the 1559 path went untested, with nothing failing anywhere. Here the zero value is the
+// legacy transaction. Here the zero value is the
 // one almost everything wants.
 type envelope int
 

@@ -311,8 +311,7 @@ func (m *Monitor) selfTest(ctx context.Context) error {
 		}
 	}
 
-	// Now prove the evidence path runs at all. It has otherwise never executed,
-	// because it only fires on a finding.
+	// Now prove the evidence path runs at all.
 	if err := m.captureDivergence(ctx); err != nil {
 		return fmt.Errorf("self-test: evidence capture failed: %w", err)
 	}

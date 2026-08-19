@@ -80,8 +80,8 @@ func main() {
 		AmsterdamTime: &zero,
 
 		// The binary tree is a timestamp fork, scheduled here at genesis. The key is
-		// shared with besu, so one genesis.json serves both clients. It used to be a
-		// `"pbt": true` boolean; a config still carrying that decodes fork-less and
+		// shared with besu, so one genesis.json serves both clients. A config still carrying the
+		// retired `"pbt": true` boolean decodes fork-less and
 		// yields a merkle-patricia chain without any error.
 		BinaryTrieTime: &zero,
 
