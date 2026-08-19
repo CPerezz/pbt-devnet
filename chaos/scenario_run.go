@@ -61,13 +61,17 @@ const minChainHeight = 24
 func (c *chaos) awaitDivergence(ctx context.Context, minority *el, majority []*el, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
-		if n, err := lowestHead(ctx, append([]*el{minority}, majority...)); err == nil && n > 0 {
-			if mh := minority.hashAt(ctx, n); mh != (common.Hash{}) {
-				for _, e := range majority {
-					if h := e.hashAt(ctx, n); h != (common.Hash{}) && h != mh {
-						return true
-					}
-				}
+		// Compare at the MAJORITY's head, not at the lowest head across everyone.
+		//
+		// The minority falls behind the moment it is cut off, so the lowest common height
+		// is its own head -- a block both sides still agree on. The split is real and
+		// invisible there, which made this wait time out and report a scenario
+		// inconclusive when the partition had in fact bitten. Asking whether the minority
+		// has the majority's head answers the question directly.
+		if n, err := lowestHead(ctx, majority); err == nil && n > 0 {
+			want := majority[0].hashAt(ctx, n)
+			if want != (common.Hash{}) && minority.hashAt(ctx, n) != want {
+				return true
 			}
 		}
 		if time.Now().After(deadline) {
