@@ -179,8 +179,12 @@ var scenarios = map[string]*scenario{
 					return err
 				}
 				var err error
+				// Funding a fresh address CREATES an account, and under EIP-8297 that
+				// is 207,391 state gas on top of the 21,000 intrinsic. At 60,000 every
+				// one of these reverted -- which is exactly why this scenario used to
+				// "pass": the balances it then asserted were zero had never been set.
 				last, _, err = r.viaMin.send(ctx, r.minority, txReq{
-					to: &addr, value: big.NewInt(1_000_000_000_000_000), gas: 60_000,
+					to: &addr, value: big.NewInt(1_000_000_000_000_000), gas: 300_000,
 				})
 				if err != nil {
 					return err
