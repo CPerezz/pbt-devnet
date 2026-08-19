@@ -9,7 +9,7 @@
 #      `implementation('org.hyperledger.besu:besu-stateless')` and resolves it from
 #      mavenLocal, so skipping this step yields a besu built against nothing or against a
 #      stale copy.
-#   2. matkt/besu@glamsterdam-devnet-8-pbt then builds with `installDist`, producing a
+#   2. CPerezz/besu@fix/pbt-fcu-null-trie-node then builds with `installDist`, producing a
 #      distribution in build/install/besu.
 #
 # Only then can the image be built: besu's docker/Dockerfile does

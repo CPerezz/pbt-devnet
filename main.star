@@ -87,7 +87,11 @@ DEFAULT_MONITOR = {
     "probe_every": 8,
     # Optional, and the only POSITIVE proof the clients are on the binary tree: clients
     # agreeing with each other says nothing if they all built a merkle-patricia genesis.
-    # Get the value from `make genesis`, which prints the root as the tree commits it.
+    #
+    # It has to be the root of the genesis THIS devnet runs, which pbt-egg generates. NOT
+    # `make genesis`'s -- that tool allocs a different set of accounts, and a state root
+    # commits to the alloc, so its value fails preflight. Read the real one from a run whose
+    # clients already agree: eth_getBlockByNumber(0).stateRoot on any node.
     "expected_genesis_root": "",
 }
 
