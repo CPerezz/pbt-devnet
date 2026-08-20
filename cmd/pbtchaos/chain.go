@@ -37,7 +37,22 @@ func dialELs(ctx context.Context, specs []string) ([]*el, error) {
 	return out, nil
 }
 
+// elCallTimeout bounds every RPC to an execution client.
+//
+// Without it an unresponsive node -- crashed, paused, or wedged hard enough to stop serving --
+// blocks the caller forever: the job context carries no deadline and ethclient inherits it, so
+// a single dead client silently stopped the whole scenario queue rather than failing one
+// scenario. An error here is recoverable; a hang is not.
+const elCallTimeout = 5 * time.Second
+
+// elCtx bounds one call to an execution client. See elCallTimeout.
+func elCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, elCallTimeout)
+}
+
 func (e *el) head(ctx context.Context) (uint64, common.Hash, error) {
+	ctx, cancel := context.WithTimeout(ctx, elCallTimeout)
+	defer cancel()
 	h, err := e.c.HeaderByNumber(ctx, nil)
 	if err != nil {
 		return 0, common.Hash{}, err
@@ -49,6 +64,8 @@ func (e *el) head(ctx context.Context) (uint64, common.Hash, error) {
 // hash if it does not have that height. Comparing the same height before and after is
 // what makes a reorg observable: a changed hash at an unchanged height IS the reorg.
 func (e *el) hashAt(ctx context.Context, n uint64) common.Hash {
+	ctx, cancel := context.WithTimeout(ctx, elCallTimeout)
+	defer cancel()
 	h, err := e.c.HeaderByNumber(ctx, new(big.Int).SetUint64(n))
 	if err != nil {
 		return common.Hash{}
