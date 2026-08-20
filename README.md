@@ -183,11 +183,16 @@ minority's RPC only, holds for `DEPTH` blocks, heals, and verifies.
 was their only writer, and stay when a surviving account still holds them — lifted from unit test
 to four live clients.
 
-Each scenario carries one predicate, *is the doomed change visible here*, checked three times:
-**true** on the minority before the heal, **false** on the majority at that moment, **false** on
-every client afterwards. The first catches a write that never landed, which would otherwise let the
-scenario pass on an absence that was always there. The second catches a transaction that leaked
-past the partition onto the surviving branch. Only the third is a finding.
+Each scenario carries one predicate, *how much of the doomed change is visible here*, checked three
+times: **all of it** on the minority before the heal, **none of it** on the majority at that
+moment, **none of it** on every client afterwards. The first catches a write that never landed —
+all of it, not merely some, so a scenario that wrote half its state cannot verify the half that
+worked and skip the rest. The second catches a transaction that leaked past the partition onto the
+surviving branch. Only the third is a finding.
+
+Every transaction a scenario sends is confirmed successful, not just the last one. Sequential
+nonces prove the earlier sends were included, not that they succeeded — a revert consumes its
+nonce like anything else.
 
 That last check runs at a **fixed block, four below the majority's head, recorded before the heal**
 — never at head. A reorged-out transaction is still valid, so it re-enters the mempool and is mined
@@ -209,9 +214,12 @@ want a deep abandoned branch. The periodic isolation forks are one block by cons
 While a scenario runs the minority node is *expected* to report as Synchronizing and to sit
 behind the tip for the length of the partition — a deeper `DEPTH` means longer.
 
-A scenario that cannot confirm the clients reconverged reports `inconclusive` rather than a
-finding: state that differs across a network which never healed says nothing about anyone's reorg
-handling. **Seeing no forks at all?** Check `make chaos-status` first — a quiet chain usually means
+When the clients do not reconverge after a heal, the partition is provably gone, so the scenario
+says which of two things it is. A client whose head stops advancing while the chain builds around
+it is **wedged**, and that is a finding reported within about thirty seconds rather than waited
+out — it is what besu's cross-fork roll failure looks like. A consensus client sitting at zero
+peers has nobody to agree with, which is the network rather than the clients, and stays
+`inconclusive`. Both carry the per-client peer counts. **Seeing no forks at all?** Check `make chaos-status` first — a quiet chain usually means
 pbtchaos is stopped, which is what a baseline run needs.
 
 ## What is covered, and what is not

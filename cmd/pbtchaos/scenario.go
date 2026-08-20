@@ -40,7 +40,7 @@ type scenario struct {
 	// absence and the surviving branch is the one holding values.
 	//
 	// A nil height means latest.
-	effect func(context.Context, *run, *el, *big.Int) (bool, error)
+	effect func(context.Context, *run, *el, *big.Int) (visible, total int, err error)
 	// survives is optional: state that must still be READABLE after the heal. Only
 	// code-shared needs it, and it is the half of go-ethereum#30 that says chunks stay
 	// when a surviving account still holds them.
@@ -134,7 +134,6 @@ var scenarios = map[string]*scenario{
 			return nil
 		},
 		apply: func(ctx context.Context, r *run) error {
-			var last common.Hash
 			for i := 0; i < 3; i++ {
 				key, err := crypto.GenerateKey()
 				if err != nil {
@@ -151,14 +150,16 @@ var scenarios = map[string]*scenario{
 				if err != nil {
 					return err
 				}
-				last, _, err = r.viaMin.send(ctx, r.minority, txReq{to: &authority, auth: []types.SetCodeAuthorization{auth}})
+				h, _, err := r.viaMin.send(ctx, r.minority, txReq{to: &authority, auth: []types.SetCodeAuthorization{auth}})
 				if err != nil {
 					return err
 				}
+				if err := r.viaMin.awaitOK(ctx, r.minority, h, 120*time.Second); err != nil {
+					return fmt.Errorf("authority %s: %w", authority, err)
+				}
 				r.doomed = append(r.doomed, authority)
 			}
-			// Nonces are sequential from one sender, so the last receipt implies the rest.
-			return r.viaMin.awaitOK(ctx, r.minority, last, 120*time.Second)
+			return nil
 		},
 		// A delegation shows up as code: 0xef0100 followed by the target.
 		effect: hasCode,
@@ -167,36 +168,38 @@ var scenarios = map[string]*scenario{
 	"account": {
 		name: "account",
 		apply: func(ctx context.Context, r *run) error {
-			var last common.Hash
 			for i := 0; i < 5; i++ {
 				var addr common.Address
 				if _, err := rand.Read(addr[:]); err != nil {
 					return err
 				}
-				var err error
 				// Funding a fresh address CREATES an account, and under EIP-8297 that
 				// is 207,391 state gas on top of the 21,000 intrinsic.
-				last, _, err = r.viaMin.send(ctx, r.minority, txReq{
+				h, _, err := r.viaMin.send(ctx, r.minority, txReq{
 					to: &addr, value: big.NewInt(1_000_000_000_000_000), gas: 300_000,
 				})
 				if err != nil {
 					return err
 				}
+				if err := r.viaMin.awaitOK(ctx, r.minority, h, 120*time.Second); err != nil {
+					return fmt.Errorf("account %s: %w", addr, err)
+				}
 				r.doomed = append(r.doomed, addr)
 			}
-			return r.viaMin.awaitOK(ctx, r.minority, last, 120*time.Second)
+			return nil
 		},
-		effect: func(ctx context.Context, r *run, e *el, at *big.Int) (bool, error) {
+		effect: func(ctx context.Context, r *run, e *el, at *big.Int) (int, int, error) {
+			n := 0
 			for _, a := range r.doomed {
 				b, err := e.c.BalanceAt(ctx, a, at)
 				if err != nil {
-					return false, err
+					return 0, len(r.doomed), err
 				}
 				if b.Sign() != 0 {
-					return true, nil
+					n++
 				}
 			}
-			return false, nil
+			return n, len(r.doomed), nil
 		},
 	},
 
@@ -219,8 +222,8 @@ var scenarios = map[string]*scenario{
 			})
 		},
 		// The doomed change is the slots being set.
-		effect: func(ctx context.Context, r *run, e *el, at *big.Int) (bool, error) {
-			return anySlot(ctx, e, r.survivor, r.slots, at, false)
+		effect: func(ctx context.Context, r *run, e *el, at *big.Int) (int, int, error) {
+			return countSlots(ctx, e, r.survivor, r.slots, at, false)
 		},
 	},
 
@@ -247,40 +250,46 @@ var scenarios = map[string]*scenario{
 		},
 		// Here the doomed change is the slots being GONE, which is why effect has to be a
 		// predicate: on the surviving branch these read non-zero and that is correct.
-		effect: func(ctx context.Context, r *run, e *el, at *big.Int) (bool, error) {
-			return anySlot(ctx, e, r.survivor, r.slots, at, true)
+		effect: func(ctx context.Context, r *run, e *el, at *big.Int) (int, int, error) {
+			return countSlots(ctx, e, r.survivor, r.slots, at, true)
 		},
 	},
 }
 
 // hasCode reports whether any doomed address holds code, which covers a deployment and a
 // 7702 delegation alike.
-func hasCode(ctx context.Context, r *run, e *el, at *big.Int) (bool, error) {
+func hasCode(ctx context.Context, r *run, e *el, at *big.Int) (int, int, error) {
+	n := 0
 	for _, a := range r.doomed {
 		code, err := e.c.CodeAt(ctx, a, at)
 		if err != nil {
-			return false, err
+			return 0, len(r.doomed), err
 		}
 		if len(code) > 0 {
-			return true, nil
+			n++
 		}
 	}
-	return false, nil
+	return n, len(r.doomed), nil
 }
 
 // anySlot reports whether any of the slots is zero (wantZero) or non-zero.
-func anySlot(ctx context.Context, e *el, addr common.Address, slots []uint64, at *big.Int, wantZero bool) (bool, error) {
+// countSlots reports how many of the slots are in the doomed state, out of how many there are.
+//
+// A count rather than a boolean because the two directions need different strengths: before the
+// heal EVERY doomed write must be visible on the minority, while after it NONE may survive
+// anywhere. A first-match boolean is right for the second and far too weak for the first.
+func countSlots(ctx context.Context, e *el, addr common.Address, slots []uint64, at *big.Int, wantZero bool) (int, int, error) {
+	n := 0
 	for _, s := range slots {
 		got, err := e.c.StorageAt(ctx, addr, txkit.SlotKey(s), at)
 		if err != nil {
-			return false, err
+			return 0, len(slots), err
 		}
-		isZero := common.BytesToHash(got) == (common.Hash{})
-		if isZero == wantZero {
-			return true, nil
+		if (common.BytesToHash(got) == (common.Hash{})) == wantZero {
+			n++
 		}
 	}
-	return false, nil
+	return n, len(slots), nil
 }
 
 func scenarioNames() []string {
@@ -319,31 +328,37 @@ func (r *run) deploy(ctx context.Context, e *el, s *sender, initcode []byte) (co
 	return addr, nil
 }
 
-// writeAll calls the writer contract once per slot -- calldata is key || value -- and
-// confirms only the last, since one sender's nonces are sequential.
+// writeAll calls the writer contract once per slot -- calldata is key || value -- and confirms
+// EVERY receipt.
+//
+// Sequential nonces prove the earlier transactions were included, not that they succeeded: a
+// revert consumes its nonce like any other. Checking only the last one lets a scenario that
+// wrote half its state report a clean pass, which is the failure the effect predicate exists
+// to prevent and cannot catch on its own.
 func (r *run) writeAll(ctx context.Context, to common.Address, slots []uint64, val func(uint64) common.Hash) error {
-	var last common.Hash
 	for _, s := range slots {
 		data := append(txkit.SlotKey(s).Bytes(), val(s).Bytes()...)
 		h, _, err := r.viaMin.send(ctx, r.minority, txReq{to: &to, data: data, gas: 200_000})
 		if err != nil {
 			return err
 		}
-		last = h
+		if err := r.viaMin.awaitOK(ctx, r.minority, h, 120*time.Second); err != nil {
+			return fmt.Errorf("slot %d: %w", s, err)
+		}
 	}
-	return r.viaMin.awaitOK(ctx, r.minority, last, 120*time.Second)
+	return nil
 }
 
 // describeEffect reports which clients see the doomed change, for an error message.
 func (r *run) describeEffect(ctx context.Context, sc *scenario, els []*el, at *big.Int) string {
 	var yes, no []string
 	for _, e := range els {
-		on, err := sc.effect(ctx, r, e, at)
+		visible, total, err := sc.effect(ctx, r, e, at)
 		switch {
 		case err != nil:
 			no = append(no, e.name+"=?")
-		case on:
-			yes = append(yes, e.name)
+		case visible > 0:
+			yes = append(yes, fmt.Sprintf("%s=%d/%d", e.name, visible, total))
 		default:
 			no = append(no, e.name)
 		}

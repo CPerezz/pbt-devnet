@@ -98,12 +98,12 @@ func (c *chaos) healQuietly(ctx context.Context) {
 func (c *chaos) checkGone(ctx context.Context, sc *scenario, r *run) (string, error) {
 	var still []string
 	for _, e := range r.all() {
-		on, err := sc.effect(ctx, r, e, r.at)
+		visible, total, err := sc.effect(ctx, r, e, r.at)
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", e.name, err)
 		}
-		if on {
-			still = append(still, e.name)
+		if visible > 0 {
+			still = append(still, fmt.Sprintf("%s (%d/%d)", e.name, visible, total))
 		}
 	}
 	if len(still) > 0 {
@@ -160,11 +160,12 @@ func awaitHeight(ctx context.Context, els []*el, n uint64, timeout time.Duration
 // runScenario splits the network, puts the scenario's state on the minority branch,
 // holds it for depth blocks, heals, and then asks every client about that state.
 //
-// The heal is not assumed to work. A partition severs TCP sessions, and a consensus
-// client that comes back with no peers can sit on its own branch indefinitely -- so if
-// the clients have not reconverged the scenario reports "inconclusive" rather than a
-// finding. A disagreement measured across a network that never healed says nothing
-// about anyone's reorg handling.
+// The heal is not assumed to work, and failing to reconverge after one is a claim about the
+// clients: the partition is provably gone by then. Two readings are separated rather than
+// merged. A client whose head stops advancing while the chain builds around it is wedged --
+// besu's cross-fork roll failure looks exactly like that -- and is reported as a finding
+// within about thirty seconds. A consensus client with no peers has nobody to agree with,
+// which is the network, and stays "inconclusive".
 func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, minorityPick int) result {
 	res := result{Name: sc.name, Started: time.Now().UTC().Format(time.RFC3339), Depth: depth}
 
@@ -286,14 +287,17 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 	// change must be visible on the minority -- otherwise a reverted transaction would
 	// let the scenario "pass" on an absence that was always there -- and invisible on the
 	// majority, which is what proves it is confined to the branch about to die.
-	if on, err := sc.effect(ctx, r, minority, nil); err != nil || !on {
+	// EVERY doomed write has to be visible here, not merely one of them: a scenario that wrote
+	// half its state would otherwise verify the half that landed and silently skip the rest.
+	if visible, total, err := sc.effect(ctx, r, minority, nil); err != nil || visible != total {
 		c.healQuietly(ctx)
 		res.Outcome = "inconclusive"
-		res.Detail = fmt.Sprintf("the doomed change is not visible on the minority %s, so there is "+
-			"nothing for the reorg to remove (%s)", minority.name, r.describeEffect(ctx, sc, c.els, nil))
+		res.Detail = fmt.Sprintf("the doomed change is not fully visible on the minority %s "+
+			"(%d of %d), so there is nothing for the reorg to remove (%s)",
+			minority.name, visible, total, r.describeEffect(ctx, sc, c.els, nil))
 		return res
 	}
-	if on, err := sc.effect(ctx, r, majority[0], nil); err != nil || on {
+	if visible, _, err := sc.effect(ctx, r, majority[0], nil); err != nil || visible != 0 {
 		c.healQuietly(ctx)
 		res.Outcome = "inconclusive"
 		res.Detail = fmt.Sprintf("the doomed change is already visible on the majority %s, so it "+
@@ -329,13 +333,43 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 	}
 	c.log.Info("healed", "name", sc.name, "expect_height", wantHeight, "expect_hash", short(wantHash))
 
-	height, ok := c.waitAgreement(ctx, 4*time.Minute)
+	height, ok, frozen := c.waitAgreement(ctx, 4*time.Minute)
 	if !ok {
+		// The partition is gone -- Clear() succeeded above -- so a chain that will not
+		// reconverge is a claim about the clients, not about the network. Only one reading
+		// still belongs to the network: a consensus client with no peers has nobody to agree
+		// with, and that is what the peer counts are here to separate.
 		n, _ := lowestHead(ctx, c.els)
-		res.Outcome = "inconclusive"
-		res.Detail = "clients did not reconverge within 4m of the heal, so any state difference " +
-			"reflects an unhealed network rather than reorg handling; " + c.describeDisagreement(ctx, n)
-		c.log.Warn("no reconvergence after heal", "name", sc.name)
+		peers, byIndex := c.peerSummary(ctx)
+
+		// A frozen head only means "wedged" if the client had any way to move. A consensus
+		// client with no peers receives no blocks, so its execution client stands still by
+		// starvation -- that is the network, and reporting it as a client defect would bury
+		// the real thing under a finding per scenario.
+		wedged, starved := classifyFrozen(frozen, byIndex)
+
+		switch {
+		case len(wedged) > 0:
+			res.Outcome = "finding"
+			res.Detail = fmt.Sprintf("%s stopped advancing while the rest of the chain kept "+
+				"building, with peers of its own, and the clients never reconverged after the "+
+				"heal — %s. peers: %s; disruptoor: %s", strings.Join(wedged, ", "),
+				c.describeDisagreement(ctx, n), peers, c.disruptoorSummary())
+			c.log.Error("FINDING: client wedged after heal", "name", sc.name, "clients", wedged)
+		case len(starved) > 0:
+			res.Outcome = "inconclusive"
+			res.Detail = fmt.Sprintf("%s stopped advancing, but its consensus client has no "+
+				"peers, so it is starved rather than wedged — the network, not the client. "+
+				"Restart it and re-run. peers: %s; %s", strings.Join(starved, ", "), peers,
+				c.describeDisagreement(ctx, n))
+			c.log.Warn("no reconvergence: client starved of peers", "name", sc.name, "clients", starved)
+		default:
+			res.Outcome = "finding"
+			res.Detail = fmt.Sprintf("the clients did not reconverge within 4m of a heal that "+
+				"succeeded, and every client kept building — %s. peers: %s; disruptoor: %s",
+				c.describeDisagreement(ctx, n), peers, c.disruptoorSummary())
+			c.log.Error("FINDING: no reconvergence after heal", "name", sc.name)
+		}
 		return res
 	}
 	res.Reorged = true
@@ -397,27 +431,150 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 
 // waitAgreement waits until every client reports the same hash at the highest height
 // they all have, which is what "the reorg is over" looks like from outside.
-func (c *chaos) waitAgreement(ctx context.Context, timeout time.Duration) (uint64, bool) {
+func (c *chaos) waitAgreement(ctx context.Context, timeout time.Duration) (uint64, bool, []string) {
 	deadline := time.Now().Add(timeout)
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
+
+	heads := newHeadTracker()
 	for {
 		select {
 		case <-ctx.Done():
-			return 0, false
+			return 0, false, nil
 		case <-tick.C:
-			if time.Now().After(deadline) {
-				return 0, false
+			sample := map[string]uint64{}
+			for _, e := range c.els {
+				if n, _, err := e.head(ctx); err == nil {
+					sample[e.name] = n
+				}
 			}
+			heads.observe(sample)
+			if frozen := heads.frozen(); len(frozen) > 0 {
+				return 0, false, frozen
+			}
+			if time.Now().After(deadline) {
+				return 0, false, nil
+			}
+
 			n, err := lowestHead(ctx, c.els)
 			if err != nil || n == 0 {
 				continue
 			}
 			if same, _ := agreed(ctx, c.els, n); same {
-				return n, true
+				return n, true, nil
 			}
 		}
 	}
+}
+
+// wedgeTicks is how many times a client may be SEEN holding the same head, while the chain
+// around it advances, before it is called wedged rather than slow.
+//
+// Six observations at a five-second poll is thirty seconds of standing still, spanning seven
+// polls -- the first only establishes a baseline, since a stall is a comparison against a
+// previous sample. That is five slots here: long enough that ordinary propagation lag never
+// trips it, short enough to beat the convergence timeout by minutes.
+const wedgeTicks = 6
+
+// headTracker turns a stream of per-client head samples into "who has stopped moving".
+//
+// It is separate from the polling loop because this is the judgement, and the judgement is
+// worth testing without a devnet attached.
+type headTracker struct {
+	last  map[string]uint64
+	stuck map[string]int
+}
+
+func newHeadTracker() *headTracker {
+	return &headTracker{last: map[string]uint64{}, stuck: map[string]int{}}
+}
+
+// observe folds one round of samples in. A client only accrues a stall when the chain around
+// it moved: a devnet where nothing is proposing is a different problem, and counting it here
+// would name every client as wedged the moment one of them resumed.
+func (t *headTracker) observe(heads map[string]uint64) {
+	moved := false
+	for name, n := range heads {
+		if prev, seen := t.last[name]; seen && n > prev {
+			moved = true
+		}
+	}
+	if moved {
+		for name, n := range heads {
+			if prev, seen := t.last[name]; seen && n == prev {
+				t.stuck[name]++
+			} else {
+				t.stuck[name] = 0
+			}
+		}
+	}
+	for name, n := range heads {
+		t.last[name] = n
+	}
+}
+
+func (t *headTracker) frozen() []string {
+	var out []string
+	for name, n := range t.stuck {
+		if n >= wedgeTicks {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// participantIndex pulls the node number out of a service name. ethereum-package names the
+// two halves of one participant el-3-besu-lighthouse and cl-3-lighthouse-besu, so the index is
+// what ties an execution client to its own consensus client.
+func participantIndex(name string) string {
+	parts := strings.Split(name, "-")
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[1]
+}
+
+// classifyFrozen splits clients that stopped advancing into those that had peers and could
+// have moved -- wedged, a finding -- and those whose consensus client has none, which are
+// starved by the network rather than broken. A client with an unknown peer count is treated as
+// wedged: the harness would rather ask a question it cannot answer than stay quiet.
+func classifyFrozen(frozen []string, byIndex map[string]int) (wedged, starved []string) {
+	for _, f := range frozen {
+		if n, ok := byIndex[participantIndex(f)]; ok && n == 0 {
+			starved = append(starved, f)
+		} else {
+			wedged = append(wedged, f)
+		}
+	}
+	return wedged, starved
+}
+
+// peerSummary reports every consensus client's peer count, both as text and by participant.
+func (c *chaos) peerSummary(ctx context.Context) (string, map[string]int) {
+	byIndex := map[string]int{}
+	if len(c.cls) == 0 {
+		return "unknown (no consensus clients given)", byIndex
+	}
+	var parts []string
+	for _, b := range c.cls {
+		n, err := b.peers(ctx)
+		if err != nil {
+			parts = append(parts, b.name+"=?")
+			continue
+		}
+		byIndex[participantIndex(b.name)] = n
+		parts = append(parts, fmt.Sprintf("%s=%d", b.name, n))
+	}
+	return strings.Join(parts, " "), byIndex
+}
+
+func (c *chaos) disruptoorSummary() string {
+	p, sh, err := c.d.State()
+	if err != nil {
+		return "unreadable: " + err.Error()
+	}
+	return fmt.Sprintf("%d partition(s), %d shaping rule(s)", p, sh)
 }
 
 func (c *chaos) describeDisagreement(ctx context.Context, n uint64) string {

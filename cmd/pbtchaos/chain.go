@@ -116,18 +116,19 @@ func waitBlocks(ctx context.Context, els []*el, n uint64) error {
 
 // beacon is one consensus client's HTTP API.
 type beacon struct {
-	url string
-	hc  *http.Client
+	name string
+	url  string
+	hc   *http.Client
 }
 
 func newBeacons(specs []string) ([]*beacon, error) {
 	var out []*beacon
 	for _, s := range specs {
-		_, url, ok := strings.Cut(s, "=")
+		name, url, ok := strings.Cut(s, "=")
 		if !ok {
 			return nil, fmt.Errorf("--cl wants name=url, got %q", s)
 		}
-		out = append(out, &beacon{url: url, hc: &http.Client{Timeout: 10 * time.Second}})
+		out = append(out, &beacon{name: name, url: url, hc: &http.Client{Timeout: 10 * time.Second}})
 	}
 	return out, nil
 }
@@ -193,4 +194,21 @@ func (b *beacon) duties(ctx context.Context, epoch uint64) ([]duty, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Slot < out[j].Slot })
 	return out, nil
+}
+
+// peers reports how many peers this consensus client is connected to.
+//
+// It is what separates "these clients disagree" from "this client is talking to nobody":
+// after a heal the first is a finding and the second is the network. The beacon API returns
+// the count as a STRING, not a number.
+func (b *beacon) peers(ctx context.Context) (int, error) {
+	var out struct {
+		Data struct {
+			Connected string `json:"connected"`
+		} `json:"data"`
+	}
+	if err := b.getJSON(ctx, "/eth/v1/node/peer_count", &out); err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(out.Data.Connected)
 }
