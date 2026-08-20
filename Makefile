@@ -13,7 +13,7 @@ DEPTH   ?= 10
 MINORITY ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help up down logs build besu besu-image bin genesis check
+.PHONY: help up down logs sources build besu besu-image bin genesis check
 
 help:
 	@echo "pbt-devnet — a differential test harness for EIP-8297 execution clients"
@@ -81,10 +81,13 @@ chaos-status: ## what pbtchaos is doing now, what is queued, and recent results
 scenario: ## run one reorg scenario (NAME=code-shared DEPTH=20 [MINORITY=3])
 	@scripts/pbt.py scenario $(ENCLAVE) $(NAME) $(DEPTH) $(MINORITY)
 
-build: ## build every local image the package expects
+sources: ## clone the forks this builds from, if they are not already beside this repo
+	@scripts/sources.sh
+
+build: sources ## build every local image the package expects
 	scripts/build-images.sh $(ARGS)
 
-besu: ## build besu-pbt:local (two Gradle stages, then the image; needs JDK 25)
+besu: sources ## build besu-pbt:local (two Gradle stages, then the image; needs JDK 25)
 	scripts/build-besu.sh
 
 besu-image: ## rebuild besu-pbt:local from an existing build/install/besu
