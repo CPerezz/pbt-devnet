@@ -364,7 +364,11 @@ def cmd_proposals(a):
     cls = services(a.enclave, "cl-")
     if not cls:
         sys.exit(f"no consensus clients found in enclave '{a.enclave}'")
-    via = a.via or (cls[1] if len(cls) > 1 else cls[0])
+    # Ask the bootnode by default. It is participant 1, which pbtchaos is configured never to
+    # disrupt, so it is the one vantage point that sees every proposer's blocks for the whole
+    # run. Asking a node that gets partitioned makes the majority's slots look missing, which
+    # is the false-miss artefact this subcommand exists to avoid.
+    via = a.via or cls[0]
     base = url(a.enclave, via, "http")
     if not base:
         sys.exit(f"could not reach {via}")

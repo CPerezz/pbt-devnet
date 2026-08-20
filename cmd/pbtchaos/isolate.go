@@ -53,6 +53,11 @@ func (c *chaos) isolationFork(ctx context.Context) result {
 		res.Detail = err.Error()
 		return res
 	}
+	if c.cfg.protected[node] {
+		res.Outcome = "skipped"
+		res.Detail = fmt.Sprintf("node %d proposes next but is protected from disruption", node)
+		return res
+	}
 
 	others := make([]int, 0, len(c.els))
 	for i := range c.els {

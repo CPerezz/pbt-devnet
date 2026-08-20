@@ -73,6 +73,13 @@ DEFAULT_CHAOS = {
     "isolate_for": "",
     # Default depth for `make scenario` when none is given.
     "depth": 10,
+    # Nodes pbtchaos must never disrupt, 1-based.
+    #
+    # Participant 1 is ethereum-package's sole consensus bootnode and is launched without boot
+    # nodes of its own, so a partition leaves it with no way back: zero peers for the rest of
+    # the run. args/devnet.yaml gives that role to a dedicated node so the four under test
+    # stay eligible. Set to [] if participant 1 is a node you actually want disrupted.
+    "protect_nodes": [1],
     # A pair of keys per scenario run, walked so runs do not repeat a pair: a reorged-out
     # transaction stays valid and re-enters the pool, and a reused key then reads a nonce
     # that goes stale underneath it. Three is the most that fits below the hammer without
@@ -270,6 +277,8 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
         "--validators-per-node", str(args.get("network_params", {}).get("num_validator_keys_per_node", 128)),
         "--slot-seconds", "{0}s".format(args.get("network_params", {}).get("seconds_per_slot", 12)),
     ]
+    for n in cfg["protect_nodes"]:
+        cmd += ["--protect-node", str(n)]
     if cfg["isolate_for"] != "":
         cmd += ["--isolate-for", cfg["isolate_for"]]
     if not cfg["isolation"]:

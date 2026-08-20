@@ -11,6 +11,23 @@ participants:
   # Four rather than three is what lets the network finalize through a partition: isolating
   # one of three leaves the majority holding exactly 2/3, and finality needs MORE than 2/3.
   # One of four leaves 3/4.
+  # PARTICIPANT 1 IS THE BOOTNODE, and exists only to be one.
+  #
+  # ethereum-package launches the first participant with no --boot-nodes of its own and hands
+  # its ENR to every other consensus client. Partitioning that node therefore strands it for
+  # good: it comes back with no peers and nothing to rediscover through, so it sits at zero
+  # peers and every later scenario measures a starved node instead of a reorg.
+  #
+  # Keeping it out of the rotation (pbt_chaos.protect_nodes, [1] by default) costs nothing
+  # here because it is a fifth node -- the four clients under test below all stay eligible.
+  # It validates like the others, so proposer-to-participant attribution stays a plain
+  # division by num_validator_keys_per_node.
+  - el_type: geth
+    el_image: pbt-geth:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+
   - el_type: geth
     el_image: pbt-geth:local
     cl_type: lighthouse

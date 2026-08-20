@@ -123,3 +123,33 @@ func TestAnUnknownPeerCountErrsTowardReporting(t *testing.T) {
 			wedged, starved)
 	}
 }
+
+func TestRotationSkipsProtectedNodes(t *testing.T) {
+	// Participant 1 is ethereum-package's sole consensus bootnode and has no boot nodes of
+	// its own, so stranding it costs the whole devnet its discovery path.
+	c := &chaos{els: make([]*el, 5), cfg: config{protected: map[int]bool{1: true}}}
+
+	seen := map[int]int{}
+	for i := 0; i < 12; i++ {
+		n := c.nextMinority()
+		if n == 1 {
+			t.Fatalf("rotation returned the protected node on turn %d", i)
+		}
+		seen[n]++
+	}
+	if len(seen) != 4 {
+		t.Fatalf("rotation covered %d nodes, want all 4 unprotected ones: %v", len(seen), seen)
+	}
+	for n, count := range seen {
+		if count != 3 {
+			t.Errorf("node %d chosen %d times, want an even 3 across 12 turns", n, count)
+		}
+	}
+}
+
+func TestEligibleIsEveryNodeWhenNothingIsProtected(t *testing.T) {
+	c := &chaos{els: make([]*el, 4), cfg: config{protected: map[int]bool{}}}
+	if got := c.eligible(); len(got) != 4 {
+		t.Fatalf("eligible() = %v, want all four nodes", got)
+	}
+}

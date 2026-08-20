@@ -47,6 +47,7 @@ type config struct {
 	isolateMax     uint64
 	isolateFor     time.Duration
 	defaultDepth   uint64
+	protected      map[int]bool
 }
 
 // chaos is the single owner of disruptoor state. Every disruption runs on the worker
@@ -73,11 +74,30 @@ type chaos struct {
 	minorityRuns map[string]int // client -> scenarios run with it as the doomed branch
 }
 
+// eligible returns the 1-based node indices pbtchaos is allowed to disrupt.
+//
+// ethereum-package makes participant 1 the sole consensus bootnode and gives it no boot nodes
+// of its own, so a partition strands it with nothing to rediscover through: it sits at zero
+// peers for the rest of the run and every later scenario measures that instead of a reorg.
+func (c *chaos) eligible() []int {
+	out := make([]int, 0, len(c.els))
+	for i := range c.els {
+		if !c.cfg.protected[i+1] {
+			out = append(out, i+1)
+		}
+	}
+	return out
+}
+
 // nextMinority advances the rotation and returns a 1-based node index.
 func (c *chaos) nextMinority() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	idx := c.turn%len(c.els) + 1
+	e := c.eligible()
+	if len(e) == 0 {
+		return 1
+	}
+	idx := e[c.turn%len(e)]
 	c.turn++
 	return idx
 }
@@ -130,11 +150,12 @@ type result struct {
 }
 
 func main() {
-	var els, cls, keys cli.MultiFlag
+	var els, cls, keys, protect cli.MultiFlag
 	api := flag.String("disruptoor", "", "disruptoor base URL (required)")
 	flag.Var(&els, "el", "execution client as name=rpcURL (repeatable)")
 	flag.Var(&cls, "cl", "consensus client as name=beaconURL (repeatable)")
 	flag.Var(&keys, "key", "prefunded sender private key (repeatable)")
+	flag.Var(&protect, "protect-node", "1-based node index never to disrupt (repeatable)")
 	listen := flag.String("listen", ":7800", "control API listen address")
 	slotSeconds := flag.Duration("slot-seconds", 12*time.Second, "seconds per slot")
 	validatorsPer := flag.Uint64("validators-per-node", 128, "validators assigned to each participant")
@@ -195,6 +216,18 @@ func main() {
 		cli.Fatal(log, "could not clear disruptoor state: %v", err)
 	}
 
+	protectedNodes := map[int]bool{}
+	for _, p := range protect {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 {
+			cli.Fatal(log, "--protect-node wants a 1-based node index, got %q", p)
+		}
+		protectedNodes[n] = true
+	}
+	if len(protectedNodes) >= len(elc) {
+		cli.Fatal(log, "every node is protected, so there is nothing to disrupt")
+	}
+
 	c := &chaos{
 		d: d, els: elc, cls: clc, keys: keys, log: log,
 		jobs:         make(chan job, 16),
@@ -209,6 +242,7 @@ func main() {
 			isolateMax:     *isoMax,
 			isolateFor:     *isolateFor,
 			defaultDepth:   *depth,
+			protected:      protectedNodes,
 		},
 	}
 

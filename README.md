@@ -1,7 +1,7 @@
 # pbt-devnet
 
 A differential devnet for the **EIP-8297 partitioned binary tree (PBT)**: two geth and two besu
-nodes on the same Amsterdam-at-genesis chain, driven by real lighthouse consensus clients, with
+nodes under test on the same Amsterdam-at-genesis chain, driven by real lighthouse consensus clients, with
 every execution client required to agree on every state root — and reorged on purpose to check
 they still agree afterwards.
 
@@ -11,16 +11,23 @@ twice. So the pairs are deliberately configured differently:
 
 | node | client | what makes it different |
 |---|---|---|
-| 1 | geth | `--state.size-tracking` |
-| 2 | geth | archive, `--syncmode=full` |
-| 3 | besu | `--data-storage-format=BINARY` |
-| 4 | besu | also `--bonsai-limit-trie-logs-enabled=false` — keeps every trie log |
+| 1 | geth | **the bootnode** — never partitioned, and not one of the nodes under test |
+| 2 | geth | `--state.size-tracking` |
+| 3 | geth | archive, `--syncmode=full` |
+| 4 | besu | `--data-storage-format=BINARY` |
+| 5 | besu | also `--bonsai-limit-trie-logs-enabled=false` — keeps every trie log |
 
 The besu pair matters most for reorgs: besu unwinds a branch by **reversing trie logs** where geth
 replaces layers, so if the pruning node fails a deep reorg and the retaining one survives it, the
-difference names the cause. Four nodes rather than three is also what lets the network finalize
-through a partition — isolating one of three leaves the majority at exactly 2/3, and finality needs
-more than that.
+difference names the cause. Four nodes under test rather than three is also what lets the network
+finalize through a partition — isolating one of three leaves the majority at exactly 2/3, and
+finality needs more than that.
+
+Node 1 exists because ethereum-package launches the **first** participant with no `--boot-nodes`
+of its own and hands its ENR to everyone else. Partitioning that node strands it permanently — it
+returns with no peers and nothing to rediscover through, then sits at zero peers while every later
+scenario measures a starved node instead of a reorg. Giving the role to a node that is never
+disrupted (`pbt_chaos.protect_nodes`) keeps all four clients under test eligible.
 
 It composes [`ethpandaops/ethereum-package`](https://github.com/ethpandaops/ethereum-package)
 rather than launching clients itself, with **no patches to that package** — the binary tree is
