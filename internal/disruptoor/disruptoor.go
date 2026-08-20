@@ -62,7 +62,7 @@ func (d *Client) do(method, path string, body any) ([]byte, error) {
 	return out, nil
 }
 
-// containers reports how many containers disruptoor can see. Zero means every selector
+// Containers reports how many containers disruptoor can see. Zero means every selector
 // we send will match nothing, which is the one failure mode that looks like success: the
 // partition is "applied", no traffic changes, and the chain looks healthy throughout.
 func (d *Client) Containers() (int, error) {
@@ -97,7 +97,7 @@ func nodes(idx ...int) group {
 	return group{"node-index": ids, "client-type": {"execution", "beacon"}}
 }
 
-// partition cuts p2p between the two groups in both directions. Engine API is untouched,
+// Partition cuts p2p between the two groups in both directions. Engine API is untouched,
 // so each side keeps driving its own execution client and the two branches grow apart.
 func (d *Client) Partition(name string, a, b []int) error {
 	_, err := d.do(http.MethodPut, "/v1/state", map[string]any{
@@ -116,7 +116,7 @@ func (d *Client) Clear() error {
 	return err
 }
 
-// state reports how many partitions and shaping rules are currently APPLIED. Note this
+// State reports how many partitions and shaping rules are currently APPLIED. Note this
 // is applied state only: it says nothing about what those rules are doing.
 func (d *Client) State() (partitions, shaping int, err error) {
 	raw, err := d.do(http.MethodGet, "/v1/state", nil)

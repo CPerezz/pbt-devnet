@@ -23,9 +23,9 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
-// prefundedKeys are the standard local-development keys. spamoor, tx-fuzz and the
-// hammer all draw from these, so they are funded generously — but well inside the
-// 16 bytes the tree gives a balance.
+// prefunded are the standard local-development addresses, funded so a single client run
+// has accounts to send from. The devnet itself does not use these -- it takes
+// ethereum-package's prefunded set, which is why this genesis is not the devnet's.
 var prefunded = []string{
 	"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", // ac0974be...ff80
 	"0x70997970C51812dc3A010C7d01b50e0d17dc79C8", // 59c6995e...690d

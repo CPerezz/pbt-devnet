@@ -142,8 +142,8 @@ func joinParts(p []string) string {
 // plus a periodic summary.
 //
 // It is a real client difference and worth knowing about -- geth and besu price the same
-// deployment 2.9% apart -- but it fires on nearly every estimate,, but it fires on nearly every estimate, and repeating it
-// buries the next real finding.
+// deployment 2.9% apart -- but it fires on nearly every
+// estimate, and repeating it buries the next real finding.
 type gasDisagreement struct {
 	mu       sync.Mutex
 	seen     int

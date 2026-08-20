@@ -1,5 +1,5 @@
-# Entry point for the devnet. `make up` is the whole story; everything else is either a
-# step of it or the container-free variant.
+# Entry point for the devnet. `make up` builds the images and starts it; everything else
+# either builds a piece of it or asks the running network a question.
 #
 # ENCLAVE and ARGS are overridable: `make up ENCLAVE=pbt2 ARGS=args/mine.yaml`.
 
@@ -100,13 +100,11 @@ genesis: ## regenerate genesis/genesis.json and print its root (for single-clien
 	go build -o bin/gengenesis ./cmd/gengenesis
 	./bin/gengenesis --out genesis/genesis.json --gaslimit 200000000
 
-check: ## verify docker, kurtosis and a yaml reader are present
+check: ## verify docker and kurtosis are present
 	@command -v docker >/dev/null 2>&1 || { \
 	  echo "docker not found. Install Docker Desktop, or OrbStack."; exit 1; }
 	@docker info >/dev/null 2>&1 || { \
 	  echo "docker is installed but not responding — start Docker and retry."; exit 1; }
 	@command -v kurtosis >/dev/null 2>&1 || { \
 	  echo "kurtosis not found:  brew install kurtosis-tech/tap/kurtosis-cli"; exit 1; }
-	@{ command -v yq >/dev/null 2>&1 || python3 -c 'import yaml' >/dev/null 2>&1; } || { \
-	  echo "need a yaml reader to parse $(ARGS):  brew install yq   (or pip3 install pyyaml)"; exit 1; }
-	@echo "==> docker, kurtosis and a yaml reader are all present"
+	@echo "==> docker and kurtosis are both present"

@@ -55,8 +55,10 @@ DEFAULT_HAMMER = {
     "only": "",
 }
 
-# pbtchaos owns disruptoor state exclusively: it is the only thing that PUTs, which is
-# what lets it guarantee no two disruptions overlap.
+# pbtchaos serialises its own disruptions through one queue, so two of ITS jobs never
+# overlap. `make split` / `make heal` write to disruptoor directly and are deliberately
+# outside that queue -- which also means pbtchaos can clear a hand-applied split when its
+# next job finishes.
 DEFAULT_CHAOS = {
     "enabled": True,
     "image": "pbt-chaos:local",
@@ -71,10 +73,11 @@ DEFAULT_CHAOS = {
     "isolate_for": "",
     # Default depth for `make scenario` when none is given.
     "depth": 10,
-    # A pair of keys per scenario run, walked so no two consecutive runs share one: a
-    # reorged-out transaction stays valid and re-enters the pool, and a reused key then
-    # reads a nonce that goes stale underneath it. Three is the most that fits below the
-    # hammer without reaching the accounts other services claim -- see the guard below.
+    # A pair of keys per scenario run, walked so runs do not repeat a pair: a reorged-out
+    # transaction stays valid and re-enters the pool, and a reused key then reads a nonce
+    # that goes stale underneath it. Three is the most that fits below the hammer without
+    # reaching the accounts other services claim -- see the guard below -- so consecutive
+    # runs do still share one key.
     "senders": 3,
 }
 

@@ -1,4 +1,4 @@
-// Package cli holds the flag and exit plumbing every command in this repo needs.
+// Package cli holds the flag and exit plumbing the three long-running commands share.
 package cli
 
 import (

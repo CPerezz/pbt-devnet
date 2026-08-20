@@ -1,6 +1,6 @@
 # Kurtosis uploads this directory on every run and does NOT honour .gitignore, so build
-# output has to be excluded here too. `make bin` writes 140MB+ into bin/, which stalls
-# `kurtosis run` at the upload step with no output and no error.
+# output has to be excluded here too: `make bin` writes tens of megabytes into bin/, which
+# has nothing to do with the package and only slows the upload.
 bin/
 artifacts/
 **/*.log

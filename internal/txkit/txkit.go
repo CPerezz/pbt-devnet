@@ -4,8 +4,8 @@
 //
 // It is shared by the hammer, which generates continuous traffic, and by pbtchaos,
 // which needs the same shapes on a branch that is about to be reorged out. The
-// builders are subtle in ways — SSTORE's operand
-// order, STOP having to be byte 0, the factory's 31-byte prefix — so they live in one
+// builders are subtle -- SSTORE's operand order, STOP having to be byte 0, the factory's
+// 31-byte prefix -- so they live in one
 // place rather than being copied.
 //
 // All bytecode is straight-line with no jumps, so it needs no compiler.
@@ -230,9 +230,8 @@ func FactoryDestructInitCode(beneficiary common.Address, codeSize int) []byte {
 // PatternCode builds a deterministic runtime blob that is safe to CALL: byte 0 is
 // STOP, so execution halts immediately and the rest is inert data.
 //
-// The terminator has to be FIRST. Filling with PUSH0 and putting a STOP at the end
-// produced code that overflowed the 1024-slot stack after ~1024 bytes and reverted,
-// burning all forwarded gas.
+// The terminator has to be FIRST. A trailing STOP means the PUSH0 filler executes, and a
+// kilobyte of it overflows the 1024-slot stack: the call reverts, burning all forwarded gas.
 //
 // fill selects the body, which decides the code hash: the same fill from different
 // senders shares code-zone leaves, a different fill does not.
