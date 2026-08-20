@@ -63,10 +63,48 @@ participants:
     # rather than isolate one.
     el_extra_params: ["--data-storage-format=BINARY", "--bonsai-limit-trie-logs-enabled=false"]
 
+  # The third implementation. Erigon reaches the tree through environment variables rather
+  # than el_extra_params: the launcher runs `erigon init <genesis.json> && erigon ...` in one
+  # shell and el_extra_params extends only the second half, so a flag would miss init and
+  # commit a merkle-patricia genesis while the running node believed it was on the tree.
+  # COMMITMENT_BIN / COMMITMENT_BIN_HASH are read at process start, so they cover both.
+  #
+  # blake3 is not a preference: it is the tree's H on this chain, matching geth-pbt's
+  # hardcoded BLAKE3 and besu-stateless's Blake3Digest(256). Erigon's own default is keccak,
+  # whose roots agree with no other client.
+  - el_type: erigon
+    el_image: erigon-pbt:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_env_vars:
+      COMMITMENT_BIN: "true"
+      COMMITMENT_BIN_HASH: "blake3"
+
+  - el_type: erigon
+    el_image: erigon-pbt:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_env_vars:
+      COMMITMENT_BIN: "true"
+      COMMITMENT_BIN_HASH: "blake3"
+    # Keeps the commitment history rather than pruning to the latest state, so this node can
+    # answer for a trie root it has already passed. That is the axis that matters after a
+    # reorg: the pruning node above must recompute an unwound root, this one can read it
+    # back. A flag is right here where an env var was needed above -- it is consulted at node
+    # start, not by init, and it is a whole-datadir property from then on: the node refuses
+    # to restart without it once the datadir carries it.
+    el_extra_params: ["--prune.include-commitment-history"]
+
 network_params:
-  # Load-bearing, and its effect is indirect. Both el launchers choose full sync only when
-  # the network is named "kurtosis"; any custom name silently yields --syncmode=snap /
-  # --sync-mode=SNAP, which the binary tree refuses, and the engine API then goes quiet.
+  # Load-bearing, and its effect is indirect. The geth and besu launchers choose full sync
+  # only when the network is named "kurtosis"; any custom name silently yields
+  # --syncmode=snap / --sync-mode=SNAP, which the binary tree refuses, and the engine API
+  # then goes quiet. Erigon's launcher emits no syncmode at all; what binds it is that the
+  # name is NOT one of constants.PUBLIC_NETWORKS (mainnet, sepolia, hoodi), which is what
+  # gates the launcher prefixing `erigon init` at erigon_launcher.star -- a public name
+  # there leaves the node with no genesis written at all.
   network: "kurtosis"
   # mainnet, NOT minimal. Under minimal the consensus clients lose every peer a few minutes
   # in and never reconnect, so the devnet splits into separate chains that each look
@@ -81,8 +119,8 @@ network_params:
   gloas_fork_epoch: 0
 
 ethereum_genesis_generator_params:
-  # Fork of ethereum-genesis-generator: emits "binaryTrieTime" — ONE key, taken by both
-  # clients — into genesis.json, and bundles a fork of eth-beacon-genesis that derives the
+  # Fork of ethereum-genesis-generator: emits "binaryTrieTime" — ONE key, taken by every
+  # client — into genesis.json, and bundles a fork of eth-beacon-genesis that derives the
   # consensus genesis from the binary-tree block hash instead of a merkle-patricia one.
   # Build with scripts/build-images.sh.
   #
@@ -95,8 +133,8 @@ ethereum_genesis_generator_params:
 # Deliberately NO builder. buildoor wires one shared builder to participant 0's execution
 # client, so every payload on the chain would be built by that one node and the others
 # would only ever import — precisely the half of each client this harness exists to
-# compare. Without it each proposer builds locally through its own engine API, so geth and
-# besu both propose and both validate.
+# compare. Without it each proposer builds locally through its own engine API, so every
+# client both proposes and validates.
 #
 # ORDER IS PART OF THE CONTRACT: published host ports are
 # port_publisher.additional_services.public_port_start + 2*index, so reordering this list

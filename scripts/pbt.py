@@ -28,16 +28,17 @@ SLOTS_PER_EPOCH = 32
 
 # ---------------------------------------------------------------- kurtosis plumbing
 
-def sh(*args):
+def sh(*args, quiet=False):
     """Run a command and return its stdout.
 
     A failure is reported but not raised: callers treat an empty answer as "this service is
     not there", which is the right reading for one missing port and the wrong one for a
     kurtosis that is not running at all. Without the warning the second case is indis-
-    tinguishable from an empty enclave.
+    tinguishable from an empty enclave. quiet=True is for a probe whose failure is an
+    expected answer rather than a problem.
     """
     p = subprocess.run(args, capture_output=True, text=True)
-    if p.returncode != 0:
+    if p.returncode != 0 and not quiet:
         print("warning: %s exited %d: %s" % (args[0], p.returncode,
                                              (p.stderr or "").strip()[:160]), file=sys.stderr)
     return p.stdout.strip()
@@ -68,7 +69,16 @@ def url(enclave, service, port):
     answer is what lets callers skip a service that is not running, instead of building the
     string "http://" and failing later with a confusing URL error.
     """
-    u = sh("kurtosis", "port", "print", enclave, service, port)
+    # Probing quietly: a client that registers no "rpc" is the case handled just below, not
+    # a fault worth a warning line per node per call.
+    u = sh("kurtosis", "port", "print", enclave, service, port, quiet=(port == "rpc"))
+    if not u and port == "rpc":
+        # The erigon launcher serves plain HTTP JSON-RPC on the port it registers as
+        # "ws-rpc" and registers no "rpc" at all. Without this, `status` reports agreement
+        # over a set that silently excludes the client under test; `verify` fails loudly
+        # instead, since it keeps the node with a None url and then never gets a height for
+        # it. Silent agreement is the one worth naming.
+        u = sh("kurtosis", "port", "print", enclave, service, "ws-rpc")
     if not u:
         return None
     return u if u.startswith("http") else "http://" + u

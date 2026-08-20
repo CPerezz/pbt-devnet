@@ -1,13 +1,13 @@
 # pbt-devnet
 
-A differential devnet for the **EIP-8297 partitioned binary tree (PBT)**: two geth and two besu
-nodes under test on the same Amsterdam-at-genesis chain, driven by real lighthouse consensus clients, with
-every execution client required to agree on every state root — and reorged on purpose to check
-they still agree afterwards.
+A differential devnet for the **EIP-8297 partitioned binary tree (PBT)**: two geth, two besu and
+two erigon nodes under test on the same Amsterdam-at-genesis chain, driven by real lighthouse
+consensus clients, with every execution client required to agree on every state root — and reorged
+on purpose to check they still agree afterwards.
 
 The point is cross-implementation. Two instances of one binary agree by construction and prove
-nothing; geth agreeing with besu is evidence the specification is unambiguous enough to implement
-twice. So the pairs are deliberately configured differently:
+nothing; three implementations agreeing is evidence the specification is unambiguous enough to
+implement three times. So the pairs are deliberately configured differently:
 
 | node | client | what makes it different |
 |---|---|---|
@@ -16,12 +16,21 @@ twice. So the pairs are deliberately configured differently:
 | 3 | geth | archive, `--syncmode=full` |
 | 4 | besu | `--data-storage-format=BINARY` |
 | 5 | besu | also `--bonsai-limit-trie-logs-enabled=false` — keeps every trie log |
+| 6 | erigon | `COMMITMENT_BIN` / `COMMITMENT_BIN_HASH=blake3` |
+| 7 | erigon | also `--prune.include-commitment-history` — keeps the commitment history |
+
+Erigon takes the tree through **environment variables, not `el_extra_params`**. Its launcher runs
+`erigon init <genesis.json> && erigon ...` in one shell and `el_extra_params` extends only the
+second half, so a flag would miss `init` and commit a merkle-patricia genesis under a node that
+believes it is on the tree. `--prune.include-commitment-history` on node 7 is a flag rather than an
+env var because it is read at node start and not by `init`; it is a whole-datadir property from
+then on, and the node refuses to restart without it once the datadir carries it.
 
 Node 1 exists because ethereum-package launches the **first** participant with no `--boot-nodes`
 of its own and hands its ENR to everyone else. Partitioning that node strands it permanently — it
 returns with no peers and nothing to rediscover through, then sits at zero peers while every later
 scenario measures a starved node instead of a reorg. Giving the role to a node that is never
-disrupted (`pbt_chaos.protect_nodes`) keeps all four clients under test eligible.
+disrupted (`pbt_chaos.protect_nodes`) keeps all six clients under test eligible.
 
 It composes [`ethpandaops/ethereum-package`](https://github.com/ethpandaops/ethereum-package)
 rather than launching clients itself, with **no patches to that package** — the binary tree is
@@ -29,8 +38,11 @@ reached entirely through supported configuration.
 
 ## What you need
 
-Docker, [Kurtosis](https://docs.kurtosis.com/install), Python 3, and a JDK 25 for the besu build
-(`brew install openjdk@25`; it is keg-only and will not become your default java).
+Docker, [Kurtosis](https://docs.kurtosis.com/install) **1.20 or newer**, Python 3, and a JDK 25 for
+the besu build (`brew install openjdk@25`; it is keg-only and will not become your default java).
+Kurtosis 1.15.1 fails to interpret `ethereum-package` with `undefined: GpuConfig`; 1.20.0
+works. The first good version in between was not bisected. Erigon needs
+nothing beyond docker — `make build` clones and builds it like geth.
 
 ## Run
 
@@ -82,7 +94,7 @@ make forks      # competing heads, how deep each branch is, and who is on which
 whichever node proposes next, for the two slots around its duty. The node still builds its block —
 only publication is cut — so its own execution client takes that block as head while everyone else
 builds on the parent; when the isolation lifts, the loser unwinds. The doomed node **rotates**, so
-reorgs land on geth and besu alike; `make chaos-status` reports the tally per client. Its own
+reorgs land on geth, besu and erigon alike; `make chaos-status` reports the tally per client. Its own
 jobs run through one queue, so two of them never overlap.
 
 On top of that, scenarios strand **specific state** on a branch that is then abandoned. Each
@@ -101,5 +113,5 @@ minority's RPC only, holds for `DEPTH` blocks, heals, and verifies.
 `code-sole` and `code-shared` are the pair from
 [go-ethereum#30](https://github.com/CPerezz/go-ethereum/pull/30) — chunks go when the dead branch
 was their only writer, and stay when a surviving account still holds them — lifted from unit test
-to four live clients.
+to six live clients.
 

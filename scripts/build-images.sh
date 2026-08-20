@@ -20,6 +20,7 @@ PLATFORM="${PBT_PLATFORM:-linux/arm64}"
 
 # Where the forks live. Defaults assume they sit beside this repo.
 GETH_SRC="${PBT_GETH_SRC:-$ROOT/../go-ethereum}"
+ERIGON_SRC="${PBT_ERIGON_SRC:-$ROOT/../erigon-pbt}"
 EGG_SRC="${PBT_EGG_SRC:-$ROOT/../egg-pbt}"
 
 echo "==> platform:  $PLATFORM"
@@ -41,7 +42,7 @@ provenance() {
 # without it does not fail -- it ignores "binaryTrieTime" and starts on the merkle-patricia
 # trie with no error anywhere, which is the silent mismatch this devnet exists to catch.
 #
-# The needle is the MECHANISM, not the word: both files mention binaryTrieTime in comments
+# The needle is the MECHANISM, not the word: all three files mention binaryTrieTime in comments
 # and log strings, so grepping the bare name passes on a tree where only the prose survived.
 require_capability() {
   local name=$1 dir=$2 needle=$3 file=$4 fix=$5
@@ -77,6 +78,15 @@ require_capability "geth (EIP-8297)" "$GETH_SRC" 'json:"binaryTrieTime' "params/
   "fix: git -C $GETH_SRC checkout pbt"
 build_from "geth (EIP-8297)" "pbt-geth:local" "$GETH_SRC" \
   "clone CPerezz/go-ethereum at branch pbt, or set PBT_GETH_SRC"
+
+# The needle is the chain-config key, not the trie: a tree that parses "binaryTrieTime"
+# necessarily has the commitment engine, and one that does not would run the tree on the
+# wrong EIP-8038 access-list gas -- agreeing with geth on the genesis root and diverging on
+# the first access-list transaction, which is far harder to read than a build failure.
+require_capability "erigon (EIP-8297)" "$ERIGON_SRC" 'json:"binaryTrieTime' \
+  "execution/chain/chain_config.go" "fix: git -C $ERIGON_SRC checkout binary-trie"
+build_from "erigon (EIP-8297)" "erigon-pbt:local" "$ERIGON_SRC" \
+  "clone erigontech/erigon at branch binary-trie, or set PBT_ERIGON_SRC"
 
 require_capability "genesis generator" "$EGG_SRC" '"binaryTrieTime":' "apps/el-gen/generate_genesis.sh" \
   "fix: git -C $EGG_SRC checkout pbt"

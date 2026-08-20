@@ -1,5 +1,5 @@
 name: github.com/CPerezz/pbt-devnet
 description: |
-  A mixed geth/besu devnet on the EIP-8297 partitioned binary tree, Amsterdam at genesis, with a
+  A mixed geth/besu/erigon devnet on the EIP-8297 partitioned binary tree, Amsterdam at genesis, with a
   differential state-root monitor, a tree-shaped transaction generator, and forced reorgs that
   check the abandoned branch's state is gone from every client.
