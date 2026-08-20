@@ -37,22 +37,12 @@ provenance() {
   echo "$at"
 }
 
-# require_capability refuses to build a source tree that cannot express the fork.
+# require_capability refuses a source tree that cannot express the fork. A client built
+# without it does not fail -- it ignores "binaryTrieTime" and starts on the merkle-patricia
+# trie with no error anywhere, which is the silent mismatch this devnet exists to catch.
 #
-# A checkout can be perfectly valid git and still be the wrong one: several PBT branches are
-# in flight and only some carry the timestamp-fork plumbing. A geth built without
-# BinaryTrieTime does not fail -- it ignores "binaryTrieTime" in genesis and starts on the
-# merkle-patricia trie, with the wrong state root and no error anywhere. That is the exact
-# silent mismatch this devnet exists to catch, so it must not be possible to build it.
-#
-# The test is whether the source can parse the key we ship, not whether its commit matches a
-# recorded one: a hash comparison only tells you the checkout moved, which is not the same
-# question and has a wrong answer available.
-#
-# The needle has to be the MECHANISM, not the word. Both files mention binaryTrieTime in
-# comments and log strings, so grepping the bare name passes on a tree where the plumbing was
-# reverted and only the prose survived -- which would ship a client that ignores the genesis
-# key and runs on the merkle-patricia trie, exactly what this guard exists to prevent.
+# The needle is the MECHANISM, not the word: both files mention binaryTrieTime in comments
+# and log strings, so grepping the bare name passes on a tree where only the prose survived.
 require_capability() {
   local name=$1 dir=$2 needle=$3 file=$4 fix=$5
   [[ -d "$dir" ]] || return 0          # build_from reports a missing checkout

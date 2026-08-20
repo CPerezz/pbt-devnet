@@ -3,25 +3,13 @@
 # key it does not recognise, so consult its README rather than inventing fields here.
 
 participants:
-  # Four nodes, two of each client, and within each pair two deliberately different
-  # configs. Instances of one binary with one config agree by construction and prove
-  # nothing; these are pushed down different paths through the same tree and required to
-  # produce identical roots.
+  # Pairs of each client, configured differently within a pair: one binary agreeing with
+  # itself proves nothing. Enough nodes that isolating one still leaves the majority above
+  # 2/3, which is what finality needs.
   #
-  # Four rather than three is what lets the network finalize through a partition: isolating
-  # one of three leaves the majority holding exactly 2/3, and finality needs MORE than 2/3.
-  # One of four leaves 3/4.
-  # PARTICIPANT 1 IS THE BOOTNODE, and exists only to be one.
-  #
-  # ethereum-package launches the first participant with no --boot-nodes of its own and hands
-  # its ENR to every other consensus client. Partitioning that node therefore strands it for
-  # good: it comes back with no peers and nothing to rediscover through, so it sits at zero
-  # peers and every later scenario measures a starved node instead of a reorg.
-  #
-  # Keeping it out of the rotation (pbt_chaos.protect_nodes, [1] by default) costs nothing
-  # here because it is a fifth node -- the four clients under test below all stay eligible.
-  # It validates like the others, so proposer-to-participant attribution stays a plain
-  # division by num_validator_keys_per_node.
+  # PARTICIPANT 1 IS THE BOOTNODE. ethereum-package gives the first participant no
+  # --boot-nodes of its own, so partitioning it strands it with nothing to rediscover
+  # through. pbt_chaos.protect_nodes keeps it out of the rotation.
   - el_type: geth
     el_image: pbt-geth:local
     cl_type: lighthouse
@@ -80,19 +68,10 @@ network_params:
   # the network is named "kurtosis"; any custom name silently yields --syncmode=snap /
   # --sync-mode=SNAP, which the binary tree refuses, and the engine API then goes quiet.
   network: "kurtosis"
-  # mainnet, NOT minimal. This is load-bearing and the failure it prevents is ugly.
-  #
-  # Under preset: minimal the consensus clients peer normally, run for about three and a
-  # half minutes, then lose every peer within the same second and never reconnect. Each
-  # one then computes its own proposer schedule and drives its own execution client down
-  # its own chain, so the devnet silently becomes N separate chains that each look healthy.
-  # It is deterministic rather than a race: the same config diverges at the same height
-  # every time, and runs with peers stable under mainnet.
-  #
-  # The mechanism inside lighthouse is not identified; the ethpandaops glamsterdam-devnet-8
-  # images are built for mainnet-preset devnets and that is what the working reference
-  # setups use. `make diagnose` shows the signature: a first-divergence block sitting
-  # exactly where the peer count fell to zero.
+  # mainnet, NOT minimal. Under minimal the consensus clients lose every peer a few minutes
+  # in and never reconnect, so the devnet splits into separate chains that each look
+  # healthy. Deterministic, and `make diagnose` shows it as a divergence exactly where the
+  # peer count hit zero.
   preset: mainnet
   seconds_per_slot: 6
   genesis_delay: 20
@@ -187,16 +166,11 @@ assertoor_params:
   tests:
     - https://raw.githubusercontent.com/ethpandaops/assertoor/master/playbooks/dev/synchronized-check.yaml
 
-  # Deliberately NOT enabled:
-  #   run_opcodes_transaction_test  — ends with a fork check whose maxForkDistance defaults to
-  #     1, and chains each call through the previous deploy's address, so a reorg that unwinds
-  #     the deploy leaves the rest calling an empty account. It fails for our reasons, not the
-  #     client's. Worth running by hand in a quiet window: it is the best EVM-semantics check
-  #     available for a custom fork.
-  #   run_blob_transaction_test     — blob sidecars have a short availability window and are
-  #     gossiped separately, so an orphaned blob block can never satisfy minBlobCount.
-  #   run_lifecycle_test            — wants ~500 validators, a mainnet deposit contract, and
-  #     48-72h; its success criteria are finality transitions our reorger destroys.
+  # Deliberately NOT enabled, all for the same reason -- reorgs break their assumptions:
+  #   run_opcodes_transaction_test  chains calls through a previous deploy, and asserts a
+  #                                 fork distance of 1. Worth running by hand when quiet.
+  #   run_blob_transaction_test     an orphaned blob block cannot satisfy minBlobCount.
+  #   run_lifecycle_test            wants ~500 validators and 48-72h of finality.
 
 # Chaos sidecar. pbtchaos drives disruptoor continuously, so the default devnet is NOT
 # quiet: expect a reorg every 15-30 blocks. `make scenario` queues one of the six state
@@ -209,16 +183,9 @@ disruptoor_params:
 # The defaults live in main.star (DEFAULT_HAMMER, DEFAULT_CHAOS, DEFAULT_MONITOR) and this
 # devnet runs entirely on them, so nothing is set here. Add a block only to override a key.
 #
-#   pbt_hammer   Transaction load shaped at what the tree changed rather than at throughput.
-#                `only: zeroize` restricts it to a single workload. Raising interval, batch
-#                or code_size raises block fullness -- keep blocks under HALF the gas limit,
-#                or the base fee rises 12.5% per block and compounds with nothing to stop it
-#                until no transaction can be paid for within a node's 1 ether cap.
-#
-#   pbt_chaos    Reorgs, and they are ON by default: one every 15-30 blocks, plus the six
-#                state scenarios on demand through `make scenario`. Set `enabled: false` for
-#                the quiet baseline `make proposals` needs to measure a proposer's misses.
-#
-#   pbt_monitor  The state-root divergence watch. `verify_oracle` corrupts a root at startup
-#                and requires every other client to reject it, so that a later "0 findings"
-#                cannot be coming from a broken oracle.
+#   pbt_hammer   Transaction load. Raising interval, batch or code_size raises block
+#                fullness -- keep blocks under HALF the gas limit or the base fee compounds
+#                until nothing can be paid for.
+#   pbt_chaos    Reorgs, ON by default. `enabled: false` for the quiet baseline that
+#                `make proposals` needs.
+#   pbt_monitor  The state-root divergence watch, with a self-proving oracle.

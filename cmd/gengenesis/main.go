@@ -1,13 +1,9 @@
 // Command gengenesis emits the genesis.json for a PBT (EIP-8297) devnet.
 //
-// The genesis is generated rather than hand-written because it has to carry the
-// four system contracts' bytecode verbatim, and because the tree packs balances
-// into a 16-byte BASIC_DATA field — both are things a transcription gets wrong
-// silently. Everything here is read from the go-ethereum checkout this module
-// points at, so the output can never drift from the client it configures.
-//
-// Shape follows eth/catalyst/pbt_test.go's pbtGenesis, which is the only known
-// genesis this branch has actually produced and imported blocks on.
+// Generated rather than hand-written: it carries the system contracts' bytecode verbatim and
+// the tree packs balances into a 16-byte BASIC_DATA field, both of which a transcription gets
+// wrong silently. Everything is read from the go-ethereum this module pins, so the output
+// cannot drift from the client it configures. Shape follows eth/catalyst/pbt_test.go.
 package main
 
 import (
@@ -134,16 +130,11 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (chainid %d, binaryTrieTime=0, amsterdamTime=0)\n", *out, *chainID)
 
-	// Print the genesis root as the tree commits it. This is for the standalone
-	// single-client path: run one client against THIS file and its root must match, which
-	// is the client-agnostic check that a node is really on the binary tree rather than
-	// having silently fallen back to the merkle-patricia trie.
+	// For the standalone single-client path: run one client against THIS file and its root
+	// must match, which proves it is on the binary tree.
 	//
-	// It is NOT the devnet's genesis root, and must not be pasted into
-	// pbt_monitor.expected_genesis_root. The devnet's genesis comes from pbt-egg, whose
-	// alloc carries the prefunded accounts ethereum-package hands to spamoor, assertoor and
-	// the hammer; this tool allocs its own smaller set. A state root commits to the alloc,
-	// so the two cannot agree.
+	// NOT the devnet's genesis root -- that comes from pbt-egg with a different alloc, and a
+	// state root commits to the alloc, so it must not go in pbt_monitor.expected_genesis_root.
 	block := genesis.ToBlock()
 	fmt.Fprintf(os.Stderr, "genesis block hash:  %s\n", block.Hash())
 	fmt.Fprintf(os.Stderr, "genesis state root:  %s\n", block.Root())

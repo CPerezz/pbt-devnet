@@ -1,24 +1,13 @@
 #!/usr/bin/env bash
 # Build a PBT-capable besu image (besu-pbt:local).
 #
-# Besu is the one client that cannot go through scripts/build-images.sh, because it is a
-# two-stage Gradle build rather than a plain `docker build`:
+# Besu cannot go through build-images.sh: it is a two-stage Gradle build, not a docker one.
+# besu-stateless must reach mavenLocal before besu compiles against it, then `installDist`
+# produces build/install/besu. besu's own Dockerfile copies a directory literally named
+# `besu`, so the distribution is staged under that name.
 #
-#   1. besu-eth/besu-stateless@feat/partitioned-binary-trie is the partitioned-binary-trie
-#      library. It has to be published to the local Maven repository first — besu declares
-#      `implementation('org.hyperledger.besu:besu-stateless')` and resolves it from
-#      mavenLocal, so skipping this step yields a besu built against nothing or against a
-#      stale copy.
-#   2. CPerezz/besu@fix/pbt-fcu-null-trie-node then builds with `installDist`, producing a
-#      distribution in build/install/besu.
-#
-# Only then can the image be built: besu's docker/Dockerfile does
-# `COPY --chown=besu:besu besu /opt/besu/`, i.e. it wants a directory literally named
-# `besu` in the build context, so the distribution is staged under that name.
-#
-# Both repos require JDK 25 (gradle/gradle-daemon-jvm.properties: toolchainVersion=25).
-# The JDK is passed to Gradle explicitly rather than via JAVA_HOME on PATH, so a keg-only
-# install can serve this build without becoming the machine's default java.
+# Both repos need JDK 25, passed to Gradle explicitly so a keg-only install works without
+# becoming the machine's default java.
 #
 # Usage:
 #   scripts/build-besu.sh                  # both Gradle stages, then the image

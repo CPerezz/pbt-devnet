@@ -1,23 +1,13 @@
 // Command pbtchaos makes reorgs happen on purpose.
 //
-// Two things drive it. A periodic isolation fork cuts the p2p of whichever node is about
-// to propose, for the two slots around its duty: it still builds a block, but nobody
-// receives it, so its own execution client takes that block as head while the rest build
-// on the parent. When the isolation lifts the loser unwinds -- a reorg every 15-30 blocks
-// with no operator involvement. On top of that,
-// scenarios put SPECIFIC state on the branch that is about to die -- deployed code,
-// 7702 delegations, fresh accounts, storage written and storage deleted -- and then
-// check every client agrees about that state once the branch is gone.
+// A periodic isolation fork cuts the p2p of whichever node proposes next, for the two slots
+// around its duty: it builds a block nobody receives, takes it as head, and unwinds when the
+// isolation lifts. Scenarios go further and put SPECIFIC state on the doomed branch, then
+// check every client agrees it is gone -- which is what needs two implementations, since a
+// client that keeps that state disagrees with one that does not.
 //
-// That second part is the point of having two implementations. go-ethereum#30 covers
-// the code-zone cases as unit tests; here the same shapes run against geth and besu at
-// once, where a client that keeps the doomed branch's state disagrees with one that
-// does not.
-//
-// Everything pbtchaos does goes through one queue, so "no reorg while another of its jobs
-// is in flight" is enforced rather than hoped for -- two overlapping disruptions produce a
-// mess that proves nothing. `make split` and `make heal` write to disruptoor directly and
-// are outside that queue, so they are not covered by it.
+// Every job goes through one queue, so two disruptions never overlap. `make split` and
+// `make heal` write to disruptoor directly and are outside it.
 package main
 
 import (

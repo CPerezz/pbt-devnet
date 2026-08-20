@@ -50,15 +50,12 @@ func newSender(ctx context.Context, hexKey string, e *el) (*sender, error) {
 // fees picks the highest fee cap the RPC will accept, rather than a multiple of the
 // current base fee.
 //
-// A multiple does not work here, and fails in a way that looks like the scenario doing
-// nothing: the fee is derived from the chain BEFORE the partition, but the partition is
-// what moves the price. Cut off with its share of the validators and the full transaction
-// load still pointed at it, the minority's blocks run full and its base fee climbs away
-// from the pre-partition value within a few blocks -- long past 2x anything.
+// A multiple of the current base fee is derived from the chain BEFORE the partition, and
+// the partition is what moves the price: the minority keeps the full load on fewer
+// validators, so its base fee climbs past any fixed multiple within a few blocks.
 //
-// Signing high costs nothing: under EIP-1559 the sender pays base fee plus tip, and the
-// cap is only a ceiling. The one real limit is the node's own RPC guard, which rejects a
-// transaction whose maximum cost exceeds 1 ether, so stay just under that.
+// Signing high costs nothing -- the sender pays base fee plus tip and the cap is a ceiling
+// -- but the node's RPC rejects a maximum cost above 1 ether, so stay under that.
 func (s *sender) fees(ctx context.Context, e *el, gas uint64) (tip, feeCap *big.Int, err error) {
 	cctx, ccancel := elCtx(ctx)
 	h, err := e.c.HeaderByNumber(cctx, nil)

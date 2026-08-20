@@ -29,15 +29,12 @@ type scenario struct {
 	// apply runs DURING the split, through the minority only. Everything it writes is
 	// doomed.
 	apply func(context.Context, *run) error
-	// effect answers one question -- is the doomed change visible on this client at this
-	// height? -- and the runner asks it three times: it must be TRUE on the minority
-	// before the heal, FALSE on the majority at that same moment, and FALSE on every
-	// client at the anchor afterwards.
+	// effect reports how much of the doomed change is visible on this client at this height.
+	// The runner asks three times: ALL of it on the minority before the heal, NONE on the
+	// majority then, NONE anywhere at the anchor after.
 	//
-	// One predicate rather than an "assert absent" is what makes the scenarios honest.
-	// Absence is trivially true when nothing was written, and it cannot express
-	// storage-del, where the doomed change IS an
-	// absence and the surviving branch is the one holding values.
+	// A predicate rather than "assert absent" because absence is trivially true when nothing
+	// was written, and cannot express storage-del, where the doomed change IS an absence.
 	//
 	// A nil height means latest.
 	effect func(context.Context, *run, *el, *big.Int) (visible, total int, err error)

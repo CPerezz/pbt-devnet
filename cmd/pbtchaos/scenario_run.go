@@ -142,15 +142,12 @@ type laggards struct {
 
 // awaitHeight waits for every client to have block n, and reports who did not make it.
 //
-// Who, and whether they were still moving, is the whole difference between "this client is
-// slow" and "this client is wedged". A wedged client is the most severe thing this harness can
-// observe and it surfaces HERE rather than in waitAgreement: a node that stops on the canonical
-// chain still agrees with everyone at the common height, so convergence looks fine and only the
-// anchor it never reaches gives it away.
+// Whether they were still moving separates "slow" from "wedged". A wedge surfaces HERE and not
+// in waitAgreement: a node that stops on the canonical chain still agrees at the common height,
+// so only the anchor it never reaches gives it away.
 //
-// The poll interval matches waitAgreement's on purpose. wedgeTicks counts observations, not
-// seconds, so polling faster here would shrink the stall window to a couple of blocks and call
-// ordinary propagation lag a wedge.
+// The poll interval matches waitAgreement's because wedgeTicks counts observations, not
+// seconds; polling faster would call ordinary propagation lag a wedge.
 func awaitHeight(ctx context.Context, els []*el, n uint64, timeout time.Duration) (bool, laggards) {
 	deadline := time.Now().Add(timeout)
 	heads := newHeadTracker()
