@@ -123,6 +123,26 @@ def slot_has_block(base, slot, retries=1):
     return None
 
 
+def fork_choice_slots(base):
+    """Slots holding a block in the fork-choice dump, and the range that dump covers.
+
+    This is the only way to tell a slot whose block was reorged away from one that never had a
+    block at all: both answer 404 on /eth/v1/beacon/headers/{slot}, and the ?slot= query form
+    404s as well. The dump keeps non-canonical blocks, so a slot present here but absent from
+    the canonical chain was proposed and then orphaned.
+
+    It only reaches back to around the finalized checkpoint -- measured on this devnet, slots
+    288..405 with finality at 320 -- so anything older cannot be classified either way.
+    """
+    d = get(base, "/eth/v1/debug/fork_choice")
+    if not d:
+        return set(), None, None
+    slots = {int(n["slot"]) for n in (d.get("fork_choice_nodes") or []) if "slot" in n}
+    if not slots:
+        return set(), None, None
+    return slots, min(slots), max(slots)
+
+
 def short(h):
     return h[:12] if h else "?"
 
@@ -382,7 +402,9 @@ def cmd_proposals(a):
     first = a.from_epoch if a.from_epoch is not None else max(0, head_epoch - a.epochs)
     names = {i + 1: n for i, n in enumerate(services(a.enclave, "el-"))}
 
-    stats = {n: {"due": 0, "missed": 0, "unverifiable": 0, "slots": []} for n in names}
+    fc_slots, fc_lo, fc_hi = fork_choice_slots(base)
+    stats = {n: {"due": 0, "missed": 0, "orphaned": 0, "unknown": 0, "unverifiable": 0,
+                 "slots": []} for n in names}
     unmapped = 0
     got, asked = [], list(range(first, head_epoch + 1))
     for epoch in asked:
@@ -406,24 +428,51 @@ def cmd_proposals(a):
                 stats[node]["unverifiable"] += 1
                 continue
             stats[node]["due"] += 1
-            if not present:
-                stats[node]["missed"] += 1
-                stats[node]["slots"].append(slot)
+            if present:
+                continue
+            # No canonical block. Either it was never proposed, or it was proposed and chaos
+            # reorged it away -- and a proposer whose block was orphaned did its job.
+            if fc_lo is not None and fc_lo <= slot <= fc_hi:
+                if slot in fc_slots:
+                    stats[node]["orphaned"] += 1
+                else:
+                    stats[node]["missed"] += 1
+                    stats[node]["slots"].append(slot)
+            else:
+                stats[node]["unknown"] += 1
 
     if not got:
         sys.exit(f"{via} served no proposer duties for epochs {first}..{head_epoch}")
     print(f"epochs {got[0]}..{got[-1]} ({len(got)} of the {len(asked)} asked for; the beacon API "
           f"only keeps recent duties), slots up to {head}, as seen by {via}\n")
-    print(f"{'proposer':30} {'due':>5} {'missed':>7} {'miss %':>8} {'unchecked':>10}   missed slots")
+    print(f"{'proposer':30} {'due':>5} {'missed':>7} {'orphan':>7} {'miss %':>8} "
+          f"{'unknown':>8} {'unchecked':>10}   missed slots")
     worst = 0.0
     for node, name in names.items():
-        s = stats[node]
-        pct = 100 * s["missed"] / s["due"] if s["due"] else 0.0
+        st = stats[node]
+        # Rate over the slots we could actually classify: an unknown outcome is not evidence
+        # either way, and folding it into the denominator would quietly flatter the proposer.
+        classified = st["due"] - st["unknown"]
+        pct = 100 * st["missed"] / classified if classified else 0.0
         worst = max(worst, pct)
-        shown = ", ".join(str(x) for x in s["slots"][:8]) + ("…" if len(s["slots"]) > 8 else "")
-        print(f"{name:30} {s['due']:5} {s['missed']:7} {pct:7.1f}% {s['unverifiable']:10}   {shown}")
+        rate = f"{pct:7.1f}%" if classified else "      -"
+        shown = ", ".join(str(x) for x in st["slots"][:8]) + ("…" if len(st["slots"]) > 8 else "")
+        print(f"{name:30} {st['due']:5} {st['missed']:7} {st['orphaned']:7} {rate} "
+              f"{st['unknown']:8} {st['unverifiable']:10}   {shown}")
 
-    unchecked = sum(s["unverifiable"] for s in stats.values())
+    orphaned = sum(st["orphaned"] for st in stats.values())
+    if orphaned:
+        print(f"\n{orphaned} slot(s) held a block that was later reorged out. Those proposers "
+              f"built; chaos removed it, so they are not misses.")
+
+    unknown = sum(st["unknown"] for st in stats.values())
+    if unknown:
+        lo = fc_lo if fc_lo is not None else "?"
+        print(f"\n{unknown} slot(s) are older than the fork-choice window (which starts at slot "
+              f"{lo}), so whether their blocks were orphaned or never built cannot be told from "
+              f"the beacon API. Ask for fewer --epochs to stay inside the window.")
+
+    unchecked = sum(st["unverifiable"] for st in stats.values())
     if unchecked:
         print(f"\n{unchecked} slot(s) could not be checked — the beacon node did not answer for "
               f"them. They count as neither due nor missed.")
