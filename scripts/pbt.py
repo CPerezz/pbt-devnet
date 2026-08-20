@@ -101,6 +101,28 @@ def get(base, path="", timeout=10, quiet=True):
         raise
 
 
+def slot_has_block(base, slot, retries=1):
+    """Whether a slot has a block: True, False (genuinely absent), or None (could not tell).
+
+    A 404 is the beacon node answering "no block at that slot", which is a real miss. A
+    timeout, a 5xx or a dropped connection is the node failing to answer, which says nothing
+    about the proposer. Collapsing the second into the first is how a beacon node that is
+    merely slow -- which is what it is, under a chaos run -- manufactures the false miss rate
+    this subcommand exists to disprove.
+    """
+    for _ in range(retries + 1):
+        try:
+            with urllib.request.urlopen(f"{base}/eth/v1/beacon/headers/{slot}", timeout=10) as r:
+                json.load(r)
+                return True
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return False
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            pass
+    return None
+
+
 def short(h):
     return h[:12] if h else "?"
 
@@ -356,7 +378,7 @@ def cmd_proposals(a):
     first = a.from_epoch if a.from_epoch is not None else max(0, head_epoch - a.epochs)
     names = {i + 1: n for i, n in enumerate(services(a.enclave, "el-"))}
 
-    stats = {n: {"due": 0, "missed": 0, "slots": []} for n in names}
+    stats = {n: {"due": 0, "missed": 0, "unverifiable": 0, "slots": []} for n in names}
     unmapped = 0
     got, asked = [], list(range(first, head_epoch + 1))
     for epoch in asked:
@@ -373,8 +395,14 @@ def cmd_proposals(a):
             if node not in stats:
                 unmapped += 1
                 continue
+            present = slot_has_block(base, slot)
+            if present is None:
+                # Neither due nor missed: a slot we could not check tells us nothing about
+                # the proposer, and counting it either way would be a made-up number.
+                stats[node]["unverifiable"] += 1
+                continue
             stats[node]["due"] += 1
-            if get(base, f"/eth/v1/beacon/headers/{slot}") is None:
+            if not present:
                 stats[node]["missed"] += 1
                 stats[node]["slots"].append(slot)
 
@@ -382,14 +410,19 @@ def cmd_proposals(a):
         sys.exit(f"{via} served no proposer duties for epochs {first}..{head_epoch}")
     print(f"epochs {got[0]}..{got[-1]} ({len(got)} of the {len(asked)} asked for; the beacon API "
           f"only keeps recent duties), slots up to {head}, as seen by {via}\n")
-    print(f"{'proposer':30} {'due':>5} {'missed':>7} {'miss %':>8}   missed slots")
+    print(f"{'proposer':30} {'due':>5} {'missed':>7} {'miss %':>8} {'unchecked':>10}   missed slots")
     worst = 0.0
     for node, name in names.items():
         s = stats[node]
         pct = 100 * s["missed"] / s["due"] if s["due"] else 0.0
         worst = max(worst, pct)
         shown = ", ".join(str(x) for x in s["slots"][:8]) + ("…" if len(s["slots"]) > 8 else "")
-        print(f"{name:30} {s['due']:5} {s['missed']:7} {pct:7.1f}%   {shown}")
+        print(f"{name:30} {s['due']:5} {s['missed']:7} {pct:7.1f}% {s['unverifiable']:10}   {shown}")
+
+    unchecked = sum(s["unverifiable"] for s in stats.values())
+    if unchecked:
+        print(f"\n{unchecked} slot(s) could not be checked — the beacon node did not answer for "
+              f"them. They count as neither due nor missed.")
 
     if unmapped:
         print(f"\n{unmapped} duties fell outside the known nodes — is --validators-per-node right?")
