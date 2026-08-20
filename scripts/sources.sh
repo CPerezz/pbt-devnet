@@ -15,7 +15,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 ensure() {
   local name=$1 url=$2 branch=$3 dir=$4 var=$5
-  if [[ ! -d "$dir/.git" ]]; then
+  # A test on .git rejects every linked worktree, where .git is a FILE pointing at the real
+  # git dir. --show-toplevel accepts those -- but only its ANSWER is usable: the exit status
+  # alone says "somewhere inside a work tree", which is true of a plain directory nested in
+  # an unrelated repo, and a bare repo prints "false" and still exits 0. So compare the
+  # toplevel against $dir itself, both resolved, and accept only a checkout rooted here.
+  local top phys
+  top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$top" ]] && top="$(cd "$top" && pwd -P)"
+  phys="$(cd "$dir" 2>/dev/null && pwd -P || true)"
+  if [[ -z "$top" || "$top" != "$phys" ]]; then
     if [[ -e "$dir" ]]; then
       echo "!! $name: $dir exists but is not a git checkout" >&2
       echo "   move it aside, or point $var somewhere else" >&2
@@ -39,6 +48,8 @@ ensure() {
 
 ensure "geth"           https://github.com/CPerezz/go-ethereum \
        pbt                          "${PBT_GETH_SRC:-$ROOT/../go-ethereum}"       PBT_GETH_SRC
+ensure "erigon"         https://github.com/erigontech/erigon \
+       binary-trie                  "${PBT_ERIGON_SRC:-$ROOT/../erigon-pbt}"      PBT_ERIGON_SRC
 ensure "genesis-gen"    https://github.com/CPerezz/ethereum-genesis-generator \
        pbt                          "${PBT_EGG_SRC:-$ROOT/../egg-pbt}"            PBT_EGG_SRC
 ensure "besu"           https://github.com/CPerezz/besu \
