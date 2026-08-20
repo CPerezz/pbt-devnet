@@ -178,9 +178,10 @@ type Monitor struct {
 	// expected counts divergences seen while disruptoor had a partition or shaping
 	// applied. They are real divergences and are logged, but they are ours, so they are
 	// counted apart from findings rather than mixed in with them.
-	expected     int
-	lastFinding  string
-	lastExpected string
+	expected       int
+	lastFinding    string
+	lastExpected   string
+	lastExpectedAt time.Time
 	// lastDisruption is when disruptoor was last seen holding state, so a divergence that
 	// outlives the partition that caused it is still recognised as ours.
 	lastDisruption time.Time
@@ -254,6 +255,9 @@ func (m *Monitor) follow(ctx context.Context) error {
 			} else {
 				m.finding("head comparison: %v", err)
 			}
+		} else {
+			// The clients agree again, so no past explanation applies to what comes next.
+			m.lastExpected = ""
 		}
 		if m.cfg.probeEvery > 0 && ticks%m.cfg.probeEvery == 0 {
 			if err := m.assertNoBadBlocks(ctx); err != nil {
@@ -329,10 +333,11 @@ func (m *Monitor) compareHeads(ctx context.Context) error {
 	return nil
 }
 
-// finding records a divergence and keeps going. Halting on the first one ends a soak
-// at the least convenient moment; the count is what the exit status reports.
 // finding reports a divergence -- unless a disruption is applied, in which case the
 // divergence is the disruption doing its job.
+//
+// It records and keeps going: halting on the first one ends a soak at the least convenient
+// moment. The count is logged at exit; the exit status itself is only zero or one.
 //
 // Two rules keep it honest. A suppressed divergence is still logged and still counted, just
 // separately -- nothing is hidden. And repeats of the same message collapse, so one event
@@ -343,9 +348,24 @@ func (m *Monitor) finding(format string, args ...any) {
 	if why := m.disruptedRecently(); why != "" {
 		m.expected++
 		if m.lastExpected != msg {
-			m.lastExpected = msg
+			m.lastExpected, m.lastExpectedAt = msg, time.Now()
 			slog.Warn("divergence while "+why+" — expected, not a finding", "detail", msg)
 		}
+		return
+	}
+
+	// A divergence already attributed to a disruption stays attributed for a while longer,
+	// because unwinding a DEPTH-block branch takes DEPTH slots -- longer than a window sized
+	// for the one-block isolation forks. Without this the same disagreement is suppressed on
+	// one poll and reported on the next purely because a timer expired between them.
+	//
+	// The bound is the point. "Still settling" and "permanently wedged" produce the identical
+	// message every poll -- a node that stops advancing pins the comparison height, so the
+	// block number and both hashes repeat forever. Suppressing that without limit would let
+	// the harness exit clean on a chain that never reconverged, which is the one thing it
+	// exists to catch.
+	if msg == m.lastExpected && time.Since(m.lastExpectedAt) < explainedTail {
+		m.expected++
 		return
 	}
 
@@ -387,6 +407,11 @@ func (m *Monitor) noteDisruption() string {
 	return why
 }
 
+// explainedTail bounds how long a divergence already attributed to a disruption keeps that
+// attribution. It must exceed the deepest deliberate reorg's unwind and still be finite; past
+// it, a disagreement that has not resolved is not settling.
+const explainedTail = 5 * time.Minute
+
 // disruptionTail is how long after a disruption a divergence is still attributed to it.
 // Three slots at six seconds; a reorg that has not resolved by then is worth reporting.
 const disruptionTail = 18 * time.Second
@@ -415,8 +440,10 @@ func (m *Monitor) disrupted() string {
 }
 
 func (m *Monitor) summarise() error {
+	// Degraded oracles belong in the verdict, not only in a warning thousands of lines up:
+	// a run where every deep check fell over reports the same "findings=0" as a healthy one.
 	slog.Info("stopping", "highest_block", m.headNum, "findings", m.findings,
-		"expected_divergences", m.expected)
+		"expected_divergences", m.expected, "degraded_oracles", len(m.degraded))
 	if m.findings > 0 {
 		return fmt.Errorf("%d findings", m.findings)
 	}
