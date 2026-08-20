@@ -17,12 +17,6 @@ twice. So the pairs are deliberately configured differently:
 | 4 | besu | `--data-storage-format=BINARY` |
 | 5 | besu | also `--bonsai-limit-trie-logs-enabled=false` — keeps every trie log |
 
-The besu pair matters most for reorgs: besu unwinds a branch by **reversing trie logs** where geth
-replaces layers, so if the pruning node fails a deep reorg and the retaining one survives it, the
-difference names the cause. Four nodes under test rather than three is also what lets the network
-finalize through a partition — isolating one of three leaves the majority at exactly 2/3, and
-finality needs more than that.
-
 Node 1 exists because ethereum-package launches the **first** participant with no `--boot-nodes`
 of its own and hands its ENR to everyone else. Partitioning that node strands it permanently — it
 returns with no peers and nothing to rediscover through, then sits at zero peers while every later
@@ -38,26 +32,10 @@ reached entirely through supported configuration.
 Docker, [Kurtosis](https://docs.kurtosis.com/install), Python 3, and a JDK 25 for the besu build
 (`brew install openjdk@25`; it is keg-only and will not become your default java).
 
-## Sources it builds from
-
-| image | from | branch |
-|---|---|---|
-| `pbt-geth:local` | [`CPerezz/go-ethereum`](https://github.com/CPerezz/go-ethereum) | `pbt` |
-| `besu-pbt:local` | [`CPerezz/besu`](https://github.com/CPerezz/besu) | `fix/pbt-fcu-null-trie-node` |
-| `pbt-egg:local` | [`CPerezz/ethereum-genesis-generator`](https://github.com/CPerezz/ethereum-genesis-generator) | `pbt` |
-| *(library)* | [`besu-eth/besu-stateless`](https://github.com/besu-eth/besu-stateless) | `feat/partitioned-binary-trie` |
-
-```bash
-git clone -b pbt                          https://github.com/CPerezz/go-ethereum                ../go-ethereum
-git clone -b pbt                          https://github.com/CPerezz/ethereum-genesis-generator ../egg-pbt
-git clone -b fix/pbt-fcu-null-trie-node   https://github.com/CPerezz/besu                       ../besu-pbt
-git clone -b feat/partitioned-binary-trie https://github.com/besu-eth/besu-stateless            ../besu-stateless
-```
-
-Clone them beside this repo, or point `PBT_GETH_SRC` / `PBT_BESU_ROOT` / `PBT_EGG_SRC` /
-`PBT_BESU_STATELESS` at them. The besu branch is `matkt/besu@glamsterdam-devnet-8-pbt` plus
-[matkt/besu#31](https://github.com/matkt/besu/pull/31); without that fix besu never leaves block 0
-(see "What this has found").
+The four forks this builds from are cloned for you beside this repo — `make sources` does it, and
+`make build` and `make besu` run it first. Point `PBT_GETH_SRC` / `PBT_EGG_SRC` /
+`PBT_BESU_ROOT` / `PBT_BESU_STATELESS` at your own checkouts to use those instead. A checkout that
+already exists is never touched, only reported: it may be on a branch you are working on.
 
 ## Run
 
