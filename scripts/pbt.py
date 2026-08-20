@@ -29,7 +29,18 @@ SLOTS_PER_EPOCH = 32
 # ---------------------------------------------------------------- kurtosis plumbing
 
 def sh(*args):
-    return subprocess.run(args, capture_output=True, text=True).stdout.strip()
+    """Run a command and return its stdout.
+
+    A failure is reported but not raised: callers treat an empty answer as "this service is
+    not there", which is the right reading for one missing port and the wrong one for a
+    kurtosis that is not running at all. Without the warning the second case is indis-
+    tinguishable from an empty enclave.
+    """
+    p = subprocess.run(args, capture_output=True, text=True)
+    if p.returncode != 0:
+        print("warning: %s exited %d: %s" % (args[0], p.returncode,
+                                             (p.stderr or "").strip()[:160]), file=sys.stderr)
+    return p.stdout.strip()
 
 
 def services(enclave, prefix):
@@ -224,8 +235,12 @@ def consensus_forks(enclave, cls):
     for svc, hs in heads_by_client.items():
         for slot, root in sorted(hs):
             print("  %-30s head slot %-6d %s" % (svc, slot, short(root)))
+    if len(heads_by_client) < len(cls):
+        print("  -> only %d of %d consensus clients answered; a fork held solely by a silent"
+              % (len(heads_by_client), len(cls)))
+        print("     client is invisible here, and a partitioned node is exactly that client")
     if len(allroots) == 1 and all(len(h) == 1 for h in heads_by_client.values()):
-        print("  -> one head, no fork in flight")
+        print("  -> one head among the clients that answered, no fork in flight")
         return
     print("  -> %d distinct heads: the chain is forked right now" % len(allroots))
 
@@ -292,9 +307,12 @@ def execution_forks(enclave, els):
     for svc, (h, sr) in roots.items():
         print("  %-30s block %-6d %s  root %s" % (svc, n, short(h), short(sr)))
 
+    if len(roots) < len(els):
+        print("  -> %d of %d execution clients answered; the rest are not compared below"
+              % (len(roots), len(els)))
     distinct = {h for h, _ in roots.values()}
     if len(distinct) == 1:
-        print("  -> all execution clients agree at block %d" % n)
+        print("  -> the %d client(s) that answered agree at block %d" % (len(roots), n))
     else:
         print("  -> %d different blocks at height %d: a fork the clients have not resolved" %
               (len(distinct), n))
@@ -387,8 +405,13 @@ def cmd_proposals(a):
             print("proposer. Re-run with chaos disabled for a baseline.")
             return
     if worst > 25:
-        print(f"\nWorst miss rate is {worst:.1f}%. With no disruption applied that is worth")
-        print("investigating: check the proposer's CL for block production errors.")
+        # Disruptoor holding nothing right now does not mean the measured window was quiet:
+        # a partition that ended a minute ago still cost the isolated node its slots. Only a
+        # run with chaos disabled throughout measures a proposer rather than the harness.
+        print(f"\nWorst miss rate is {worst:.1f}%. Check `make chaos-status` first — a partition")
+        print("anywhere in these epochs costs the isolated node its slots even though none is")
+        print("applied now. If the window really was quiet, check the proposer's CL for block")
+        print("production errors.")
 
 
 # ---------------------------------------------------------------- diagnose
@@ -503,9 +526,10 @@ def cmd_repeer(a):
 
 def cmd_chaos_status(a):
     api = api_or_die(a.enclave, "pbtchaos")
-    body = get(api, "/status")
-    if body is None:
-        sys.exit("pbtchaos did not answer /status")
+    try:
+        body = get(api, "/status", quiet=False)
+    except Exception as e:
+        sys.exit(f"pbtchaos did not answer /status: {e}")
     print(json.dumps(body, indent=4))
 
 

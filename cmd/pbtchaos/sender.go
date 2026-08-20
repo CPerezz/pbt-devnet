@@ -49,8 +49,8 @@ func newSender(ctx context.Context, hexKey string, e *el) (*sender, error) {
 // A multiple does not work here, and fails in a way that looks like the scenario doing
 // nothing: the fee is derived from the chain BEFORE the partition, but the partition is
 // what moves the price. Cut off with its share of the validators and the full transaction
-// load still pointed at it, the minority's blocks run full and its base fee climbed from
-// 2 gwei to over 400 in a few blocks -- long past 2x anything.
+// load still pointed at it, the minority's blocks run full and its base fee climbs away
+// from the pre-partition value within a few blocks -- long past 2x anything.
 //
 // Signing high costs nothing: under EIP-1559 the sender pays base fee plus tip, and the
 // cap is only a ceiling. The one real limit is the node's own RPC guard, which rejects a

@@ -48,6 +48,11 @@ provenance() {
 # The test is whether the source can parse the key we ship, not whether its commit matches a
 # recorded one: a hash comparison only tells you the checkout moved, which is not the same
 # question and has a wrong answer available.
+#
+# The needle has to be the MECHANISM, not the word. Both files mention binaryTrieTime in
+# comments and log strings, so grepping the bare name passes on a tree where the plumbing was
+# reverted and only the prose survived -- which would ship a client that ignores the genesis
+# key and runs on the merkle-patricia trie, exactly what this guard exists to prevent.
 require_capability() {
   local name=$1 dir=$2 needle=$3 file=$4 fix=$5
   [[ -d "$dir" ]] || return 0          # build_from reports a missing checkout
@@ -55,7 +60,7 @@ require_capability() {
     return 0
   fi
   echo "!! $name: $dir cannot express the binary tree." >&2
-  echo "   $file does not mention $needle, so the build would produce a client that" >&2
+  echo "   $file has no $needle, so the build would produce a client that" >&2
   echo "   ignores \"binaryTrieTime\" in genesis and runs on the merkle-patricia trie." >&2
   echo "   source is at $(provenance "$dir")" >&2
   echo "   $fix" >&2
@@ -78,12 +83,12 @@ build_from() {
   echo
 }
 
-require_capability "geth (EIP-8297)" "$GETH_SRC" "BinaryTrieTime" "params/config.go" \
+require_capability "geth (EIP-8297)" "$GETH_SRC" 'json:"binaryTrieTime' "params/config.go" \
   "fix: git -C $GETH_SRC checkout pbt"
 build_from "geth (EIP-8297)" "pbt-geth:local" "$GETH_SRC" \
   "clone CPerezz/go-ethereum at branch pbt, or set PBT_GETH_SRC"
 
-require_capability "genesis generator" "$EGG_SRC" "binaryTrieTime" "apps/el-gen/generate_genesis.sh" \
+require_capability "genesis generator" "$EGG_SRC" '"binaryTrieTime":' "apps/el-gen/generate_genesis.sh" \
   "fix: git -C $EGG_SRC checkout pbt"
 build_from "genesis generator" "pbt-egg:local" "$EGG_SRC" \
   "clone CPerezz/ethereum-genesis-generator at branch pbt, or set PBT_EGG_SRC"

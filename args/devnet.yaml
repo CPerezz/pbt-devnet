@@ -9,9 +9,8 @@ participants:
   # produce identical roots.
   #
   # Four rather than three is what lets the network finalize through a partition: isolating
-  # one of three leaves the majority holding exactly 2/3, and finality needs MORE than 2/3,
-  # so every scenario used to run against a majority that could not finalize. One of four
-  # leaves 3/4.
+  # one of three leaves the majority holding exactly 2/3, and finality needs MORE than 2/3.
+  # One of four leaves 3/4.
   - el_type: geth
     el_image: pbt-geth:local
     cl_type: lighthouse
@@ -151,8 +150,8 @@ spamoor_params:
 
 assertoor_params:
   # Stability is off because this devnet destabilises itself: pbtchaos reorgs every 15-30
-  # blocks, and the check asserts <=2 reorgs per epoch and a fork distance <=3. It failed for
-  # the one honest reason a check can, so asserting it proves nothing.
+  # blocks, and the check asserts <=2 reorgs per epoch and a fork distance <=3, which this
+  # devnet breaks by design.
   run_stability_check: false
   # This one is safe under reorgs: it watches the block-event stream rather than the
   # canonical chain, so a proposal still counts after being orphaned.
@@ -182,9 +181,9 @@ assertoor_params:
   #   run_lifecycle_test            — wants ~500 validators, a mainnet deposit contract, and
   #     48-72h; its success criteria are finality transitions our reorger destroys.
 
-# Chaos sidecar. pbtchaos owns its state exclusively and drives it continuously, so the
-# default devnet is NOT quiet: expect a reorg every 15-30 blocks. `make split` / `make heal`
-# poke it by hand; `make scenario` runs one of the six state scenarios.
+# Chaos sidecar. pbtchaos drives disruptoor continuously, so the default devnet is NOT
+# quiet: expect a reorg every 15-30 blocks. `make scenario` queues one of the six state
+# scenarios; `make split` / `make heal` write to disruptoor directly, outside that queue.
 disruptoor_params:
   image: ethpandaops/disruptoor:latest
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -297,17 +296,22 @@ func (m *Monitor) selfTest(ctx context.Context) error {
 			&bad, []common.Hash{}, &beaconRoot, []hexutil.Bytes{})
 		switch {
 		case err != nil:
-			// An RPC-level rejection is also a detection, as long as it is not an outage.
-			if IsTransportError(err) {
-				return fmt.Errorf("self-test inconclusive: %s was unreachable: %w", other.Name, err)
-			}
-			slog.Info("self-test: corrupted payload rejected at the RPC layer", "node", other.Name, "err", err)
-		case status.Status == engine.VALID:
-			return fmt.Errorf("SELF-TEST FAILED: %s accepted a payload whose state root was corrupted — "+
-				"the primary oracle does not work and no result from this harness means anything", other.Name)
-		default:
+			// A client rejects a corrupted state root by ANSWERING invalid, not by failing the
+			// call. An RPC error means the question never reached the EVM -- a JWT mismatch, an
+			// engine_newPayloadV5 this build does not implement, bad params -- and accepting
+			// that as a refusal would certify an oracle that was never exercised.
+			return fmt.Errorf("self-test inconclusive: %s did not answer engine_newPayloadV5: %w",
+				other.Name, err)
+		case status.Status == engine.INVALID:
 			slog.Info("self-test: corrupted payload correctly refused",
 				"node", other.Name, "status", status.Status, "err", deref(status.ValidationError))
+		default:
+			// VALID is the catastrophic case. SYNCING and ACCEPTED are not refusals either:
+			// both mean the node did not execute the block, so neither says anything about
+			// whether it would have caught the corruption.
+			return fmt.Errorf("SELF-TEST FAILED: %s answered %q to a payload whose state root was "+
+				"corrupted. Only INVALID proves it executed and rejected it, so no result from "+
+				"this harness would mean anything", other.Name, status.Status)
 		}
 	}
 
@@ -340,20 +344,25 @@ func (m *Monitor) captureDivergence(ctx context.Context) error {
 				}
 			}
 		}
+		// A node that will not answer is the normal case for the event being captured -- it
+		// may be the partitioned one -- so keep going and let the reachable clients leave
+		// their evidence. Capturing NOTHING is the failure, and that is checked below.
 		blk, err := getBlock(ctx, n, "latest")
 		if err != nil {
-			return fmt.Errorf("%s: %w", n.Name, err)
+			slog.Warn("evidence: node did not answer", "node", n.Name, "err", err)
+			continue
 		}
 		blob, err := json.MarshalIndent(blk, "", "  ")
 		if err != nil {
-			return fmt.Errorf("%s: %w", n.Name, err)
+			slog.Warn("evidence: could not encode head", "node", n.Name, "err", err)
+			continue
 		}
-		if m.saveArtifact(fmt.Sprintf("head-%s.json", n.Name), blob) {
+		if m.saveArtifact(fmt.Sprintf("head-%s-%d.json", n.Name, uint64(blk.Number)), blob) {
 			saved++
 		}
 	}
 	if saved == 0 {
-		return errors.New("wrote no artifacts")
+		return fmt.Errorf("captured no evidence from any of %d node(s)", len(m.nodes))
 	}
 	return nil
 }

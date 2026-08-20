@@ -14,9 +14,10 @@
 // once, where a client that keeps the doomed branch's state disagrees with one that
 // does not.
 //
-// pbtchaos owns disruptoor state exclusively. Everything it does goes through one
-// queue, so "no reorg while another is in flight" is enforced rather than hoped for --
-// two overlapping disruptions produce a mess that proves nothing.
+// Everything pbtchaos does goes through one queue, so "no reorg while another of its jobs
+// is in flight" is enforced rather than hoped for -- two overlapping disruptions produce a
+// mess that proves nothing. `make split` and `make heal` write to disruptoor directly and
+// are outside that queue, so they are not covered by it.
 package main
 
 import (
@@ -81,8 +82,13 @@ func (c *chaos) nextMinority() int {
 	return idx
 }
 
-// keysFor hands each run its own majority/minority pair, walking the key pool so no two
-// consecutive scenarios share a nonce sequence.
+// keysFor hands each run a majority/minority pair, walking the pool so runs do not repeat
+// the same pair.
+//
+// With the pool at three -- the most that fits below the hammer's slice without reaching the
+// accounts spamoor and assertoor claim -- consecutive runs necessarily share ONE key: two
+// drawn from three cannot be disjoint. Widening the pool is what would make them disjoint,
+// and the guard in main.star is what stops it.
 func (c *chaos) keysFor() (string, string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -398,8 +398,8 @@ func waitReceipt(ctx context.Context, cl *ethclient.Client, hash common.Hash, de
 	}
 }
 
-// broadcast sends to EVERY node, not one of them. The nodes are unpeered, so a
-// transaction submitted to only one leaves the other with a nonce gap; the gapped
+// broadcast sends to EVERY node, not one of them. A node cut off from its peers cannot
+// receive a transaction by gossip, and this devnet cuts p2p on purpose; the gapped
 // transaction sits in the queued subpool, is capped at 64 per account, and the surplus is
 // dropped — with no error returned.
 // Broadcasting is what devp2p gossip would have done for us.

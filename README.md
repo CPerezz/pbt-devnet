@@ -72,8 +72,9 @@ chain number=<n> hash=<block> state_root=<root> clients=4
 reorg observed client=el-2-geth-lighthouse height=<n> before=<hash> after=<hash>
 ```
 
-**The devnet is not quiet by default** — chaos is on and reorgs happen without asking. Set
-`pbt_chaos.enabled: false` in `args/devnet.yaml` for a baseline run. Bare `make` lists every
+**The devnet is not quiet by default** — chaos is on and reorgs happen without asking. Add a
+`pbt_chaos:` block with `enabled: false` to `args/devnet.yaml` for a baseline run; the file ships
+with no overrides, so every knob comes from `main.star`. Bare `make` lists every
 target; Ctrl-C detaches from the logs without stopping anything.
 
 ## The UIs
@@ -112,8 +113,7 @@ Dora's `/forks` page is the equivalent UI and has real history.
 
 `make verify` compares the most recent N blocks, not blocks 1..N. That distinction is
 load-bearing: a divergence is permanent once it happens, so anchoring at block 1 lets early
-agreeing blocks outvote a chain that has been split for twenty minutes. This script used to do
-exactly that and reported a confident PASS on a devnet running three separate chains.
+agreeing blocks outvote a chain that has been split for twenty minutes.
 
 `make proposals` warns when disruptoor has state applied — asking a majority node
 whether a partitioned node's slots have blocks measures the partition, not the proposer. Measure
@@ -149,8 +149,8 @@ and a disagreement between clients is itself reported as a finding.
 
 Blocks must average **under 50% of the gas limit**. Above the target the base fee rises 12.5% per
 block and compounds with nothing to stop it, until no transaction can be paid for within a node's
-1-ether cap. The rates that hold it there, and the measurement behind them, are on `pbt_hammer` in
-`args/devnet.yaml` — check block fullness after changing them.
+1-ether cap. The rates that hold it there are `DEFAULT_HAMMER` in `main.star`; `args/devnet.yaml`
+documents how to override them — check block fullness after changing anything.
 
 The hammer samples receipts and reports a per-workload tally, so a shape that silently stops
 working is a finding rather than invisible traffic. A healthy run has every workload succeeding
@@ -162,8 +162,8 @@ and only `revert` reverting, which is its whole purpose.
 whichever node proposes next, for the two slots around its duty. The node still builds its block —
 only publication is cut — so its own execution client takes that block as head while everyone else
 builds on the parent; when the isolation lifts, the loser unwinds. The doomed node **rotates**, so
-reorgs land on geth and besu alike; `make chaos-status` reports the tally per client. It owns
-disruptoor exclusively, so two disruptions never overlap.
+reorgs land on geth and besu alike; `make chaos-status` reports the tally per client. Its own
+jobs run through one queue, so two of them never overlap.
 
 On top of that, scenarios strand **specific state** on a branch that is then abandoned. Each
 partitions the network, waits until the two sides genuinely disagree, sends its transactions to the
@@ -263,7 +263,7 @@ from `pbt-egg` with a different set of prefunded accounts, so do not paste it in
 It fails on any key it does not recognise, so consult its README rather than inventing fields.
 Three settings there are load-bearing and easy to break — `network: "kurtosis"` (anything else
 silently selects snap sync, which the tree refuses), `preset: mainnet` (`minimal` splits the devnet
-into N healthy-looking chains at block 35), and `gloas_fork_epoch: 0` (Amsterdam at block 0 forces
+into N healthy-looking chains), and `gloas_fork_epoch: 0` (Amsterdam at block 0 forces
 Gloas at slot 0). Each carries its reasoning next to the value.
 
 Both clients take the **same** genesis key, a fork activation timestamp:
@@ -273,9 +273,7 @@ Both clients take the **same** genesis key, a fork activation timestamp:
 | geth | `"binaryTrieTime": 0` | *(none — read from genesis)* |
 | besu | `"binaryTrieTime": 0` | `--data-storage-format=BINARY` |
 
-geth used to take a `"pbt": true` boolean and model the tree as a property of the chain rather than
-a fork; [PR #26](https://github.com/CPerezz/go-ethereum/pull/26) made it a timestamp fork and
-adopted besu's key, and mid-chain schedules are now accepted by both.
+Both clients accept a mid-chain schedule, not only genesis activation.
 
 **A genesis still carrying `"pbt": true` is worse than one carrying nothing.** It decodes
 fork-less, so the chain comes up on the merkle-patricia trie with no error anywhere: a genesis
