@@ -32,11 +32,15 @@ func newSender(ctx context.Context, hexKey string, e *el) (*sender, error) {
 		return nil, fmt.Errorf("bad key: %w", err)
 	}
 	addr := crypto.PubkeyToAddress(key.PublicKey)
-	id, err := e.c.ChainID(ctx)
+	cctx0, ccancel0 := elCtx(ctx)
+	id, err := e.c.ChainID(cctx0)
+	ccancel0()
 	if err != nil {
 		return nil, fmt.Errorf("chain id: %w", err)
 	}
-	n, err := e.c.PendingNonceAt(ctx, addr)
+	cctx, ccancel := elCtx(ctx)
+	n, err := e.c.PendingNonceAt(cctx, addr)
+	ccancel()
 	if err != nil {
 		return nil, fmt.Errorf("nonce: %w", err)
 	}
@@ -56,7 +60,9 @@ func newSender(ctx context.Context, hexKey string, e *el) (*sender, error) {
 // cap is only a ceiling. The one real limit is the node's own RPC guard, which rejects a
 // transaction whose maximum cost exceeds 1 ether, so stay just under that.
 func (s *sender) fees(ctx context.Context, e *el, gas uint64) (tip, feeCap *big.Int, err error) {
-	h, err := e.c.HeaderByNumber(ctx, nil)
+	cctx, ccancel := elCtx(ctx)
+	h, err := e.c.HeaderByNumber(cctx, nil)
+	ccancel()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -138,7 +144,10 @@ func (s *sender) send(ctx context.Context, e *el, r txReq) (common.Hash, common.
 	if r.to == nil {
 		created = crypto.CreateAddress(s.addr, s.nonce)
 	}
-	if err := e.c.SendTransaction(ctx, tx); err != nil {
+	cctx, ccancel := elCtx(ctx)
+	err = e.c.SendTransaction(cctx, tx)
+	ccancel()
+	if err != nil {
 		return common.Hash{}, common.Address{}, fmt.Errorf("send to %s: %w", e.name, err)
 	}
 	s.nonce++
@@ -168,7 +177,9 @@ func (s *sender) awaitOK(ctx context.Context, e *el, h common.Hash, timeout time
 func (s *sender) await(ctx context.Context, e *el, h common.Hash, timeout time.Duration) (*types.Receipt, error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		r, err := e.c.TransactionReceipt(ctx, h)
+		cctx, ccancel := elCtx(ctx)
+		r, err := e.c.TransactionReceipt(cctx, h)
+		ccancel()
 		if err == nil {
 			return r, nil
 		}

@@ -133,28 +133,87 @@ func (c *chaos) checkGone(ctx context.Context, sc *scenario, r *run) (string, er
 
 // awaitHeight waits for every client to have SOME block at n. A client that has just
 // rejoined is still catching up, and "has not got there yet" is not "disagrees".
-func awaitHeight(ctx context.Context, els []*el, n uint64, timeout time.Duration) bool {
+// laggards is what awaitHeight learned about the clients that never arrived.
+type laggards struct {
+	short  []string          // clients that never reached the target height
+	frozen []string          // of those, the ones that also stopped advancing
+	heads  map[string]uint64 // last head seen per client
+}
+
+// awaitHeight waits for every client to have block n, and reports who did not make it.
+//
+// Who, and whether they were still moving, is the whole difference between "this client is
+// slow" and "this client is wedged". A wedged client is the most severe thing this harness can
+// observe and it surfaces HERE rather than in waitAgreement: a node that stops on the canonical
+// chain still agrees with everyone at the common height, so convergence looks fine and only the
+// anchor it never reaches gives it away.
+//
+// The poll interval matches waitAgreement's on purpose. wedgeTicks counts observations, not
+// seconds, so polling faster here would shrink the stall window to a couple of blocks and call
+// ordinary propagation lag a wedge.
+func awaitHeight(ctx context.Context, els []*el, n uint64, timeout time.Duration) (bool, laggards) {
 	deadline := time.Now().Add(timeout)
+	heads := newHeadTracker()
+	var out laggards
 	for {
-		missing := false
+		sample := map[string]uint64{}
+		var short []string
 		for _, e := range els {
+			if h, _, err := e.head(ctx); err == nil {
+				sample[e.name] = h
+			}
 			if e.hashAt(ctx, n) == (common.Hash{}) {
-				missing = true
-				break
+				short = append(short, e.name)
 			}
 		}
-		if !missing {
-			return true
+		heads.observe(sample)
+		if len(short) == 0 {
+			return true, laggards{}
 		}
+		sort.Strings(short)
+		out = laggards{short: short, heads: sample}
+
 		if time.Now().After(deadline) {
-			return false
+			out.frozen = both(heads.frozen(), short)
+			return false, out
 		}
 		select {
 		case <-ctx.Done():
-			return false
-		case <-time.After(2 * time.Second):
+			return false, out
+		case <-time.After(5 * time.Second):
 		}
 	}
+}
+
+// describeHeads renders "name=height" for the named clients, so a report says how far behind
+// they actually were rather than merely that they were.
+func describeHeads(names []string, heads map[string]uint64) string {
+	var parts []string
+	for _, n := range names {
+		if h, ok := heads[n]; ok {
+			parts = append(parts, fmt.Sprintf("%s=%d", n, h))
+		} else {
+			parts = append(parts, n+"=?")
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// both returns the names present in each list, so a client is only called frozen if it is also
+// one of the clients that failed to arrive.
+func both(a, b []string) []string {
+	in := map[string]bool{}
+	for _, n := range b {
+		in[n] = true
+	}
+	var out []string
+	for _, n := range a {
+		if in[n] {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // runScenario splits the network, puts the scenario's state on the minority branch,
@@ -352,9 +411,10 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 		case len(wedged) > 0:
 			res.Outcome = "finding"
 			res.Detail = fmt.Sprintf("%s stopped advancing while the rest of the chain kept "+
-				"building, with peers of its own, and the clients never reconverged after the "+
-				"heal — %s. peers: %s; disruptoor: %s", strings.Join(wedged, ", "),
-				c.describeDisagreement(ctx, n), peers, c.disruptoorSummary())
+				"building, and the clients never reconverged after a heal that succeeded — %s. "+
+				"It is not starved: see the peer counts. peers: %s; disruptoor: %s",
+				strings.Join(wedged, ", "), c.describeDisagreement(ctx, n), peers,
+				c.disruptoorSummary())
 			c.log.Error("FINDING: client wedged after heal", "name", sc.name, "clients", wedged)
 		case len(starved) > 0:
 			res.Outcome = "inconclusive"
@@ -384,9 +444,30 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 			"no branch-anchored height to verify against"
 		return res
 	}
-	if !awaitHeight(ctx, c.els, wantHeight, 2*time.Minute) {
-		res.Outcome = "inconclusive"
-		res.Detail = fmt.Sprintf("not every client reached block %d after the heal", wantHeight)
+	if ok, lag := awaitHeight(ctx, c.els, wantHeight, 2*time.Minute); !ok {
+		peers, byIndex := c.peerSummary(ctx)
+		wedged, starved := classifyFrozen(lag.frozen, byIndex)
+		switch {
+		case len(wedged) > 0:
+			res.Outcome = "finding"
+			res.Detail = fmt.Sprintf("%s never reached block %d after the heal and stopped "+
+				"advancing at %s — it is wedged, not slow, and not starved: see the peer "+
+				"counts. peers: %s; disruptoor: %s", strings.Join(wedged, ", "), wantHeight,
+				describeHeads(wedged, lag.heads), peers, c.disruptoorSummary())
+			c.log.Error("FINDING: client wedged below the survival anchor",
+				"name", sc.name, "clients", wedged, "want_height", wantHeight)
+		case len(starved) > 0:
+			res.Outcome = "inconclusive"
+			res.Detail = fmt.Sprintf("%s never reached block %d and stopped advancing, but its "+
+				"consensus client has no peers, so it is starved rather than wedged. peers: %s",
+				strings.Join(starved, ", "), wantHeight, peers)
+			c.log.Warn("client starved below the survival anchor", "name", sc.name, "clients", starved)
+		default:
+			res.Outcome = "inconclusive"
+			res.Detail = fmt.Sprintf("not every client reached block %d after the heal: %s still "+
+				"behind at %s, but still advancing", wantHeight, strings.Join(lag.short, ", "),
+				describeHeads(lag.short, lag.heads))
+		}
 		return res
 	}
 

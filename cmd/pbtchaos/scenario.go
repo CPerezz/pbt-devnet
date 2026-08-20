@@ -110,7 +110,9 @@ var scenarios = map[string]*scenario{
 		effect: hasCode,
 		// Dropping the doomed account must not take the shared chunks with it.
 		survives: func(ctx context.Context, r *run, e *el, at *big.Int) error {
-			code, err := e.c.CodeAt(ctx, r.survivor, at)
+			cctx, ccancel := elCtx(ctx)
+			code, err := e.c.CodeAt(cctx, r.survivor, at)
+			ccancel()
 			if err != nil {
 				return err
 			}
@@ -191,7 +193,9 @@ var scenarios = map[string]*scenario{
 		effect: func(ctx context.Context, r *run, e *el, at *big.Int) (int, int, error) {
 			n := 0
 			for _, a := range r.doomed {
-				b, err := e.c.BalanceAt(ctx, a, at)
+				cctx, ccancel := elCtx(ctx)
+				b, err := e.c.BalanceAt(cctx, a, at)
+				ccancel()
 				if err != nil {
 					return 0, len(r.doomed), err
 				}
@@ -261,7 +265,9 @@ var scenarios = map[string]*scenario{
 func hasCode(ctx context.Context, r *run, e *el, at *big.Int) (int, int, error) {
 	n := 0
 	for _, a := range r.doomed {
-		code, err := e.c.CodeAt(ctx, a, at)
+		cctx, ccancel := elCtx(ctx)
+		code, err := e.c.CodeAt(cctx, a, at)
+		ccancel()
 		if err != nil {
 			return 0, len(r.doomed), err
 		}
@@ -281,7 +287,9 @@ func hasCode(ctx context.Context, r *run, e *el, at *big.Int) (int, int, error) 
 func countSlots(ctx context.Context, e *el, addr common.Address, slots []uint64, at *big.Int, wantZero bool) (int, int, error) {
 	n := 0
 	for _, s := range slots {
-		got, err := e.c.StorageAt(ctx, addr, txkit.SlotKey(s), at)
+		cctx, ccancel := elCtx(ctx)
+		got, err := e.c.StorageAt(cctx, addr, txkit.SlotKey(s), at)
+		ccancel()
 		if err != nil {
 			return 0, len(slots), err
 		}
