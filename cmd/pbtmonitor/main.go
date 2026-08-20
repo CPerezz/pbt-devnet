@@ -1,19 +1,16 @@
 // Command pbtmonitor watches N execution clients running the EIP-8297 binary tree and
 // reports any disagreement about state.
 //
-// Real consensus clients drive the chain; this process only observes it. Every tick it
-// asks each client for the same block number and requires identical hashes, which on a
-// chain whose block hash commits to the state root is a state-root assertion. Bad-block
-// sets and eth_getProof samples are compared on a slower cadence.
+// It observes only: every tick it asks each client for the same block number and requires
+// identical hashes, which on this chain is a state-root assertion.
 //
-// The one thing it does actively is prove its own oracle at startup: it builds a payload,
-// corrupts a single byte of the state root, and requires every other client to reject it.
-// Without that, "0 findings" from a broken oracle is indistinguishable from "0 findings"
-// from a healthy chain. Neither half of that moves forkchoice or persists a block, so it
-// is safe alongside real consensus clients.
+// The one active thing it does is prove its own oracle at startup, by requiring every client
+// to reject a payload whose state root it corrupted. Without that, "0 findings" from a broken
+// oracle is indistinguishable from "0 findings" from a healthy chain. It never moves
+// forkchoice or persists a block.
 //
-// Clients are given as repeated --el name=engineURL,rpcURL; at least two are required,
-// since one node has nobody to disagree with.
+// Clients are repeated --el name=engineURL,rpcURL; at least two, since one node has nobody
+// to disagree with.
 //
 // Engine versions are Amsterdam's: forkchoiceUpdatedV4 / getPayloadV6 / newPayloadV5.
 // getPayloadV5 is gated to Osaka+BPO and will refuse an Amsterdam payload, so V6 is not
@@ -336,12 +333,9 @@ func (m *Monitor) compareHeads(ctx context.Context) error {
 // finding reports a divergence -- unless a disruption is applied, in which case the
 // divergence is the disruption doing its job.
 //
-// It records and keeps going: halting on the first one ends a soak at the least convenient
-// moment. The count is logged at exit; the exit status itself is only zero or one.
-//
-// Two rules keep it honest. A suppressed divergence is still logged and still counted, just
-// separately -- nothing is hidden. And repeats of the same message collapse, so one event
-// reads as one event.
+// It records and keeps going, since halting on the first ends a soak at the worst moment; the
+// count is logged at exit, not returned as the status. A suppressed divergence is still logged
+// and counted separately, and repeats collapse so one event reads as one event.
 func (m *Monitor) finding(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 

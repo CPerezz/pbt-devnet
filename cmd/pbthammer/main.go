@@ -1,6 +1,6 @@
-// Command hammer generates transactions aimed at what EIP-8297 changed, rather than at
-// throughput. A generic spammer moves ether between existing accounts, which touches one
-// leaf each and says little about a new state commitment.
+// Command hammer generates transactions aimed at what EIP-8297 changed rather than at
+// throughput: a generic spammer moves ether between existing accounts, touching one leaf
+// each.
 //
 //	fanout      fresh recipients                 -> new header stems
 //	storage     spread storage slots             -> the storage zone and its 66-byte keys
@@ -19,10 +19,8 @@
 //	accesslist  type 1, populated list           -> repriced access-list accounting
 //	revert      write slots, then REVERT         -> intra-transaction rollback of tree writes
 //
-// Every workload only generates traffic. The assertion is the monitor's: each block one
-// node builds must be accepted by all the others, so a shape that makes two nodes compute
-// different roots shows up there. That means these workloads catch a divergence, not a
-// uniformly wrong implementation — with one client, agreement is all there is to check.
+// These only generate traffic; the assertion is the monitor's. They therefore catch a
+// divergence between clients, not an implementation that is uniformly wrong.
 //
 // All bytecode is straight-line with no jumps, so it needs no compiler.
 package main
@@ -555,16 +553,12 @@ func (w *world) buildTx(ctx context.Context, clients []*ethclient.Client, kind s
 		return nil, err
 	}
 
-	// Gas is asked for, not guessed: on this chain a bare value transfer to a fresh
-	// account costs far more than the classic 21k (measured, see README), so a
-	// hardcoded limit sends every transaction out-of-gas — where it still lands in a
-	// block, still burns the whole limit, and looks like load while testing nothing.
+	// Asked for, not guessed: a transfer to a fresh account costs far more than 21k here, and
+	// a hardcoded limit sends everything out-of-gas -- which still lands in a block and looks
+	// like load while testing nothing.
 	//
-	// Every client is asked, not just the first. With heterogeneous clients an estimate
-	// from one is not valid for another, and on a two-dimensional gas model a
-	// disagreement about the cost of the same call is itself a divergence worth
-	// reporting. The largest estimate is used so the transaction is executable
-	// everywhere.
+	// Every client is asked: an estimate from one is not valid for another, and a disagreement
+	// about the same call is itself a divergence. The largest is used so it runs everywhere.
 	priced := sh.data
 	if sh.priceData != nil {
 		priced = sh.priceData

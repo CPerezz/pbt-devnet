@@ -32,18 +32,12 @@ func (c *chaos) isolationLoop(ctx context.Context) {
 
 // isolationFork cuts the p2p of the node that is about to propose.
 //
-// Egress DELAY was the obvious mechanism and it does not work: disruptoor v0 only
-// accepts scope ["include_control"] for shaping, which slows the engine API too, so the
-// proposer cannot assemble a payload before its deadline and simply skips the slot. A
-// missed slot is a non-event -- the next proposer builds on the same parent and nothing
-// was ever reorged.
-//
-// A partition is scoped to p2p and leaves the engine API alone, so the proposer builds
-// its block normally and only its PUBLICATION is cut. Its own execution client accepts
-// that block as head; everyone else sees an empty slot and builds on the parent. When
-// the partition clears, the proposer meets a heavier chain that does not contain its
-// block and has to unwind it -- which is the reorg, and it lands on the node that has
-// the doomed block, so that is where it must be observed.
+// A partition, not shaping. disruptoor only accepts scope ["include_control"] for shaping,
+// which slows the engine API too, so the proposer misses its slot entirely -- and a missed
+// slot reorgs nothing. A p2p partition leaves the engine API alone: the proposer builds
+// normally and only PUBLICATION is cut, so it takes its own block as head while everyone
+// else builds on the parent, and unwinds when the partition clears. The reorg therefore
+// lands on the isolated node, which is where it must be observed.
 func (c *chaos) isolationFork(ctx context.Context) result {
 	res := result{Name: "proposer-fork", Started: time.Now().UTC().Format(time.RFC3339), Depth: 1}
 

@@ -176,14 +176,11 @@ func DeployCodeAfter(prefix, runtime []byte) []byte {
 // FactoryDestructInitCode returns initcode that deploys a child WITH REAL CODE and
 // then destroys it in the same transaction.
 //
-// The obvious shape — `PUSH20 addr; SELFDESTRUCT` as the creation transaction's own
-// initcode — deploys nothing, because SELFDESTRUCT halts before any RETURN.
-//
-// A factory fixes that: the child returns `codeSize` bytes of code, so code-zone
-// leaves are written, and the parent then calls it so it self-destructs. Post
-// EIP-6780 SELFDESTRUCT only deletes when the account was created in the same
-// transaction — which is exactly this case — so the account goes away while its code
-// chunks remain, with nothing reference-counting them.
+// `PUSH20 addr; SELFDESTRUCT` as the transaction's own initcode deploys nothing, because
+// SELFDESTRUCT halts before any RETURN. A factory fixes that: the child returns real code,
+// so code-zone leaves are written, then the parent calls it. Post EIP-6780 SELFDESTRUCT only
+// deletes an account created in the same transaction, so the account goes while its code
+// chunks remain with nothing reference-counting them.
 //
 // Parent layout (31-byte prefix, then the child initcode it copies out of itself):
 //
