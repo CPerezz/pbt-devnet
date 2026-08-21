@@ -79,10 +79,6 @@ require_capability "geth (EIP-8297)" "$GETH_SRC" 'json:"binaryTrieTime' "params/
 build_from "geth (EIP-8297)" "pbt-geth:local" "$GETH_SRC" \
   "clone CPerezz/go-ethereum at branch pbt, or set PBT_GETH_SRC"
 
-# The needle is the chain-config key, not the trie: a tree that parses "binaryTrieTime"
-# necessarily has the commitment engine, and one that does not would run the tree on the
-# wrong EIP-8038 access-list gas -- agreeing with geth on the genesis root and diverging on
-# the first access-list transaction, which is far harder to read than a build failure.
 require_capability "erigon (EIP-8297)" "$ERIGON_SRC" 'json:"binaryTrieTime' \
   "execution/chain/chain_config.go" "fix: git -C $ERIGON_SRC checkout binary-trie"
 build_from "erigon (EIP-8297)" "erigon-pbt:local" "$ERIGON_SRC" \
