@@ -79,8 +79,12 @@ require_capability "geth (EIP-8297)" "$GETH_SRC" 'json:"binaryTrieTime' "params/
 build_from "geth (EIP-8297)" "pbt-geth:local" "$GETH_SRC" \
   "clone CPerezz/go-ethereum at branch pbt, or set PBT_GETH_SRC"
 
-require_capability "erigon (EIP-8297)" "$ERIGON_SRC" 'json:"binaryTrieTime' \
-  "execution/chain/chain_config.go" "fix: git -C $ERIGON_SRC checkout binary-trie"
+# The needle is the genesis path, not the config key: a tree that only PARSES binaryTrieTime
+# still needs COMMITMENT_BIN to turn the tree on, and this package no longer passes it, so
+# such a checkout would refuse to start rather than build a wrong chain. Failing here says
+# why.
+require_capability "erigon (EIP-8297)" "$ERIGON_SRC" 'ResolveErigonDBSettingsForGenesis' \
+  "execution/state/genesiswrite/genesis_write.go" "fix: git -C $ERIGON_SRC checkout binary-trie && git -C $ERIGON_SRC pull"
 build_from "erigon (EIP-8297)" "erigon-pbt:local" "$ERIGON_SRC" \
   "clone erigontech/erigon at branch binary-trie, or set PBT_ERIGON_SRC"
 
