@@ -15,11 +15,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 ensure() {
   local name=$1 url=$2 branch=$3 dir=$4 var=$5
-  # A test on .git rejects every linked worktree, where .git is a FILE pointing at the real
-  # git dir. --show-toplevel accepts those -- but only its ANSWER is usable: the exit status
-  # alone says "somewhere inside a work tree", which is true of a plain directory nested in
-  # an unrelated repo, and a bare repo prints "false" and still exits 0. So compare the
-  # toplevel against $dir itself, both resolved, and accept only a checkout rooted here.
+  # -d "$dir/.git" rejects linked worktrees, where .git is a file. Compare --show-toplevel
+  # against $dir rather than testing exit status: that alone means "inside some work tree",
+  # which a directory nested in an unrelated repo satisfies, and a bare repo exits 0 too.
   local top phys
   top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
   [[ -n "$top" ]] && top="$(cd "$top" && pwd -P)"
