@@ -16,15 +16,16 @@ implement three times. So the pairs are deliberately configured differently:
 | 3 | geth | archive, `--syncmode=full` |
 | 4 | besu | `--data-storage-format=BINARY` |
 | 5 | besu | also `--bonsai-limit-trie-logs-enabled=false` — keeps every trie log |
-| 6 | erigon | `COMMITMENT_BIN` / `COMMITMENT_BIN_HASH=blake3` |
+| 6 | erigon | the tree, taken from the genesis |
 | 7 | erigon | also `--prune.include-commitment-history` — keeps the commitment history |
 
-Erigon takes the tree through **environment variables, not `el_extra_params`**. Its launcher runs
-`erigon init <genesis.json> && erigon ...` in one shell and `el_extra_params` extends only the
-second half, so a flag would miss `init` and commit a merkle-patricia genesis under a node that
-believes it is on the tree. `--prune.include-commitment-history` on node 7 is a flag rather than an
-env var because it is read at node start and not by `init`; it is a whole-datadir property from
-then on, and the node refuses to restart without it once the datadir carries it.
+Erigon needs no trie configuration: it reads `binaryTrieTime` out of the genesis and records the
+tree, with blake3, when `erigon init` creates the datadir. That matters because its launcher runs
+`erigon init <genesis.json> && erigon ...` in one shell while `el_extra_params` extends only the
+second half — a flag would miss `init` entirely. `--prune.include-commitment-history` on node 7 is
+a flag rather than a genesis key because it is read at node start and not by `init`; it is a
+whole-datadir property from then on, and the node refuses to restart without it once the datadir
+carries it.
 
 Node 1 exists because ethereum-package launches the **first** participant with no `--boot-nodes`
 of its own and hands its ENR to everyone else. Partitioning that node strands it permanently — it

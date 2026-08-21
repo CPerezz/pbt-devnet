@@ -63,27 +63,20 @@ participants:
     # rather than isolate one.
     el_extra_params: ["--data-storage-format=BINARY", "--bonsai-limit-trie-logs-enabled=false"]
 
-  # Env vars, not el_extra_params: the launcher runs `erigon init <genesis.json> && erigon`
-  # in one shell and el_extra_params extends only the second half, so a flag would miss init
-  # and commit a merkle-patricia genesis. blake3 is the tree's H on this chain; erigon's own
-  # default is keccak, which agrees with no other client.
+  # No trie configuration: erigon reads binaryTrieTime out of the genesis and records the
+  # tree, with blake3, when `erigon init` creates the datadir. build-images.sh gates on the
+  # checkout being new enough to do that.
   - el_type: erigon
     el_image: erigon-pbt:local
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    el_extra_env_vars:
-      COMMITMENT_BIN: "true"
-      COMMITMENT_BIN_HASH: "blake3"
 
   - el_type: erigon
     el_image: erigon-pbt:local
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    el_extra_env_vars:
-      COMMITMENT_BIN: "true"
-      COMMITMENT_BIN_HASH: "blake3"
     # Keeps the commitment history, so this node can answer for a trie root it has already
     # unwound past. A flag rather than an env var: it is read at node start, not by init.
     el_extra_params: ["--prune.include-commitment-history"]
