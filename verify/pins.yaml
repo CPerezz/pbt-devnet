@@ -1,14 +1,17 @@
 # Genesis pins for the migration devnet (K6 check C7).
 #
 # The MIGRATION chain starts on the merkle-patricia trie, so block 0 of a
-# kurtosis run must match these. 'pending' fails verify-migration outside
-# --smoke: the real values are captured from the FIRST kurtosis-rendered
-# genesis (S2), because the standalone egg run (B1) uses egg-default
-# mnemonics and validator counts - a different alloc, deliberately not
-# pinned here (B1's own hashes are asserted inside its harness).
+# kurtosis run must match these. Captured from the first kurtosis-rendered
+# genesis (S2, 2026-08-27, enclave pbt-smoke); the standalone egg run (B1)
+# uses egg-default mnemonics and validator counts - a different alloc,
+# deliberately not pinned here (B1's own hashes are asserted inside its
+# harness).
 #
-# Cross-reference at fill time: go-ethereum PR #32's pinned pair
-# (TestPBTGenesisPins) proves the same binary computes both kinds from one
-# alloc; these pins prove the devnet's rendered alloc is stable run to run.
-genesis_hash: pending
-genesis_state_root: pending
+# Cross-reference: go-ethereum PR #32's pinned pair (TestPBTGenesisPins)
+# proves one binary computes both tree kinds from one alloc; these pins
+# prove the devnet's rendered alloc is stable run to run. The binary
+# shadow root of this same genesis was 0x9a6634dc9accca4cfa178102d51a2a16
+# d3178c60a23c54ce249afd5c9d5cde19 at capture time (recorded for eyes, not
+# asserted - it lives in the follower, not the header).
+genesis_hash: 0xc00ac3e65ef77ce9bcdc6d876199d5c244362c4917e6c3604324466ca995572f
+genesis_state_root: 0x1a20cc79adfff868e3e70a9dd9578806b5f6a9a818765588c20a0f53b642b1a1
