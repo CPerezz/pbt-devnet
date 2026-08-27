@@ -24,6 +24,16 @@ On top of the network this adds three services of our own:
              state on a branch that is then abandoned. It owns disruptoor exclusively, so
              two disruptions never overlap.
 
+In migration mode (pbt_migration.enabled) the chain instead STARTS on the merkle-patricia
+trie and forks to the binary tree at T = genesis + fork_offset_seconds. Two services of our
+own take over there:
+
+  migration-monitor follows every client's debug_migrationProgress and shadow roots,
+             emitting JSONL findings on stdout.
+  migration-chaos   drives disruptoor on an admission-gated schedule around the fork
+             boundary (profiles: smoke, r3). The legacy pbtchaos is skipped in migration
+             mode — its reorg cadence knows nothing about the boundary.
+
 All three are independently switchable, so `kurtosis run` with load and chaos disabled is a
 quiet baseline.
 
@@ -45,13 +55,21 @@ OURS = [
 # schedules the binary tree fork_offset_seconds after genesis. The offset
 # lives in exactly one place — this block (or its override in the args
 # file) — and is injected into the genesis generator's environment below;
-# T resolves at runtime to block 0's timestamp + offset. The monitor's and
-# chaos's fork-aware flags are NOT passed yet: they land with those
-# services' own migration work, and passing unknown flags today would crash
-# the services at start.
+# T resolves at runtime to block 0's timestamp + offset, and is read BACK
+# out of the generated genesis.json rather than recomputed, so the tooling
+# sees exactly the value the clients see.
 DEFAULT_MIGRATION = {
     "enabled": False,
     "fork_offset_seconds": 1800,
+    # What drives disruption around the boundary. "none" launches no chaos at
+    # all (quiet acceptance runs); "smoke" and "r3" are migration-chaos's own
+    # admission-gated profiles.
+    "chaos_profile": "none",
+    "monitor_image": "pbt-migration-monitor:local",
+    "chaos_image": "pbt-migration-chaos:local",
+    # Same convention as pbt_chaos.protect_nodes: participant 1 is the sole
+    # bootnode and must never be disrupted. 1-based.
+    "protect_nodes": [1],
 }
 
 DEFAULT_HAMMER = {
@@ -134,6 +152,13 @@ JWT_ARTIFACT = "jwt_file"
 JWT_MOUNT_DIR = "/jwt"
 JWT_PATH = JWT_MOUNT_DIR + "/jwtsecret"
 
+# ethereum-package's genesis generator stores the generated network configs —
+# genesis.json included — under this fixed artifact name (StoreSpec in
+# el_cl_genesis_generator.star at the pinned revision), so migration tooling can
+# mount the exact genesis the clients booted from.
+EL_CL_GENESIS_ARTIFACT = "el_cl_genesis_data"
+EL_CL_GENESIS_MOUNT = "/network-configs"
+
 
 def _merge(defaults, overrides):
     out = dict(defaults)
@@ -191,10 +216,21 @@ def run(plan, args={}):
         plan.print("  {0} [{1}] {2}".format(el.service_name, el.client_name, el.rpc_http_url))
 
     if monitor["enabled"]:
+        # pbtmonitor stays on in migration mode, deliberately: its only unconditional
+        # genesis assertion is "not the EMPTY merkle root", which a merkle genesis with
+        # an alloc passes, and its same-height cross-client comparison is
+        # boundary-agnostic. The PBT-commitment assertion only arms when
+        # expected_genesis_root is set, which migration args leave as the merkle root.
         _launch_monitor(plan, monitor, args, els)
     if hammer["enabled"]:
         _launch_hammer(plan, hammer, els, net.pre_funded_accounts)
-    if chaos["enabled"]:
+    if migration["enabled"]:
+        if chaos["enabled"]:
+            plan.print("pbtchaos SKIPPED: its reorg cadence is not admission-gated against " +
+                       "the fork boundary; migration-chaos (pbt_migration.chaos_profile) owns " +
+                       "disruption in migration mode")
+        _launch_migration(plan, migration, args, els)
+    elif chaos["enabled"]:
         _launch_chaos(plan, chaos, args, net, els, hammer["senders"])
 
     return net
@@ -327,3 +363,80 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
     )
     plan.print("started pbtchaos: isolation forks every {0}-{1} blocks; scenarios on POST /scenario/<name>".format(
         cfg["isolate_min_blocks"], cfg["isolate_max_blocks"]))
+
+
+def _genesis_field(plan, name, jq_filter, fmt):
+    """One value out of the GENERATED genesis.json, or a loud plan failure.
+
+    run_sh's default image ships jq (upstream's own read-osaka-time step relies on
+    exactly that), and a nonzero exit aborts the plan — which is the point: a missing
+    binaryTrieTime means the wrong egg image, and T must never be guessed. fmt "%d"
+    converts genesis.json's hex timestamp to decimal, the same printf trick the pinned
+    ethereum-package uses for the shadowfork block height.
+    """
+    result = plan.run_sh(
+        name=name,
+        description="Reading {0} from the generated genesis".format(jq_filter),
+        run=("v=$(jq -r '{0}' {1}/genesis.json); ".format(jq_filter, EL_CL_GENESIS_MOUNT) +
+             "if [ -z \"$v\" ] || [ \"$v\" = null ]; then " +
+             "echo \"genesis.json has no {0} — wrong genesis generator image?\" >&2; exit 1; fi; ".format(jq_filter) +
+             "printf '{0}' \"$v\"".format(fmt)),
+        files={EL_CL_GENESIS_MOUNT: EL_CL_GENESIS_ARTIFACT},
+    )
+    return result.output
+
+
+def _launch_migration(plan, cfg, args, els):
+    profile = cfg["chaos_profile"]
+    if profile not in ["none", "smoke", "r3"]:
+        fail("pbt_migration.chaos_profile must be none, smoke or r3, got {0}".format(profile))
+
+    # T and the genesis time come from the generated genesis, never recomputed: the
+    # egg wrote binaryTrieTime there and every client reads that file, so the tooling
+    # must see the identical values. b* and every acceptance window derive from these.
+    t = _genesis_field(plan, "read-binary-trie-time", ".config.binaryTrieTime", "%s")
+    genesis_time = _genesis_field(plan, "read-genesis-time", ".timestamp", "%d")
+    plan.print("migration fork: binaryTrieTime={0} genesis_time={1}".format(t, genesis_time))
+
+    cmd = []
+    for el in els:
+        cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
+    # Poll and sample cadence stay on the binary's own defaults (2s / 60s). JSONL on
+    # stdout so `kurtosis service logs` is the log, with nothing to mount or lose.
+    cmd += ["--binary-trie-time", t, "--jsonl", "/dev/stdout"]
+    plan.add_service(
+        name="migration-monitor",
+        config=ServiceConfig(image=cfg["monitor_image"], cmd=cmd),
+    )
+    plan.print("started migration-monitor: {0} execution clients, JSONL on stdout".format(len(els)))
+
+    if profile == "none":
+        plan.print("migration-chaos not launched: pbt_migration.chaos_profile is none")
+        return
+    _launch_migration_chaos(plan, cfg, args, els, t, genesis_time)
+
+
+def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time):
+    # Same refusal as _launch_chaos: without disruptoor a chaos driver that starts
+    # cleanly and disrupts nothing is the failure that looks like success.
+    if DISRUPTOOR_SERVICE not in args.get("additional_services", []):
+        fail("pbt_migration.chaos_profile needs the '" + DISRUPTOOR_SERVICE + "' additional " +
+             "service: add it to additional_services, or set chaos_profile: none")
+
+    disruptoor = plan.get_service(name=DISRUPTOOR_SERVICE)
+    cmd = ["--disruptoor", "http://{0}:{1}".format(disruptoor.ip_address, DISRUPTOOR_PORT)]
+    for el in els:
+        cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
+    for n in cfg["protect_nodes"]:
+        cmd += ["--protect-node", str(n)]
+    cmd += [
+        "--genesis-time", genesis_time,
+        "--binary-trie-time", t,
+        "--profile", cfg["chaos_profile"],
+        "--jsonl", "/dev/stdout",
+    ]
+    plan.add_service(
+        name="migration-chaos",
+        config=ServiceConfig(image=cfg["chaos_image"], cmd=cmd),
+    )
+    plan.print("started migration-chaos: profile {0}, hard stop at T-300s".format(cfg["chaos_profile"]))

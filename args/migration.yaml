@@ -21,14 +21,19 @@
 
 participants:
   # PARTICIPANT 1 IS THE BOOTNODE, exactly as in devnet.yaml: ethereum-package
-  # gives the first participant no --boot-nodes of its own, so pbt_chaos's
-  # protect_nodes keeps it out of the reorg rotation.
+  # gives the first participant no --boot-nodes of its own, so it must stay
+  # out of the disruption rotation. pbt_migration.protect_nodes (default [1]
+  # in main.star's DEFAULT_MIGRATION) is what keeps it there — pbt_chaos's own
+  # protect_nodes is irrelevant here, because main.star skips pbtchaos
+  # entirely in migration mode in favour of migration-chaos.
   #
-  # Three geth, not two: with two participants the chaos victim is always
-  # node 2 and a partition is a 50/50 LMD-GHOST tie, so heal outcomes are
-  # nondeterministic. Three equal slices leave a 2:1 majority. Uniform config
-  # on purpose — per-node differentiation is the PBT-at-genesis devnet's job;
-  # this one wants minimum variables on untested code paths.
+  # Four participants, not three: "3 nodes under test" plus the dedicated,
+  # protected bootnode. With only two disruptable nodes the chaos victim is
+  # always the same one and a partition is a 50/50 LMD-GHOST tie, so heal
+  # outcomes are nondeterministic; three disruptable nodes leave a 2:1
+  # majority. Uniform config on purpose — per-node differentiation is the
+  # PBT-at-genesis devnet's job; this one wants minimum variables on
+  # untested code paths.
   #
   # --cache.preimages on the server run is groundwork for re-anchoring at a
   # height H > 0 (milestone 2): the genesis-anchored conversion happens in the
@@ -38,6 +43,15 @@ participants:
   # would collapse to full anyway; full removes the conditional rather than
   # changing behavior. The devnet's purpose is that every node executes every
   # block and runs the artifact flow continuously.
+  - el_type: geth
+    el_image: pbt-geth:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--cache.preimages", "--syncmode=full"]
+    el_extra_env_vars:
+      PBT_MIGRATION: "1"
+
   - el_type: geth
     el_image: pbt-geth:local
     cl_type: lighthouse
@@ -138,7 +152,7 @@ disruptoor_params:
 ### Everything below is ours, not ethereum-package's.
 
 # OFF for milestone-1 acceptance (decision D9): the stated load is "spamoor
-# and some reorgs"; the hammer adds an uncontrolled variable on a 3-node net
+# and some reorgs"; the hammer adds an uncontrolled variable on a 4-node net
 # doing merkle+shadow double work. Enabling it is a documented
 # post-acceptance experiment.
 pbt_hammer:
@@ -149,22 +163,25 @@ pbt_monitor:
   # starts on the merkle trie). Obtain it from the first run's
   # eth_getBlockByNumber(0x0).stateRoot, then pin it here; acceptance
   # requires it set, and verify/pins.yaml carries the same value.
-  # NOTE: the monitor's migration-aware oracles (shadow, boundary) are
-  # pending; until they land it runs its legacy checks, which stay valid
-  # pre-fork (same-height cross-client comparison is boundary-agnostic).
+  # NOTE: the monitor's migration-aware oracles (shadow, boundary) live in
+  # migration-monitor, not here; pbtmonitor keeps running its legacy
+  # same-height cross-client comparison, which stays valid pre-fork.
   expected_genesis_root: ""
 
-# Reorgs ON: the whole point is reorgs during the migration window. The
-# boundary pause (no disruption scheduled near binaryTrieTime) arrives with
-# pbtchaos's migration-mode work; until then keep fork_offset_seconds well
-# beyond the intended test horizon.
+# The legacy pbtchaos does NOT run in migration mode (main.star skips it
+# unconditionally once pbt_migration.enabled is true — its reorg cadence is
+# not admission-gated against the fork boundary). Disruption instead comes
+# from pbt_migration.chaos_profile below.
 pbt_chaos: {}
 
 # Ours (main.star): the single source of truth for the fork offset. T =
-# genesis(block 0).timestamp + fork_offset_seconds. 1800s = 300 slots at 6s;
-# expected canonical blocks before T ≈ 300 − bring-up misses (~10-30) −
-# chaos losses (~15-25) ≈ 240 — wide margin over the ≥100 the acceptance
-# needs (it counts blocks strictly before the fork block).
+# genesis(block 0).timestamp + fork_offset_seconds. 2400s = 400 slots at 6s;
+# expected canonical blocks before T ≈ 400 − bring-up misses (~10-30) −
+# chaos losses under the r3 profile (~15-25) ≈ 340 — wide margin over the
+# ≥100 the acceptance harness needs (it counts blocks strictly before the
+# fork block). chaos_profile: r3 is migration-chaos's full reorg profile,
+# admission-gated to hard-stop at T-300s.
 pbt_migration:
   enabled: true
-  fork_offset_seconds: 1800
+  fork_offset_seconds: 2400
+  chaos_profile: r3
