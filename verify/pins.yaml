@@ -1,0 +1,14 @@
+# Genesis pins for the migration devnet (K6 check C7).
+#
+# The MIGRATION chain starts on the merkle-patricia trie, so block 0 of a
+# kurtosis run must match these. 'pending' fails verify-migration outside
+# --smoke: the real values are captured from the FIRST kurtosis-rendered
+# genesis (S2), because the standalone egg run (B1) uses egg-default
+# mnemonics and validator counts - a different alloc, deliberately not
+# pinned here (B1's own hashes are asserted inside its harness).
+#
+# Cross-reference at fill time: go-ethereum PR #32's pinned pair
+# (TestPBTGenesisPins) proves the same binary computes both kinds from one
+# alloc; these pins prove the devnet's rendered alloc is stable run to run.
+genesis_hash: pending
+genesis_state_root: pending
