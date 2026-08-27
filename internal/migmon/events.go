@@ -18,6 +18,12 @@ const (
 	EvHead     = "head"     // per-node head observation
 	EvCritical = "critical" // a finding that fails the run
 	EvWarn     = "warn"     // a finding that needs eyes, not failure
+
+	// Chaos driver kinds, same stream shape, separate file.
+	EvIsolate = "isolate" // Node=victim, Number=planned seconds, Detail=window
+	EvHeal    = "heal"    // Node=victim ("" = heal-all), Detail=reason
+	EvPause   = "pause"   // schedule went permanently quiet (T-300 passed)
+	EvSkip    = "skip"    // an op was refused by the admission rule
 )
 
 // Event is one JSONL line. Fields are a union across kinds; consumers key
