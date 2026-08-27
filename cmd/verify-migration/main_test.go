@@ -119,27 +119,53 @@ func TestCheckC3(t *testing.T) {
 		}
 	})
 
-	t.Run("unmatched isolation fails", func(t *testing.T) {
+	t.Run("under four matched isolations fails", func(t *testing.T) {
 		reorgs := baseReorgs()
 		reorgs = append(reorgs[:2], reorgs[3]) // drop el3's reorg entirely
 		v := &verifier{T: T, chaos: baseChaos(), monitor: reorgs}
 		pass, evidence := v.checkC3(context.Background())
 		if pass {
-			t.Fatalf("want fail (unmatched isolation), got pass")
+			t.Fatalf("want fail (3 matched < 4), got pass")
 		}
-		if !strings.Contains(evidence, "no matching reorg") {
-			t.Fatalf("evidence %q missing match reason", evidence)
+		if !strings.Contains(evidence, "matched by a reorg") || !strings.Contains(evidence, "el3") {
+			t.Fatalf("evidence %q missing match-count reason naming the unmatched victim", evidence)
 		}
 	})
 
-	t.Run("log-line fallback accepted as a match", func(t *testing.T) {
+	t.Run("geth drop line accepted as a match with depth", func(t *testing.T) {
 		dir := t.TempDir()
-		writeFile(t, filepath.Join(dir, "el3.log"), "some line\nChain reorg detected at height 3005\nother line\n")
+		writeFile(t, filepath.Join(dir, "el3.log"),
+			"some line\nINFO Chain reorg detected                     number=30 hash=6e845d..6e71d0 drop=3 dropfrom=3dc2e1..8b760b add=4\nother line\n")
 		reorgs := append(baseReorgs()[:2], baseReorgs()[3]) // drop el3's monitor reorg, keep el2's depth-12 one
 		v := &verifier{T: T, chaos: baseChaos(), monitor: reorgs, logsDir: dir}
 		pass, evidence := v.checkC3(context.Background())
 		if !pass {
-			t.Fatalf("want pass via log fallback, got fail: %s", evidence)
+			t.Fatalf("want pass via geth drop line, got fail: %s", evidence)
+		}
+	})
+
+	t.Run("chaos node-N names match el-N log files and monitor events", func(t *testing.T) {
+		// The chaos driver speaks participant indices ("node-2"); kurtosis
+		// services and the monitor speak "el-2-geth-lighthouse". R3 lap 3
+		// failed C3 on exactly this gap.
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "el-2-geth-lighthouse.log"),
+			"INFO Chain reorg detected                     number=39 hash=6e845d..6e71d0 drop=11 dropfrom=3dc2e1..8b760b add=12\n")
+		chaos := []migmon.Event{
+			ev(migmon.EvIsolate, "node-2", 1000), ev(migmon.EvHeal, "node-2", 1100),
+			ev(migmon.EvIsolate, "node-2", 2000), ev(migmon.EvHeal, "node-2", 2100),
+			ev(migmon.EvIsolate, "node-3", 3000), ev(migmon.EvHeal, "node-3", 3100),
+			ev(migmon.EvIsolate, "node-4", 4000), ev(migmon.EvHeal, "node-4", 4100),
+		}
+		monitor := []migmon.Event{
+			reorg("el-2-geth-lighthouse", 2050, 4),
+			reorg("el-3-geth-lighthouse", 3050, 2),
+			reorg("el-4-geth-lighthouse", 4050, 1),
+		}
+		v := &verifier{T: T, chaos: chaos, monitor: monitor, logsDir: dir}
+		pass, evidence := v.checkC3(context.Background())
+		if !pass {
+			t.Fatalf("want pass across naming conventions (log drop=11 covers depth>=10), got: %s", evidence)
 		}
 	})
 
@@ -160,7 +186,12 @@ func sampleEvent(tm int64, roots map[string]string) migmon.Event {
 	return e
 }
 
-func TestCheckC6Mismatch(t *testing.T) {
+// Differing non-null roots in one sample are NOT a mismatch by
+// themselves: partitions put nodes on different canonical chains at the
+// sampled height, and the monitor - which groups by canonical hash -
+// emits hash-split warns for those (R3 lap 3). The F1 critical is the
+// mismatch authority; a split-shaped sample must not fail C6.
+func TestCheckC6SplitShapedSampleIsNotAMismatch(t *testing.T) {
 	els := []el{{name: "el1"}, {name: "el2"}}
 	var events []migmon.Event
 	for i := range 55 {
@@ -170,11 +201,8 @@ func TestCheckC6Mismatch(t *testing.T) {
 
 	v := &verifier{els: els, monitor: events, skipChaos: true}
 	pass, evidence := v.checkC6(context.Background())
-	if pass {
-		t.Fatalf("want fail on mismatch, got pass: %s", evidence)
-	}
-	if !strings.Contains(evidence, "disagreeing") {
-		t.Fatalf("evidence %q missing mismatch reason", evidence)
+	if !pass {
+		t.Fatalf("split-shaped sample failed C6, want pass with F1 as the only mismatch authority: %s", evidence)
 	}
 }
 

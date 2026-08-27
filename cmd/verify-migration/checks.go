@@ -189,7 +189,7 @@ type chaosWindow struct {
 // membership, e.g. C6's cross-node samples); an empty window node ("" =
 // heal-all) matches any node.
 func (w chaosWindow) covers(node string, t time.Time, slop time.Duration) bool {
-	if w.node != "" && node != "" && w.node != node {
+	if w.node != "" && node != "" && !sameNode(w.node, node) {
 		return false
 	}
 	from := w.from.Add(-slop)
@@ -231,17 +231,47 @@ func (v *verifier) chaosWindows() []chaosWindow {
 }
 
 var reorgDepthRe = regexp.MustCompile(`\(depth (\d+)\)`)
-var reorgLogRe = regexp.MustCompile(`(?i)reorg`)
+var reorgDropRe = regexp.MustCompile(`Chain reorg detected.*\bdrop=(\d+)`)
+var nodeIndexRe = regexp.MustCompile(`^(?:node|el)-(\d+)\b|^(?:node|el)-(\d+)-`)
+
+// nodeIndex extracts the participant index shared by the two naming
+// conventions in play: the chaos driver says "node-2" (participant
+// numbering is its whole vocabulary), kurtosis services and the monitor
+// say "el-2-geth-lighthouse". The index is the identity.
+func nodeIndex(name string) (int, bool) {
+	m := nodeIndexRe.FindStringSubmatch(name)
+	if m == nil {
+		return 0, false
+	}
+	for _, g := range m[1:] {
+		if g != "" {
+			n, err := strconv.Atoi(g)
+			return n, err == nil
+		}
+	}
+	return 0, false
+}
+
+// sameNode reports whether two names denote the same participant, across
+// the node-N / el-N-... naming conventions.
+func sameNode(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ia, oka := nodeIndex(a)
+	ib, okb := nodeIndex(b)
+	return oka && okb && ia == ib
+}
 
 // matchReorg looks for evidence that w's isolation actually caused a
 // reorg on the victim: a monitor reorg event of depth >= 1 within the
-// window (+30s slop), or failing that a "reorg" log line for that node.
-// The log fallback cannot carry a depth, so it never satisfies the >= 10
-// requirement — only a monitor event can.
+// window (+30s slop), or a geth "Chain reorg detected ... drop=N" line in
+// the victim's log - drop is the dropped-branch length, exactly the depth
+// C3 counts, so log evidence can satisfy the >= 10 requirement too.
 func (v *verifier) matchReorg(w chaosWindow) (depth int, ok bool) {
 	const slop = 30 * time.Second
 	for _, ev := range v.monitor {
-		if ev.Kind != migmon.EvReorg || ev.Node != w.node {
+		if ev.Kind != migmon.EvReorg || !sameNode(ev.Node, w.node) {
 			continue
 		}
 		if !w.covers(ev.Node, ev.Time, slop) {
@@ -255,13 +285,43 @@ func (v *verifier) matchReorg(w chaosWindow) (depth int, ok bool) {
 			depth, ok = d, true
 		}
 	}
-	if ok {
-		return depth, true
+	if v.logsDir != "" {
+		for _, f := range v.victimLogFiles(w.node) {
+			for _, m := range fileAllMatches(f, reorgDropRe) {
+				d, _ := strconv.Atoi(m)
+				if d >= 1 && d > depth {
+					depth, ok = d, true
+				}
+			}
+		}
 	}
-	if v.logsDir != "" && v.grepNodeLog(w.node, reorgLogRe) {
-		return 0, true
+	return depth, ok
+}
+
+// victimLogFiles resolves a chaos victim name to its log dump files via
+// the participant index, falling back to substring matching.
+func (v *verifier) victimLogFiles(node string) []string {
+	if idx, ok := nodeIndex(node); ok {
+		files, err := v.nodeLogFiles(fmt.Sprintf("el-%d-", idx))
+		if err == nil && len(files) > 0 {
+			return files
+		}
 	}
-	return 0, false
+	files, _ := v.nodeLogFiles(node)
+	return files
+}
+
+// fileAllMatches returns the first submatch of every re match in f.
+func fileAllMatches(f string, re *regexp.Regexp) []string {
+	data, err := os.ReadFile(f)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, m := range re.FindAllStringSubmatch(string(data), -1) {
+		out = append(out, m[1])
+	}
+	return out
 }
 
 // nodeLogFiles finds every file under --logs-dir whose name contains node,
@@ -278,19 +338,6 @@ func (v *verifier) nodeLogFiles(node string) ([]string, error) {
 		return nil
 	})
 	return out, err
-}
-
-func (v *verifier) grepNodeLog(node string, re *regexp.Regexp) bool {
-	files, err := v.nodeLogFiles(node)
-	if err != nil {
-		return false
-	}
-	for _, f := range files {
-		if fileContainsMatch(f, re) {
-			return true
-		}
-	}
-	return false
 }
 
 // grepAllLogs walks every file under --logs-dir looking for re, returning
@@ -413,9 +460,11 @@ func (v *verifier) checkC2(ctx context.Context) (bool, string) {
 	return true, fmt.Sprintf("s0=%d, every 25-block bucket in [%d,%d] has >=1 tx block", s0, s0, end)
 }
 
-// checkC3 requires >=4 healed chaos isolations, each corroborated by a
-// reorg (monitor event or log line), at least one of depth >= 10, all
-// healed no later than T-300.
+// checkC3 requires >=4 healed chaos isolations corroborated by a reorg
+// (monitor event or victim log line), at least one of depth >= 10, all
+// healed no later than T-300. The plan's floor is a COUNT of matched
+// isolations, not all-must-match: a short window can legitimately heal
+// without an observable reorg when the victim proposed nothing alone.
 func (v *verifier) checkC3(ctx context.Context) (bool, string) {
 	if v.skipChaos {
 		return true, "skipped (--skip-chaos)"
@@ -433,7 +482,7 @@ func (v *verifier) checkC3(ctx context.Context) (bool, string) {
 	deadline := time.Unix(int64(v.T), 0).Add(-300 * time.Second)
 	anyDeep := false
 	matched := 0
-	var problems []string
+	var problems, notes []string
 	for i, w := range healed {
 		if w.to.After(deadline) {
 			problems = append(problems, fmt.Sprintf("isolation #%d (%s) healed at %s, after T-300 deadline %s",
@@ -442,7 +491,7 @@ func (v *verifier) checkC3(ctx context.Context) (bool, string) {
 		}
 		depth, ok := v.matchReorg(w)
 		if !ok {
-			problems = append(problems, fmt.Sprintf("isolation #%d (%s) has no matching reorg (monitor event or log line)", i, w.node))
+			notes = append(notes, fmt.Sprintf("isolation #%d (%s) unmatched", i, w.node))
 			continue
 		}
 		matched++
@@ -453,10 +502,17 @@ func (v *verifier) checkC3(ctx context.Context) (bool, string) {
 	if len(problems) > 0 {
 		return false, strings.Join(problems, "; ")
 	}
+	if matched < 4 {
+		return false, fmt.Sprintf("only %d isolation(s) matched by a reorg, need >= 4 (%s)", matched, strings.Join(notes, "; "))
+	}
 	if !anyDeep {
 		return false, fmt.Sprintf("%d isolation(s) matched but none reached reorg depth >= 10", matched)
 	}
-	return true, fmt.Sprintf("%d healed isolations matched, >=1 at depth >= 10, all healed before T-300", matched)
+	evidence := fmt.Sprintf("%d/%d healed isolations matched, >=1 at depth >= 10, all healed before T-300", matched, len(healed))
+	if len(notes) > 0 {
+		evidence += " (" + strings.Join(notes, "; ") + ")"
+	}
+	return true, evidence
 }
 
 // checkC4 requires 3-way (or self-consistent, under --smoke) agreement on
@@ -634,7 +690,7 @@ func (v *verifier) checkC6(ctx context.Context) (bool, string) {
 	const slop = 30 * time.Second
 	names := v.elNames()
 
-	samples, good, mismatches, outsideGood, anyNonNullSamples := 0, 0, 0, 0, 0
+	samples, good, outsideGood, anyNonNullSamples := 0, 0, 0, 0
 	for _, ev := range v.monitor {
 		if ev.Kind != migmon.EvSample {
 			continue
@@ -651,9 +707,14 @@ func (v *verifier) checkC6(ctx context.Context) (bool, string) {
 		if len(nonNull) > 0 {
 			anyNonNullSamples++
 		}
-		if len(nonNull) > 1 {
-			mismatches++
-		}
+		// More than one distinct non-null root is NOT a mismatch by
+		// itself: during and just after partitions the nodes sit on
+		// different canonical chains at the sampled height, and the
+		// monitor - which groups by canonical hash before comparing -
+		// emits a hash-split warn instead of F1 (R3 lap 3 evidence).
+		// The monitor's F1 criticals, handled below, are the mismatch
+		// authority; the roots map alone cannot distinguish a split
+		// from a divergence.
 		if responded == len(names) && len(nonNull) == 1 {
 			good++
 			outside := true
@@ -670,9 +731,6 @@ func (v *verifier) checkC6(ctx context.Context) (bool, string) {
 	}
 
 	var problems []string
-	if mismatches > 0 {
-		problems = append(problems, fmt.Sprintf("%d sample(s) had disagreeing non-null shadow roots", mismatches))
-	}
 	if v.smoke {
 		if anyNonNullSamples < 5 {
 			problems = append(problems, fmt.Sprintf("only %d sample(s) with >=1 non-null root, need >= 5 (smoke)", anyNonNullSamples))
