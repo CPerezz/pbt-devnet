@@ -38,7 +38,21 @@ OURS = [
     "pbt_hammer",
     "pbt_monitor",
     "pbt_chaos",
+    "pbt_migration",
 ]
+
+# EIP-8347 migration mode: the chain starts on the merkle-patricia trie and
+# schedules the binary tree fork_offset_seconds after genesis. The offset
+# lives in exactly one place — this block (or its override in the args
+# file) — and is injected into the genesis generator's environment below;
+# T resolves at runtime to block 0's timestamp + offset. The monitor's and
+# chaos's fork-aware flags are NOT passed yet: they land with those
+# services' own migration work, and passing unknown flags today would crash
+# the services at start.
+DEFAULT_MIGRATION = {
+    "enabled": False,
+    "fork_offset_seconds": 1800,
+}
 
 DEFAULT_HAMMER = {
     "enabled": True,
@@ -132,12 +146,31 @@ def run(plan, args={}):
     hammer = _merge(DEFAULT_HAMMER, args.get("pbt_hammer", {}))
     monitor = _merge(DEFAULT_MONITOR, args.get("pbt_monitor", {}))
     chaos = _merge(DEFAULT_CHAOS, args.get("pbt_chaos", {}))
+    migration = _merge(DEFAULT_MIGRATION, args.get("pbt_migration", {}))
 
     upstream_args = {}
     for k in args:
         if k not in OURS:
             upstream_args[k] = args[k]
 
+    # Migration mode reshapes the genesis: the egg emits binaryTrieTime =
+    # amsterdam_time + fork_offset_seconds instead of scheduling the tree AT
+    # genesis. Validated loudly, because both failure shapes look healthy: a
+    # stock generator image emits no fork at all, and PBT unset leaves the
+    # offset with nothing to schedule — either way the chain comes up
+    # merkle-forever with no error anywhere.
+    if migration["enabled"]:
+        egg = dict(args.get("ethereum_genesis_generator_params", {}))
+        if egg.get("image", "") == "":
+            fail("pbt_migration needs ethereum_genesis_generator_params.image (the pbt-egg fork): " +
+                 "the stock generator emits no binaryTrieTime")
+        extra = dict(egg.get("extra_env", {}))
+        if extra.get("PBT", "") != "true":
+            fail("pbt_migration needs ethereum_genesis_generator_params.extra_env.PBT == \"true\": " +
+                 "PBT selects the tree, the offset only schedules it")
+        extra["PBT_OFFSET_SECONDS"] = str(migration["fork_offset_seconds"])
+        egg["extra_env"] = extra
+        upstream_args["ethereum_genesis_generator_params"] = egg
     net = ethereum_package.run(plan, upstream_args)
 
     # Execution clients only. all_participants includes the consensus side too, and a
