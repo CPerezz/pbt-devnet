@@ -1,17 +1,19 @@
 # Genesis pins for the migration devnet (K6 check C7).
 #
-# The MIGRATION chain starts on the merkle-patricia trie, so block 0 of a
-# kurtosis run must match these. Captured from the first kurtosis-rendered
-# genesis (S2, 2026-08-27, enclave pbt-smoke); the standalone egg run (B1)
-# uses egg-default mnemonics and validator counts - a different alloc,
-# deliberately not pinned here (B1's own hashes are asserted inside its
-# harness).
+# Only the STATE ROOT is pinned. kurtosis renders a fresh genesis timestamp
+# every run, so the genesis HASH is per-run by design (R2 proved it: same
+# alloc, same state root 0x1a20cc..., different hash). The alloc is the
+# invariant worth defending; verify-migration asserts genesis_hash only if
+# the key is present.
+#
+# Captured from the first kurtosis-rendered genesis (S2, 2026-08-27,
+# enclave pbt-smoke) and reconfirmed byte-identical on R2 (pbt-r2). The
+# standalone egg run (B1) uses egg-default mnemonics and validator counts -
+# a different alloc, deliberately not pinned here.
 #
 # Cross-reference: go-ethereum PR #32's pinned pair (TestPBTGenesisPins)
-# proves one binary computes both tree kinds from one alloc; these pins
-# prove the devnet's rendered alloc is stable run to run. The binary
-# shadow root of this same genesis was 0x9a6634dc9accca4cfa178102d51a2a16
-# d3178c60a23c54ce249afd5c9d5cde19 at capture time (recorded for eyes, not
-# asserted - it lives in the follower, not the header).
-genesis_hash: 0xc00ac3e65ef77ce9bcdc6d876199d5c244362c4917e6c3604324466ca995572f
+# proves one binary computes both tree kinds from one alloc. The binary
+# shadow root of this same alloc was 0x9a6634dc9accca4cfa178102d51a2a16
+# d3178c60a23c54ce249afd5c9d5cde19 at S2 capture time (recorded for eyes,
+# not asserted - it lives in the follower, not the header).
 genesis_state_root: 0x1a20cc79adfff868e3e70a9dd9578806b5f6a9a818765588c20a0f53b642b1a1

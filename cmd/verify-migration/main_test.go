@@ -311,6 +311,20 @@ func TestCheckC7(t *testing.T) {
 			t.Fatalf("want mismatch failure, got pass=%v evidence=%q", pass, evidence)
 		}
 	})
+
+	t.Run("state root alone is a sufficient pin", func(t *testing.T) {
+		// kurtosis stamps a fresh genesis timestamp per run, so the hash
+		// is per-run by design; the alloc (state root) is the invariant.
+		els := []el{{name: "el1", url: "http://el1"}}
+		responses := map[string]json.RawMessage{
+			rpcKey("http://el1", "eth_getBlockByNumber", "0x0", false): blockJSON(otherHash, root),
+		}
+		v := &verifier{els: els, pins: map[string]string{"genesis_state_root": root}, fetch: fakeFetcher(t, responses)}
+		pass, evidence := v.checkC7(context.Background())
+		if !pass || !strings.Contains(evidence, "stateRoot") {
+			t.Fatalf("want root-only pass, got pass=%v evidence=%q", pass, evidence)
+		}
+	})
 }
 
 // --- C8: digest split ----------------------------------------------------

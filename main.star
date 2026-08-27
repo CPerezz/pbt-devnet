@@ -401,9 +401,13 @@ def _launch_migration(plan, cfg, args, els):
     cmd = []
     for el in els:
         cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
-    # Poll and sample cadence stay on the binary's own defaults (2s / 60s). JSONL on
+    # Poll cadence stays on the binary's own 2s default. JSONL on
     # stdout so `kurtosis service logs` is the log, with nothing to mount or lose.
-    cmd += ["--binary-trie-time", t, "--jsonl", "/dev/stdout"]
+    # Samples every 30s, not the binary's 60s default: C6 counts all-non-null
+    # samples and R2 showed 1/min accrues ~37 in a 30-minute-offset run's
+    # usable window, under the >=50 bar. Polling at 30s clears it with margin
+    # (A3's ws fallback stays unneeded).
+    cmd += ["--binary-trie-time", t, "--sample-interval", "30s", "--jsonl", "/dev/stdout"]
     plan.add_service(
         name="migration-monitor",
         config=ServiceConfig(image=cfg["monitor_image"], cmd=cmd),

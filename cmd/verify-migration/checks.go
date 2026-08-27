@@ -711,19 +711,22 @@ func (v *verifier) checkC6(ctx context.Context) (bool, string) {
 	return true, fmt.Sprintf("%d samples, %d good, %d outside chaos windows, 0 unwaived criticals", samples, good, outsideGood)
 }
 
-// checkC7 compares the pins file's genesis_hash/genesis_state_root against
-// every node's real genesis block. "pending" fails, except under --smoke
-// where it is a warning.
+// checkC7 compares the pins file against every node's real genesis block.
+// genesis_state_root is the required pin: the alloc is what must be stable
+// run to run. genesis_hash is optional and asserted only when present -
+// kurtosis stamps each run's genesis timestamp at render time, so the hash
+// is per-run by design (R2 finding, 2026-08-27). "pending" fails, except
+// under --smoke where it is a warning.
 func (v *verifier) checkC7(ctx context.Context) (bool, string) {
 	if v.pinsErr != nil {
 		return false, fmt.Sprintf("pins: %v", v.pinsErr)
 	}
 	hash, hok := v.pins["genesis_hash"]
 	root, rok := v.pins["genesis_state_root"]
-	if !hok || !rok {
-		return false, "pins file missing genesis_hash and/or genesis_state_root"
+	if !rok {
+		return false, "pins file missing genesis_state_root"
 	}
-	if hash == "pending" || root == "pending" {
+	if (hok && hash == "pending") || root == "pending" {
 		if v.smoke {
 			return true, "WARN: genesis pins are 'pending' (allowed under --smoke)"
 		}
@@ -737,7 +740,7 @@ func (v *verifier) checkC7(ctx context.Context) (bool, string) {
 			problems = append(problems, fmt.Sprintf("%s: %v", e.name, err))
 			continue
 		}
-		if !strings.EqualFold(blk.Hash.Hex(), hash) {
+		if hok && !strings.EqualFold(blk.Hash.Hex(), hash) {
 			problems = append(problems, fmt.Sprintf("%s genesis hash %s != pinned %s", e.name, blk.Hash.Hex(), hash))
 		}
 		if !strings.EqualFold(blk.StateRoot.Hex(), root) {
@@ -747,7 +750,11 @@ func (v *verifier) checkC7(ctx context.Context) (bool, string) {
 	if len(problems) > 0 {
 		return false, strings.Join(problems, "; ")
 	}
-	return true, fmt.Sprintf("genesis hash/stateRoot match pins across %d node(s)", len(v.els))
+	what := "stateRoot"
+	if hok {
+		what = "hash/stateRoot"
+	}
+	return true, fmt.Sprintf("genesis %s match pins across %d node(s)", what, len(v.els))
 }
 
 var digestLineRe = regexp.MustCompile(`PBT_ARTIFACT_DIGESTS\s+\S*snapshot=([0-9a-fA-F]{64})\s+\S*preimages=([0-9a-fA-F]{64})`)
