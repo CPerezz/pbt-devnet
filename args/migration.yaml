@@ -9,10 +9,12 @@
 # artifacts, import them back through the dual-check at anchor 0, then run
 # merkle-canonical with the shadow tree riding along until the fork.
 #
-# KNOWN CEILING until the switchover lands in the geth fork (G1c): nodes
-# REFUSE the first block whose time reaches binaryTrieTime and stall there,
-# loudly (errPBTSwitchoverNotImplemented). Size fork_offset_seconds beyond
-# the horizon you intend to test, or expect the stall.
+# Since the #31 online-migration merge the switchover is REAL: at
+# binaryTrieTime the header state root swaps to the binary tree, the merkle
+# side is maintained through a transition window, and the window closes at
+# the first finalized post-fork block (MigrationWindowBlocks stays unset
+# everywhere — finality-only close is a precondition the acceptance harness
+# checks).
 #
 # Everything except the pbt_* blocks is ethpandaops/ethereum-package's own
 # schema — it fails on any key it does not recognise.
@@ -30,10 +32,12 @@ participants:
   #
   # --cache.preimages on the server run is groundwork for re-anchoring at a
   # height H > 0 (milestone 2): the genesis-anchored conversion happens in the
-  # shim regardless. --syncmode=full is REQUIRED — migration mode refuses
-  # snap sync at boot, and the geth launcher only defaults to full sync via
-  # the network name; being explicit here costs nothing and survives launcher
-  # changes.
+  # shim regardless. --syncmode=full: makes from-genesis execution explicit
+  # and unconditional. Snap is supported since #31 (the follower idles during
+  # snap sync), and on a fresh devnet where all nodes start at genesis snap
+  # would collapse to full anyway; full removes the conditional rather than
+  # changing behavior. The devnet's purpose is that every node executes every
+  # block and runs the artifact flow continuously.
   - el_type: geth
     el_image: pbt-geth:local
     cl_type: lighthouse
@@ -143,8 +147,8 @@ pbt_hammer:
 pbt_monitor:
   # In migration mode this is the MERKLE-PATRICIA genesis root (the chain
   # starts on the merkle trie). Obtain it from the first run's
-  # eth_getBlockByNumber(0x0).stateRoot — or debug_pbtMigrationStatus's
-  # canonicalRoot at block 0 — then pin it here; acceptance requires it set.
+  # eth_getBlockByNumber(0x0).stateRoot, then pin it here; acceptance
+  # requires it set, and verify/pins.yaml carries the same value.
   # NOTE: the monitor's migration-aware oracles (shadow, boundary) are
   # pending; until they land it runs its legacy checks, which stay valid
   # pre-fork (same-height cross-client comparison is boundary-agnostic).

@@ -15,8 +15,9 @@
 # artifacts, and import them back through the dual-check at anchor 0. The
 # round-trip is strictly file-mediated: the node's shadow tree comes only from
 # the emitted files. Any failure exits non-zero and never falls through to
-# the node — and the node itself refuses to start migration-pre without an
-# imported shadow, as the second line of defense.
+# the node. Since the #31 online-migration merge the import is OPTIONAL to
+# the node itself — genesis-seeded catch-up works — but exercising the
+# artifact flow is this devnet's point, so the shim keeps running it.
 #
 # Known ceiling: a flags-only invocation such as `geth --help` is
 # indistinguishable from a server run and takes the migration path under

@@ -30,7 +30,7 @@ quiet baseline.
 Run `make up`.
 """
 
-ethereum_package = import_module("github.com/ethpandaops/ethereum-package/main.star")
+ethereum_package = import_module("github.com/ethpandaops/ethereum-package/main.star@5ec41d44ae23fb01b036c11b25d98547cc9c3be4")
 
 # Our own args keys. ethereum-package sanity-checks its input and fails on anything it does
 # not recognise, so these are removed before its args are handed over.
