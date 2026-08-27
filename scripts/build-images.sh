@@ -76,8 +76,24 @@ build_from() {
 
 require_capability "geth (EIP-8297)" "$GETH_SRC" 'json:"binaryTrieTime' "params/config.go" \
   "fix: git -C $GETH_SRC checkout pbt"
-build_from "geth (EIP-8297)" "pbt-geth:local" "$GETH_SRC" \
+# The migration needs more than the fork key. Both of these have failure
+# shapes that look like success if built from the wrong branch: without the
+# bintrie tooling the shim's prep would fail at first boot, and without the
+# open-mode work a future binaryTrieTime silently runs the tree from genesis.
+require_capability "geth (EIP-8347 tooling)" "$GETH_SRC" 'bintrieImportCommand' "cmd/geth/bintrie_import.go" \
+  "fix: git -C $GETH_SRC checkout pbt"
+require_capability "geth (migration mode)" "$GETH_SRC" 'requires an imported shadow binary tree' "core/pbt_mode.go" \
+  "fix: git -C $GETH_SRC checkout a branch carrying the migration-mode work (go-ethereum PR #32)"
+# Two-stage: the fork's own Dockerfile builds the binary under a staging tag,
+# then a thin overlay installs the migration shim at the exact name the
+# launcher invokes (see scripts/geth-shim.sh). The overlay must never build
+# FROM pbt-geth:local itself — a self-referencing base would shim the shim on
+# the next rebuild.
+build_from "geth (EIP-8297)" "pbt-geth-binary:local" "$GETH_SRC" \
   "clone CPerezz/go-ethereum at branch pbt, or set PBT_GETH_SRC"
+echo "==> geth migration shim -> pbt-geth:local"
+docker build --platform "$PLATFORM" -t pbt-geth:local -f "$ROOT/scripts/geth-shim.Dockerfile" "$ROOT/scripts"
+echo
 
 require_capability "erigon (EIP-8297)" "$ERIGON_SRC" 'json:"binaryTrieTime' \
   "execution/chain/chain_config.go" "fix: git -C $ERIGON_SRC checkout binary-trie"
