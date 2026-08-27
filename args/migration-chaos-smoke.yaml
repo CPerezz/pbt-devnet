@@ -10,6 +10,15 @@
 # Everything except the pbt_* blocks is ethpandaops/ethereum-package's own
 # schema — it fails on any key it does not recognise.
 
+# Validator weights below are 128/256/128/128 (total 640).
+  # Stake is the chaos design (R3 laps 1-2 evidence): participant 2 holds
+  # 256 of 640 validators (40%). Isolating it leaves the connected majority
+  # at 60% - below the 2/3 finality threshold - so finality STALLS during
+  # deep windows instead of finalizing past the victim and triggering the
+  # CL peer-scoring bans that stranded uniform-stake victims permanently
+  # (remote bans survive a victim restart; `make repeer` cannot clear
+  # them). At a 40% proposer share the victim builds depth>=10 inside a
+  # 190s window, the 3-minute scale S3 proved heals cleanly.
 participants:
   # PARTICIPANT 1 IS THE BOOTNODE: protected, not under chaos.
   - el_type: geth
@@ -17,6 +26,7 @@ participants:
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
+    validator_count: 128
     el_extra_params: ["--cache.preimages", "--syncmode=full"]
     el_extra_env_vars:
       PBT_MIGRATION: "1"
@@ -26,6 +36,7 @@ participants:
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
+    validator_count: 256  # the stake-heavy deep victim, see comment above participants
     el_extra_params: ["--cache.preimages", "--syncmode=full"]
     el_extra_env_vars:
       PBT_MIGRATION: "1"
@@ -35,6 +46,7 @@ participants:
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
+    validator_count: 128
     el_extra_params: ["--cache.preimages", "--syncmode=full"]
     el_extra_env_vars:
       PBT_MIGRATION: "1"
@@ -44,6 +56,7 @@ participants:
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
+    validator_count: 128
     el_extra_params: ["--cache.preimages", "--syncmode=full"]
     el_extra_env_vars:
       PBT_MIGRATION: "1"

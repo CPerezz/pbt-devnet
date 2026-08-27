@@ -34,30 +34,34 @@ type schedule struct {
 	quiet   time.Time // T-300: after this, nothing but SIGTERM matters
 }
 
-// profileWindows are genesis-relative offsets in seconds. The r3 deep
-// windows are 6 minutes, not the plan's original 12: R3's first lap proved
-// a 12-minute isolation at 6s slots does not self-heal - the majority
-// finalizes mid-split, the victim's CL peering strands (the legacy devnet
-// grew `make repeer` for exactly this), and the heal reorg lands at
-// geth's engine-API max reorg depth of 32. Sixty slots keep the victim's
-// branch around 15 blocks (depth >= 10 at p~95% per try, ~99.8% across
-// both deeps) while healing the way S3 proved 3-minute windows do. The
-// two shorts are sequential single victims: a 2v2 island is an LMD-GHOST
-// tie whose heal direction is a coin flip, and C3 wants the VICTIM to be
-// the one that reorgs.
+// profileWindows are genesis-relative offsets in seconds, sized by two R3
+// laps' worth of evidence. A partition that diverges across a finalized
+// checkpoint strands the victim permanently: the MAJORITY side's peer
+// scoring bans the victim's CL (a docker restart of the victim does not
+// clear remote bans - proven live), and the legacy devnet's `make repeer`
+// note documents the same pathology. So no window may let the majority
+// finalize while the victim diverges. The r3 answer is stake, not
+// duration: the deep victim (eligible[0], participant 2 in the migration
+// args, 256 of 640 validators = 40%) leaves the connected majority at 60%
+// - BELOW the 2/3 finality threshold - so finality stalls for the window
+// instead of banning anyone, and a 40% proposer share yields depth >= 10
+// inside a 190s window (~12.6 expected blocks, p~80% per try, ~99.2%
+// across three) - the 3-minute scale S3 proved heals cleanly. Shorts
+// rotate over the light nodes; their 80% connected majority keeps
+// finality flowing and their heal reorgs are S3-shaped.
 var profiles = map[string][]struct {
 	start, end int
-	nVictims   int
-	deep       bool
+	deep       bool // deep ops pin eligible[0], the stake-heavy victim
 }{
 	"smoke": {
-		{start: 360, end: 540, nVictims: 1, deep: false},
+		{start: 360, end: 540, deep: false},
 	},
 	"r3": {
-		{start: 240, end: 600, nVictims: 1, deep: true},
-		{start: 780, end: 1140, nVictims: 1, deep: true},
-		{start: 1200, end: 1350, nVictims: 1, deep: false},
-		{start: 1410, end: 1560, nVictims: 1, deep: false},
+		{start: 240, end: 430, deep: true},
+		{start: 540, end: 730, deep: true},
+		{start: 840, end: 1030, deep: true},
+		{start: 1090, end: 1240, deep: false},
+		{start: 1300, end: 1450, deep: false},
 	},
 }
 
@@ -66,7 +70,9 @@ var profiles = map[string][]struct {
 const chaosMarginSeconds = 300
 
 // resolve builds the schedule. eligible are participant indices that may
-// be isolated (protected nodes already removed), in rotation order.
+// be isolated (protected nodes already removed), in rotation order;
+// eligible[0] is the stake-heavy deep victim by convention (the migration
+// args files put the 256-validator participant first after the bootnode).
 func resolve(profile string, genesis, forkTime time.Time, eligible []int) (schedule, error) {
 	windows, ok := profiles[profile]
 	if !ok {
@@ -82,6 +88,13 @@ func resolve(profile string, genesis, forkTime time.Time, eligible []int) (sched
 		rotation = 0
 		lastEnd  time.Time
 	)
+	// Shorts rotate over the light nodes so the heavy victim's windows
+	// stay the only finality-stalling ones; with a single eligible node
+	// everything lands on it.
+	lights := eligible
+	if len(eligible) > 1 {
+		lights = eligible[1:]
+	}
 	for i, w := range windows {
 		o := op{
 			name:  fmt.Sprintf("mig-%s-%d", profile, i+1),
@@ -89,8 +102,10 @@ func resolve(profile string, genesis, forkTime time.Time, eligible []int) (sched
 			end:   genesis.Add(time.Duration(w.end) * time.Second),
 			deep:  w.deep,
 		}
-		for range w.nVictims {
-			o.victims = append(o.victims, eligible[rotation%len(eligible)])
+		if w.deep {
+			o.victims = []int{eligible[0]}
+		} else {
+			o.victims = []int{lights[rotation%len(lights)]}
 			rotation++
 		}
 		// Admission: an op still open after the deadline is refused

@@ -9,10 +9,11 @@ import (
 	"github.com/CPerezz/pbt-devnet/internal/migmon"
 )
 
-// The plan's worked example rebased onto the healable windows: genesis=
-// 1000000, T=1002400 (a 40-minute offset), deadline T-300=1002100. Every
-// window ends by +1560 < +2100, so everything is admitted and the forced
-// heal fires at the last end. Victims rotate 2,3,4,2.
+// The worked example on the stake-weighted schedule: genesis=1000000,
+// T=1002400, deadline T-300=1002100. Deeps pin the heavy victim
+// (eligible[0]=2); shorts rotate over the light nodes 3,4. Every window
+// ends by +1450 < +2100, so everything is admitted and the forced heal
+// fires at the last end.
 func TestResolveR3(t *testing.T) {
 	s, err := resolve("r3", time.Unix(1000000, 0), time.Unix(1002400, 0), []int{2, 3, 4})
 	if err != nil {
@@ -23,10 +24,14 @@ func TestResolveR3(t *testing.T) {
 		victims    []int
 		deep       bool
 	}{
-		{1000240, 1000600, []int{2}, true},
-		{1000780, 1001140, []int{3}, true},
-		{1001200, 1001350, []int{4}, false},
-		{1001410, 1001560, []int{2}, false},
+		{1000240, 1000430, []int{2}, true},
+		{1000540, 1000730, []int{2}, true},
+		{1000840, 1001030, []int{2}, true},
+		{1001090, 1001240, []int{3}, false},
+		{1001300, 1001450, []int{4}, false},
+	}
+	if len(s.ops) != len(want) {
+		t.Fatalf("ops = %d, want %d", len(s.ops), len(want))
 	}
 	for i, w := range want {
 		o := s.ops[i]
@@ -37,17 +42,12 @@ func TestResolveR3(t *testing.T) {
 			t.Fatalf("op %d = [%d,%d] deep=%v, want [%d,%d] deep=%v",
 				i, o.start.Unix(), o.end.Unix(), o.deep, w.start, w.end, w.deep)
 		}
-		if len(o.victims) != len(w.victims) {
-			t.Fatalf("op %d victims %v, want %v", i, o.victims, w.victims)
-		}
-		for j := range w.victims {
-			if o.victims[j] != w.victims[j] {
-				t.Fatalf("op %d victims %v, want %v (rotation broke)", i, o.victims, w.victims)
-			}
+		if len(o.victims) != 1 || o.victims[0] != w.victims[0] {
+			t.Fatalf("op %d victims %v, want %v (heavy pin or rotation broke)", i, o.victims, w.victims)
 		}
 	}
-	if s.healAll.Unix() != 1001560 {
-		t.Fatalf("healAll = %d, want last end 1001560", s.healAll.Unix())
+	if s.healAll.Unix() != 1001450 {
+		t.Fatalf("healAll = %d, want last end 1001450", s.healAll.Unix())
 	}
 	if s.quiet.Unix() != 1002100 {
 		t.Fatalf("quiet = %d, want T-300 = 1002100", s.quiet.Unix())
@@ -55,24 +55,27 @@ func TestResolveR3(t *testing.T) {
 }
 
 // A fork too close for some windows: the crossing ops must be refused
-// whole, never compressed, while an op that still fits stays admitted;
-// the forced heal tracks the last ADMITTED end.
+// whole, never compressed, while ops that still fit stay admitted; the
+// forced heal tracks the last ADMITTED end.
 func TestAdmissionRefusesCrossingOps(t *testing.T) {
-	// T-300 = genesis+900: deep1 ends +600 and fits; everything after must go.
+	// T-300 = genesis+900: deep1 (+430) and deep2 (+730) fit; deep3
+	// (+1030) and both shorts must go.
 	s, err := resolve("r3", time.Unix(1000000, 0), time.Unix(1001200, 0), []int{2, 3})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.ops[0].refused != "" {
-		t.Fatalf("deep1 refused though it ends at +600, before the +900 deadline: %s", s.ops[0].refused)
-	}
-	for i, o := range s.ops[1:] {
-		if o.refused == "" {
-			t.Fatalf("op %d admitted; it ends at %d, after deadline %d", i+1, o.end.Unix(), 1000900)
+	for i, o := range s.ops[:2] {
+		if o.refused != "" {
+			t.Fatalf("op %d refused though it ends before the +900 deadline: %s", i, o.refused)
 		}
 	}
-	if s.healAll.Unix() != 1000600 {
-		t.Fatalf("healAll = %d, want last admitted end 1000600", s.healAll.Unix())
+	for i, o := range s.ops[2:] {
+		if o.refused == "" {
+			t.Fatalf("op %d admitted; it ends at %d, after deadline %d", i+2, o.end.Unix(), 1000900)
+		}
+	}
+	if s.healAll.Unix() != 1000730 {
+		t.Fatalf("healAll = %d, want last admitted end 1000730", s.healAll.Unix())
 	}
 }
 
@@ -119,7 +122,7 @@ func TestEmitPlanShape(t *testing.T) {
 		}
 		kinds = append(kinds, ev.Kind)
 	}
-	want := []string{"isolate", "isolate", "isolate", "isolate", "heal", "pause"}
+	want := []string{"isolate", "isolate", "isolate", "isolate", "isolate", "heal", "pause"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds = %v, want %v", kinds, want)
 	}
