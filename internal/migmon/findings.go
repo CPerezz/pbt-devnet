@@ -1,0 +1,47 @@
+package migmon
+
+// Finding identifiers and thresholds shared by the monitor (emitter) and
+// verify-migration (consumer). The prose contract lives in the M1 plan;
+// numbers here are the plan's, not tunables.
+const (
+	// F1: two nodes report different non-null shadow roots for the SAME
+	// block hash. CRITICAL, never waived - not by chaos windows, not by
+	// phase.
+	FindingRootMismatch = "F1"
+
+	// F2: a direction reports stalled/error (immediate), or its cursor is
+	// frozen while the node's head advances (slow-burn form below).
+	FindingStall = "F2"
+
+	// F3: boundary misbehaviour - the binary direction must park and the
+	// merkle direction must start following within BoundaryPolls polls or
+	// BoundaryBlocks blocks of the first header with time >= T; "done"
+	// must come strictly after b*.
+	FindingBoundary = "F3"
+
+	// Persistent-null sampling findings: a node keeps answering null for
+	// sampled shadow roots while claiming following|synced.
+	FindingNullWarn     = "NULL5"  // after NullWarnAfter
+	FindingNullCritical = "NULL10" // after NullCriticalAfter
+)
+
+const (
+	// StallPolls x head advance: cursor frozen for >= StallPolls polls
+	// while the head advanced >= StallHeadDelta blocks -> CRITICAL.
+	// Suspended while the direction is idle.
+	StallPolls     = 20
+	StallHeadDelta = 10
+
+	// Boundary windows for F3.
+	BoundaryPolls  = 2
+	BoundaryBlocks = 3
+
+	// Random-depth sampling: one probe per minute, uniform depth in
+	// [SampleDepthMin, SampleDepthMax] behind the head.
+	SampleDepthMin = 3
+	SampleDepthMax = 16
+
+	// Persistent-null escalation while following|synced.
+	NullWarnAfterMinutes     = 5
+	NullCriticalAfterMinutes = 10
+)
