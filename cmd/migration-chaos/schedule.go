@@ -34,10 +34,17 @@ type schedule struct {
 	quiet   time.Time // T-300: after this, nothing but SIGTERM matters
 }
 
-// profileWindows are genesis-relative offsets in seconds. The r3 numbers
-// are the plan's: deep-first so the randao dice get two full 12-minute
-// tries at depth >= 10, then a paired short island that books the two
-// remaining healed-isolation counts inside one window.
+// profileWindows are genesis-relative offsets in seconds. The r3 deep
+// windows are 6 minutes, not the plan's original 12: R3's first lap proved
+// a 12-minute isolation at 6s slots does not self-heal - the majority
+// finalizes mid-split, the victim's CL peering strands (the legacy devnet
+// grew `make repeer` for exactly this), and the heal reorg lands at
+// geth's engine-API max reorg depth of 32. Sixty slots keep the victim's
+// branch around 15 blocks (depth >= 10 at p~95% per try, ~99.8% across
+// both deeps) while healing the way S3 proved 3-minute windows do. The
+// two shorts are sequential single victims: a 2v2 island is an LMD-GHOST
+// tie whose heal direction is a coin flip, and C3 wants the VICTIM to be
+// the one that reorgs.
 var profiles = map[string][]struct {
 	start, end int
 	nVictims   int
@@ -47,9 +54,10 @@ var profiles = map[string][]struct {
 		{start: 360, end: 540, nVictims: 1, deep: false},
 	},
 	"r3": {
-		{start: 240, end: 960, nVictims: 1, deep: true},
-		{start: 1140, end: 1860, nVictims: 1, deep: true},
-		{start: 1890, end: 2040, nVictims: 2, deep: false},
+		{start: 240, end: 600, nVictims: 1, deep: true},
+		{start: 780, end: 1140, nVictims: 1, deep: true},
+		{start: 1200, end: 1350, nVictims: 1, deep: false},
+		{start: 1410, end: 1560, nVictims: 1, deep: false},
 	},
 }
 
