@@ -177,7 +177,7 @@ func run(log *migmon.Log, d *disruptoor.Client, s schedule, participants int) {
 		if err := d.Clear(); err != nil {
 			log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "forced heal failed: " + err.Error()})
 		} else {
-			log.Emit(migmon.Event{Kind: migmon.EvHeal, Detail: "forced heal-all (T-300 backstop)"})
+			log.Emit(migmon.Event{Kind: migmon.EvHeal, Detail: "forced heal-all (schedule backstop)"})
 		}
 	} else {
 		return
