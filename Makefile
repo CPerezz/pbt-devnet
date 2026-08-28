@@ -11,9 +11,13 @@ DEPTH   ?= 10
 # Empty means "next node in pbtchaos's rotation", which is what spreads reorgs across
 # both client types.
 MINORITY ?=
+PINS     ?= verify/pins.yaml
+# No default: a per-run unix time with no sane guess. See `make verify-migration`.
+BINARY_TRIE_TIME ?=
+LOGS_DIR ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help up down logs sources build besu besu-image bin genesis check
+.PHONY: help up down logs sources build besu besu-image bin genesis check verify-migration
 
 help:
 	@echo "pbt-devnet — a differential test harness for EIP-8297 execution clients"
@@ -97,6 +101,26 @@ bin: ## build every command as a host binary into bin/
 	@mkdir -p bin
 	go build -o bin/ ./cmd/...
 	@echo "==> $$(ls bin | tr '\n' ' ')"
+
+# Reads --el name=url straight from the running enclave (same el- prefix and
+# `kurtosis port print` lookup scripts/pbt.py itself uses), so this needs no new
+# plumbing in that script. LOGS_DIR and BINARY_TRIE_TIME have no sane default —
+# LOGS_DIR is where kurtosis logs are dumped and BINARY_TRIE_TIME is a per-run
+# value printed by main.star as "migration fork: binaryTrieTime=..." — so both
+# are required explicitly rather than guessed.
+verify-migration: bin ## verify a migration run (required: LOGS_DIR=dir BINARY_TRIE_TIME=unix; reads --el/--pins from ENCLAVE=$(ENCLAVE)/PINS=$(PINS))
+	@test -n "$(LOGS_DIR)" || { echo "LOGS_DIR=<dir> is required (verify-migration writes/reads migration-monitor and migration-chaos logs there)"; exit 1; }
+	@test -n "$(BINARY_TRIE_TIME)" || { echo "BINARY_TRIE_TIME=<unix> is required — see main.star's 'migration fork: binaryTrieTime=...' plan output"; exit 1; }
+	@mkdir -p $(LOGS_DIR)
+	kurtosis service logs $(ENCLAVE) migration-monitor -a > $(LOGS_DIR)/migration-monitor.jsonl 2>/dev/null || true
+	kurtosis service logs $(ENCLAVE) migration-chaos -a > $(LOGS_DIR)/migration-chaos.jsonl 2>/dev/null || true
+	@els="$$(cd scripts && python3 -c "import pbt; print(' '.join('--el ' + n + '=' + pbt.url('$(ENCLAVE)', n, 'rpc') for n in pbt.services('$(ENCLAVE)', 'el-')))")"; \
+	bin/verify-migration $$els \
+	  --monitor-jsonl $(LOGS_DIR)/migration-monitor.jsonl \
+	  --chaos-jsonl $(LOGS_DIR)/migration-chaos.jsonl \
+	  --logs-dir $(LOGS_DIR) \
+	  --pins $(PINS) \
+	  --binary-trie-time $(BINARY_TRIE_TIME)
 
 genesis: ## regenerate genesis/genesis.json and print its root (for single-client debugging)
 	@mkdir -p bin

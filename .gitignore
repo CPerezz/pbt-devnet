@@ -9,3 +9,7 @@
 /gengenesis/gengenesis
 /bin/
 __pycache__/
+/migration-monitor
+/migration-chaos
+/verify-migration
+/migration-gate
