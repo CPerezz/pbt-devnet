@@ -74,11 +74,49 @@ build_from() {
   echo
 }
 
+# IMAGES selects which images to build (comma list). Default = everything,
+# which preserves the canonical `make build` semantics; a scoped invocation
+# like IMAGES=geth,egg,tools skips the rest — the migration devnet needs no
+# erigon or besu, and a broken checkout for an unrequested image must not
+# block the ones that matter.
+IMAGES="${IMAGES:-geth,erigon,egg,tools}"
+want() {
+  case ",$IMAGES," in
+  *",$1,"*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+if want geth; then
 require_capability "geth (EIP-8297)" "$GETH_SRC" 'json:"binaryTrieTime' "params/config.go" \
   "fix: git -C $GETH_SRC checkout pbt"
-build_from "geth (EIP-8297)" "pbt-geth:local" "$GETH_SRC" \
+# The migration needs more than the fork key. Both of these have failure
+# shapes that look like success if built from the wrong branch: without the
+# bintrie tooling the shim's prep would fail at first boot, and without the
+# open-mode work a future binaryTrieTime silently runs the tree from genesis.
+require_capability "geth (EIP-8347 tooling)" "$GETH_SRC" 'bintrieImportCommand' "cmd/geth/bintrie_import.go" \
+  "fix: git -C $GETH_SRC checkout pbt"
+# The needles are load-bearing symbols on the current pbt tip (the
+# online state-migration merge): the follower is what maintains the shadow tree,
+# and the window knob is the switchover's closing condition. A tree carrying
+# only the tooling would convert and import but never follow.
+require_capability "geth (EIP-8347 follower)" "$GETH_SRC" 'newBintrieFollower' "core/bintrie_follower.go" \
+  "fix: git -C $GETH_SRC checkout pbt (needs the online state-migration merge)"
+require_capability "geth (migration window)" "$GETH_SRC" 'MigrationWindowBlocks' "core/blockchain.go" \
+  "fix: git -C $GETH_SRC checkout pbt (needs the online state-migration merge)"
+# Two-stage: the fork's own Dockerfile builds the binary under a staging tag,
+# then a thin overlay installs the migration shim at the exact name the
+# launcher invokes (see scripts/geth-shim.sh). The overlay must never build
+# FROM pbt-geth:local itself — a self-referencing base would shim the shim on
+# the next rebuild.
+build_from "geth (EIP-8297)" "pbt-geth-binary:local" "$GETH_SRC" \
   "clone CPerezz/go-ethereum at branch pbt, or set PBT_GETH_SRC"
+echo "==> geth migration shim -> pbt-geth:local"
+docker build --platform "$PLATFORM" -t pbt-geth:local -f "$ROOT/scripts/geth-shim.Dockerfile" "$ROOT/scripts"
+echo
+fi
 
+if want erigon; then
 # The needle is the genesis path, not the config key: a tree that only PARSES binaryTrieTime
 # still needs COMMITMENT_BIN to turn the tree on, and this package no longer passes it, so
 # such a checkout would refuse to start rather than build a wrong chain. Failing here says
@@ -87,20 +125,25 @@ require_capability "erigon (EIP-8297)" "$ERIGON_SRC" 'ResolveErigonDBSettingsFor
   "execution/state/genesiswrite/genesis_write.go" "fix: git -C $ERIGON_SRC checkout binary-trie && git -C $ERIGON_SRC pull"
 build_from "erigon (EIP-8297)" "erigon-pbt:local" "$ERIGON_SRC" \
   "clone erigontech/erigon at branch binary-trie, or set PBT_ERIGON_SRC"
+fi
 
+if want egg; then
 require_capability "genesis generator" "$EGG_SRC" '"binaryTrieTime":' "apps/el-gen/generate_genesis.sh" \
   "fix: git -C $EGG_SRC checkout pbt"
 build_from "genesis generator" "pbt-egg:local" "$EGG_SRC" \
   "clone CPerezz/ethereum-genesis-generator at branch pbt, or set PBT_EGG_SRC"
+fi
 
 # Our three services come out of one Dockerfile and one module; only the command differs.
 build_cmd() {
   echo "==> $1"
   docker build --platform "$PLATFORM" --build-arg "CMD=$2" -t "$1" "$ROOT"
 }
-build_cmd pbt-monitor:local pbtmonitor
-build_cmd pbt-hammer:local  pbthammer
-build_cmd pbt-chaos:local   pbtchaos
+if want tools; then
+  build_cmd pbt-monitor:local pbtmonitor
+  build_cmd pbt-hammer:local  pbthammer
+  build_cmd pbt-chaos:local   pbtchaos
+fi
 
 echo
 if docker image inspect besu-pbt:local >/dev/null 2>&1; then
