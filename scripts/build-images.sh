@@ -143,6 +143,8 @@ if want tools; then
   build_cmd pbt-monitor:local pbtmonitor
   build_cmd pbt-hammer:local  pbthammer
   build_cmd pbt-chaos:local   pbtchaos
+  build_cmd pbt-migration-monitor:local migration-monitor
+  build_cmd pbt-migration-chaos:local   migration-chaos
 fi
 
 echo
