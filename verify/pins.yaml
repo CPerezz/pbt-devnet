@@ -1,0 +1,20 @@
+# Genesis pins for the migration devnet (verify-migration check C7).
+#
+# Only the STATE ROOT is pinned. kurtosis renders a fresh genesis timestamp
+# every run, so the genesis HASH is per-run by design (measured: same
+# alloc, same state root 0x1a20cc..., different hash). The alloc is the
+# invariant worth defending; verify-migration asserts genesis_hash only if
+# the key is present.
+#
+# Captured from the first kurtosis-rendered genesis (2026-08-27, one-node
+# run) and reconfirmed byte-identical on a four-node run. A standalone run
+# of the genesis-generator image uses its default mnemonics and validator
+# counts - a different alloc, deliberately not pinned here.
+#
+# Cross-reference: the go-ethereum fork's genesis-pin test
+# (TestPBTGenesisPins) proves one binary computes both tree kinds from one
+# alloc. The binary shadow root of this same alloc was
+# 0x9a6634dc9accca4cfa178102d51a2a16d3178c60a23c54ce249afd5c9d5cde19 at
+# capture time (recorded for eyes, not asserted - it lives in the
+# follower, not the header).
+genesis_state_root: 0x1a20cc79adfff868e3e70a9dd9578806b5f6a9a818765588c20a0f53b642b1a1
