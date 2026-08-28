@@ -13,6 +13,20 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Arguments name the sources this run REQUIRES: a required source that is
+# missing, broken or uncloneable stops the run; every other source is
+# attempted and skipped with a warning. No arguments requires nothing —
+# `make build` keeps cloning what it can, while a broken checkout for an
+# image you are not building stays someone else's problem (IMAGES in
+# build-images.sh is the other half of this).
+REQUIRED=" $* "
+is_required() {
+  case "$REQUIRED" in
+  *" $1 "*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
 ensure() {
   local name=$1 url=$2 branch=$3 dir=$4 var=$5
   # -d "$dir/.git" rejects linked worktrees, where .git is a file. Compare --show-toplevel
@@ -26,10 +40,17 @@ ensure() {
     if [[ -e "$dir" ]]; then
       echo "!! $name: $dir exists but is not a git checkout" >&2
       echo "   move it aside, or point $var somewhere else" >&2
-      return 1
+      is_required "$name" && return 1
+      echo "   skipping — $name was not required for this run" >&2
+      return 0
     fi
     echo "==> $name: cloning $branch from $url"
-    git clone --branch "$branch" "$url" "$dir"
+    if ! git clone --branch "$branch" "$url" "$dir"; then
+      echo "!! $name: clone failed" >&2
+      is_required "$name" && return 1
+      echo "   skipping — $name was not required for this run" >&2
+      return 0
+    fi
     return 0
   fi
 
