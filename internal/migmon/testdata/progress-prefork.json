@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"result":{"Phase":"running","Binary":{"Phase":"synced","Cursor":0,"CursorHash":"0x660cbc6119878b18846273a6e55c87f34acc1e443205c87a929828bfa2242905","ShadowRoot":"0xcf280cc8e4098fd7a334382b9d866fb569ea6ec469885f1e5831f4ca5738e565","Error":""},"Merkle":null}}
