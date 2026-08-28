@@ -116,3 +116,34 @@ minority's RPC only, holds for `DEPTH` blocks, heals, and verifies.
 was their only writer, and stay when a surviving account still holds them — lifted from unit test
 to six live clients.
 
+## The migration
+
+Everything above runs the tree **from genesis**. The `args/migration*.yaml` profiles test the
+other half of the story — [EIP-8347](https://eips.ethereum.org/EIPS/eip-8347)'s live switch: the
+chain STARTS on the merkle-patricia trie with `binaryTrieTime` scheduled in the future, every geth
+converts and imports a binary snapshot of the (empty) starting state at first boot, a follower
+builds the binary tree in the background while spamoor loads the chain, and at the fork the header
+root swaps — after which a reverse direction shadows the merkle side until finality closes the
+window and the node reports the migration done.
+
+```
+kurtosis run . --enclave pbt --args-file args/migration.yaml --privileged
+kurtosis service logs pbt migration-monitor -f     # phases, roots, findings as JSONL
+make verify-migration ENCLAVE=pbt LOGS_DIR=... BINARY_TRIE_TIME=...
+```
+
+| profile | shape | takes |
+|---|---|---|
+| `migration-smoke-fast` | 1 node, fork at ~block 40 | ~14 min |
+| `migration-smoke` | 1 node, fork at ~block 100 | ~20 min |
+| `migration-chaos-smoke` | 4 nodes, one 3-minute isolation, fork far away | ~15 min |
+| `migration-quiet` | 4 nodes, no chaos, full acceptance timeline | ~40 min |
+| `migration` | 4 nodes, full chaos schedule through the window | ~50 min |
+
+`migration-monitor` watches every client's migration progress and cross-checks shadow roots
+between nodes; `migration-chaos` drives partitions on a fixed, admission-gated schedule that
+refuses any window still open 300s before the fork; `verify-migration` judges a finished run
+and exits with the number of failed checks. Validator stake is deliberately uneven — the deep
+victim holds 40% so that isolating it stalls finality below the 2/3 threshold for the window;
+with uniform stake the majority finalizes past the victim and its consensus client is banned
+by the survivors, permanently (measured, not theorized).
