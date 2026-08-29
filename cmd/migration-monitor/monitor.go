@@ -225,11 +225,16 @@ func findBStar(ctx context.Context, n migmon.Client, lastBelowT *uint64, head ui
 }
 
 // splitGrace is how long the nodes may disagree about the canonical chain
-// at a sampled height before it counts as a fault. Every partition a
-// schedule holds is minutes shorter than this, and a healed partition
-// converges within seconds, so only a node that cannot rewind - the risk a
-// reorg spanning the activation carries - stays split this long.
-const splitGrace = 6 * time.Minute
+// at a sampled height before it counts as a fault.
+//
+// Sized from both ends by measurement. A node that genuinely cannot rejoin
+// stays split indefinitely: one was still on its own branch forty minutes
+// later. A node recovering from a deep reorg across the activation, on the
+// other hand, has to be given peers, fetch the branch it missed and
+// re-execute it through the format swap - a thirty-seven block rewind took
+// longer than six minutes to settle, and failing that run called a healthy
+// recovery a fault. Twelve minutes separates the two without ambiguity.
+const splitGrace = 12 * time.Minute
 
 // splitWatch times a cross-node canonical-chain disagreement.
 type splitWatch struct {
