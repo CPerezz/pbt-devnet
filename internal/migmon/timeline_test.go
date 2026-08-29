@@ -3,6 +3,7 @@ package migmon
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func hasFinding(evs []Event, kind, finding string) bool {
@@ -213,42 +214,103 @@ func TestBStarObservedOnce(t *testing.T) {
 	}
 }
 
-// F3 cross-node: agreement is silent, a number disagreement and a straddle
-// failure are each their own critical.
+// Cross-node fork-block checks: agreement is silent, a bad record shape is
+// critical at once, provisional disagreement is legal until it outlives any
+// partition, and finalized disagreement is critical immediately.
 func TestBStarQuorum(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	good := func(n uint64, hash string) BStar {
+		return BStar{Number: n, Hash: hash, Time: 1000, ParentTime: 990}
+	}
+
 	t.Run("agreement is silent", func(t *testing.T) {
 		q := NewBStarQuorum(999)
-		if evs := q.Add("a", BStar{Number: 100, Hash: "0xa", Time: 1000, ParentTime: 990}); len(evs) != 0 {
+		if evs := q.Observe("a", good(100, "0xa"), now); len(evs) != 0 {
 			t.Fatalf("first node must not fire, got %+v", evs)
 		}
-		evs := q.Add("b", BStar{Number: 100, Hash: "0xa", Time: 1000, ParentTime: 990})
-		if len(evs) != 0 {
-			t.Fatalf("agreeing straddled b* must not fire, got %+v", evs)
+		if evs := q.Observe("b", good(100, "0xa"), now); len(evs) != 0 {
+			t.Fatalf("agreeing nodes must not fire, got %+v", evs)
 		}
 	})
-	t.Run("number disagreement", func(t *testing.T) {
+
+	t.Run("provisional disagreement waits out the grace", func(t *testing.T) {
 		q := NewBStarQuorum(999)
-		q.Add("a", BStar{Number: 100, Hash: "0xa", Time: 1000, ParentTime: 990})
-		evs := q.Add("b", BStar{Number: 105, Hash: "0xb", Time: 1000, ParentTime: 990})
-		if !hasFinding(evs, EvCritical, FindingBoundary) || !strings.Contains(evs[0].Detail, "bstar-disagreement") {
-			t.Fatalf("want bstar-disagreement critical, got %+v", evs)
+		q.Observe("a", good(100, "0xa"), now)
+		// A partition spanning the activation puts each side on its own
+		// fork block: legal while it lasts.
+		if evs := q.Observe("b", good(105, "0xb"), now); len(evs) != 0 {
+			t.Fatalf("fresh disagreement must not fire, got %+v", evs)
 		}
-	})
-	t.Run("straddle failure", func(t *testing.T) {
-		q := NewBStarQuorum(999)
-		q.Add("a", BStar{Number: 100, Hash: "0xa", Time: 1000, ParentTime: 990})
-		evs := q.Add("b", BStar{Number: 100, Hash: "0xa", Time: 990, ParentTime: 980}) // time < T
+		mid := now.Add(BStarProvisionalGrace / 2 * time.Second)
+		if evs := q.Observe("b", good(105, "0xb"), mid); len(evs) != 0 {
+			t.Fatalf("disagreement inside the grace must not fire, got %+v", evs)
+		}
+		late := now.Add((BStarProvisionalGrace + 30) * time.Second)
+		evs := q.Observe("b", good(105, "0xb"), late)
 		if !hasFinding(evs, EvCritical, FindingBoundary) {
-			t.Fatalf("want straddle-failure critical, got %+v", evs)
+			t.Fatalf("disagreement outliving the grace must fire, got %+v", evs)
 		}
-		found := false
-		for _, e := range evs {
-			if e.Node == "b" && strings.Contains(e.Detail, "does not straddle") {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("want straddle failure attributed to node b, got %+v", evs)
+		if !strings.Contains(evs[0].Detail, "still disagree") {
+			t.Fatalf("evidence %q does not name the persistence", evs[0].Detail)
 		}
 	})
+
+	t.Run("agreement after a reorg clears the timer", func(t *testing.T) {
+		q := NewBStarQuorum(999)
+		q.Observe("a", good(100, "0xa"), now)
+		q.Observe("b", good(105, "0xb"), now)
+		// The losing branch is reorged away and both land on the same
+		// fork block: the earlier disagreement must not be held against
+		// them later.
+		q.Observe("b", good(100, "0xa"), now.Add(60*time.Second))
+		late := now.Add((BStarProvisionalGrace + 60) * time.Second)
+		if evs := q.Observe("a", good(100, "0xa"), late); len(evs) != 0 {
+			t.Fatalf("converged nodes must not fire later, got %+v", evs)
+		}
+	})
+
+	t.Run("finalized disagreement fires at once", func(t *testing.T) {
+		q := NewBStarQuorum(999)
+		q.Observe("a", good(100, "0xa"), now)
+		q.Observe("b", good(105, "0xb"), now)
+		q.Finalize("a", good(100, "0xa"))
+		evs := q.Finalize("b", good(105, "0xb"))
+		if !hasFinding(evs, EvCritical, FindingBoundary) {
+			t.Fatalf("finalized disagreement must fire immediately, got %+v", evs)
+		}
+		if !strings.Contains(evs[0].Detail, "finalized fork blocks differ") {
+			t.Fatalf("evidence %q does not name finality", evs[0].Detail)
+		}
+	})
+
+	t.Run("record shape is critical at once", func(t *testing.T) {
+		q := NewBStarQuorum(999)
+		// time < T: this node did not find the boundary at all.
+		evs := q.Observe("a", BStar{Number: 100, Hash: "0xa", Time: 990, ParentTime: 980}, now)
+		if !hasFinding(evs, EvCritical, FindingBoundary) || !strings.Contains(evs[0].Detail, "does not straddle") {
+			t.Fatalf("want a shape critical, got %+v", evs)
+		}
+	})
+}
+
+// A reorg that orphans the recorded fork block must re-arm the boundary
+// check rather than leave the node pinned to a block nobody has.
+func TestBStarReorged(t *testing.T) {
+	tl := NewTimeline("n", 1000)
+	tl.ObserveBStar(BStar{Number: 100, Hash: "0xold", Time: 1000, ParentTime: 990})
+	evs := tl.BStarReorged("0xnew")
+	if len(evs) != 1 || evs[0].Kind != EvBStarReorged {
+		t.Fatalf("want one bstar-reorged event, got %+v", evs)
+	}
+	if tl.BStarRecord() != nil {
+		t.Fatal("the orphaned record survived; the node would keep judging a boundary nobody has")
+	}
+	if evs := tl.ObserveBStar(BStar{Number: 103, Hash: "0xnew", Time: 1000, ParentTime: 990}); len(evs) != 1 {
+		t.Fatalf("the node could not record its new fork block, got %+v", evs)
+	}
+	// Once finalized, a reorg claim is refused: finality means it cannot move.
+	tl.BStarFinalized()
+	if evs := tl.BStarReorged("0xlater"); len(evs) != 0 {
+		t.Fatalf("a finalized fork block accepted a reorg, got %+v", evs)
+	}
 }

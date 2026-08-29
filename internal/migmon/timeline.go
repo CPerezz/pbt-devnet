@@ -1,6 +1,9 @@
 package migmon
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // BStar is one node's record of b*: the first canonical block whose header
 // timestamp is >= T. ParentTime is carried so the quorum check can prove the
@@ -21,6 +24,9 @@ type Timeline struct {
 
 	polls int
 	bstar *BStar
+	// bstarFinal records that the fork block has finalized, after which a
+	// reorg can no longer move it.
+	bstarFinal bool
 	// bstarPolls counts ObservePoll calls since b* was recorded; the F3
 	// window is measured in these plus blocks past b*.
 	bstarPolls  int
@@ -51,8 +57,8 @@ func NewTimeline(node string, binaryTrieTime uint64) *Timeline {
 // BStarRecord returns the recorded b*, or nil before one is observed.
 func (tl *Timeline) BStarRecord() *BStar { return tl.bstar }
 
-// ObserveBStar records the node's b* once and emits the bstar event.
-// Repeats are ignored: b* is a fact, not a stream.
+// ObserveBStar records the node's fork block and emits its event. A record
+// already held is kept: use BStarReorged first if a reorg orphaned it.
 func (tl *Timeline) ObserveBStar(b BStar) []Event {
 	if tl.bstar != nil {
 		return nil
@@ -61,6 +67,42 @@ func (tl *Timeline) ObserveBStar(b BStar) []Event {
 	tl.bstarPolls = 0
 	return []Event{{Kind: EvBStar, Node: tl.node, Number: b.Number, Hash: b.Hash}}
 }
+
+// BStarReorged drops a recorded fork block that a reorg has orphaned and
+// re-arms the boundary check against the new canonical chain. Until the
+// fork block finalizes it is provisional: a partition spanning the
+// activation has each side cross it on its own block, and the branch that
+// loses takes its boundary with it.
+func (tl *Timeline) BStarReorged(nowCanonical string) []Event {
+	if tl.bstar == nil || tl.bstarFinal {
+		return nil
+	}
+	old := *tl.bstar
+	tl.bstar = nil
+	tl.bstarPolls = 0
+	tl.boundaryOK = false
+	tl.boundaryHit = false
+	return []Event{{
+		Kind: EvBStarReorged, Node: tl.node, Number: old.Number, Hash: nowCanonical,
+		Detail: fmt.Sprintf("fork block %d %s was orphaned; height %d now holds %s",
+			old.Number, old.Hash, old.Number, nowCanonical),
+	}}
+}
+
+// BStarFinalized marks the recorded fork block as settled, once.
+func (tl *Timeline) BStarFinalized() []Event {
+	if tl.bstar == nil || tl.bstarFinal {
+		return nil
+	}
+	tl.bstarFinal = true
+	return []Event{{
+		Kind: EvBStarFinal, Node: tl.node, Number: tl.bstar.Number, Hash: tl.bstar.Hash,
+		Detail: "fork block finalized",
+	}}
+}
+
+// BStarIsFinal reports whether the fork block has finalized.
+func (tl *Timeline) BStarIsFinal() bool { return tl.bstarFinal }
 
 // ObservePoll ingests one poll's decoded progress and head, returning any
 // findings it triggers. Call ObserveBStar first on the tick that crosses T so
@@ -170,54 +212,117 @@ func (s *dirState) observe(node, dir string, d *DirectionProgress, head uint64) 
 	return evs
 }
 
-// BStarQuorum cross-checks b* records across nodes. Once two nodes have one,
-// their numbers must agree and each record's header times must straddle T
-// (time >= T, parent < T); anything else is a boundary the nodes do not agree
-// on, which is critical F3.
+// BStarQuorum cross-checks fork-block records across nodes. Two things are
+// checked, and they are not equally urgent.
+//
+// A record's own shape is structural: its header time must be at or past
+// the activation and its parent's below it, or the node did not find the
+// boundary at all. That is critical the moment it is seen.
+//
+// Agreement BETWEEN nodes is provisional until the fork block finalizes. A
+// partition spanning the activation puts each side on its own fork block by
+// design - that is the behaviour under test, not a fault - so provisional
+// disagreement is only critical once it outlives any window a schedule
+// holds. Finalized disagreement is critical immediately: finality means the
+// losing branch cannot come back, so two nodes that finalized different
+// fork blocks have permanently different chains.
 type BStarQuorum struct {
-	T         uint64
-	ref       string
-	seen      map[string]BStar
-	straddled map[string]bool
+	T uint64
+
+	provisional map[string]BStar
+	final       map[string]BStar
+	shaped      map[string]bool
+
+	disagreeSince time.Time
+	disagreeFired bool
 }
 
 func NewBStarQuorum(t uint64) *BStarQuorum {
-	return &BStarQuorum{T: t, seen: make(map[string]BStar), straddled: make(map[string]bool)}
+	return &BStarQuorum{
+		T:           t,
+		provisional: make(map[string]BStar),
+		final:       make(map[string]BStar),
+		shaped:      make(map[string]bool),
+	}
 }
 
-// Add records one node's b* and returns any cross-check findings. Each node
-// is straddle-checked exactly once, after quorum (>= 2 records) is reached.
-func (q *BStarQuorum) Add(node string, b BStar) []Event {
-	if _, ok := q.seen[node]; ok {
-		return nil
-	}
-	q.seen[node] = b
-	if len(q.seen) == 1 {
-		q.ref = node
-		return nil
-	}
+// Observe records a node's current fork block, replacing any earlier one -
+// a reorg can move it - and returns findings.
+func (q *BStarQuorum) Observe(node string, b BStar, now time.Time) []Event {
+	q.provisional[node] = b
+	evs := q.checkShape(node, b)
+	return append(evs, q.checkProvisional(now)...)
+}
 
+// Finalize records that a node's fork block has settled.
+func (q *BStarQuorum) Finalize(node string, b BStar) []Event {
+	if _, ok := q.final[node]; ok {
+		return nil
+	}
+	q.final[node] = b
 	var evs []Event
-	if ref := q.seen[q.ref]; b.Number != ref.Number {
+	for other, rec := range q.final {
+		if other == node || rec.Number == b.Number && rec.Hash == b.Hash {
+			continue
+		}
 		evs = append(evs, Event{
 			Kind: EvCritical, Node: node, Finding: FindingBoundary, Number: b.Number,
-			Detail: fmt.Sprintf("bstar-disagreement: %s says b*=%d (%s), %s says b*=%d (%s)",
-				node, b.Number, b.Hash, q.ref, ref.Number, ref.Hash),
-		})
-	}
-	for n, rec := range q.seen {
-		if q.straddled[n] {
-			continue
-		}
-		q.straddled[n] = true
-		if rec.Time >= q.T && rec.ParentTime < q.T {
-			continue
-		}
-		evs = append(evs, Event{
-			Kind: EvCritical, Node: n, Finding: FindingBoundary, Number: rec.Number,
-			Detail: fmt.Sprintf("bstar-disagreement: %s b* %d does not straddle T=%d (time %d, parent %d)",
-				n, rec.Number, q.T, rec.Time, rec.ParentTime),
+			Detail: fmt.Sprintf("finalized fork blocks differ: %s has %d (%s), %s has %d (%s)",
+				node, b.Number, b.Hash, other, rec.Number, rec.Hash),
 		})
 	}
 	return evs
+}
+
+// checkShape validates one record against the activation time, once.
+func (q *BStarQuorum) checkShape(node string, b BStar) []Event {
+	if q.shaped[node] {
+		return nil
+	}
+	q.shaped[node] = true
+	if b.Time >= q.T && b.ParentTime < q.T {
+		return nil
+	}
+	return []Event{{
+		Kind: EvCritical, Node: node, Finding: FindingBoundary, Number: b.Number,
+		Detail: fmt.Sprintf("fork block %d does not straddle the activation %d (time %d, parent %d)",
+			b.Number, q.T, b.Time, b.ParentTime),
+	}}
+}
+
+// checkProvisional times how long the nodes have disagreed and fires once
+// the disagreement has lasted longer than any partition could explain.
+func (q *BStarQuorum) checkProvisional(now time.Time) []Event {
+	if len(q.provisional) < 2 {
+		return nil
+	}
+	var ref *BStar
+	var refNode string
+	agreed := true
+	for node, rec := range q.provisional {
+		if ref == nil {
+			r := rec
+			ref, refNode = &r, node
+			continue
+		}
+		if rec.Number != ref.Number || rec.Hash != ref.Hash {
+			agreed = false
+			if q.disagreeSince.IsZero() {
+				q.disagreeSince = now
+			}
+			if !q.disagreeFired && now.Sub(q.disagreeSince) > BStarProvisionalGrace*time.Second {
+				q.disagreeFired = true
+				return []Event{{
+					Kind: EvCritical, Node: node, Finding: FindingBoundary, Number: rec.Number,
+					Detail: fmt.Sprintf("fork blocks still disagree after %.0fs, longer than any partition holds: %s has %d (%s), %s has %d (%s)",
+						now.Sub(q.disagreeSince).Seconds(), node, rec.Number, rec.Hash, refNode, ref.Number, ref.Hash),
+				}}
+			}
+			break
+		}
+	}
+	if agreed {
+		q.disagreeSince = time.Time{}
+	}
+	return nil
 }

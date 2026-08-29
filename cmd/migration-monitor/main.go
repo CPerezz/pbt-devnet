@@ -65,6 +65,7 @@ func main() {
 	}
 	jsonl := migmon.NewLog(w)
 	quorum := migmon.NewBStarQuorum(binaryTrieT)
+	split := &splitWatch{}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -90,7 +91,7 @@ func main() {
 		case <-pollTick.C:
 			doPoll()
 		case <-sampleTick.C:
-			sampleOnce(ctx, jsonl, states)
+			sampleOnce(ctx, jsonl, states, split)
 		}
 	}
 }
