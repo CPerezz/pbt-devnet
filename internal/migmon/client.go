@@ -41,7 +41,12 @@ type Header struct {
 // gate's done-detection, the verifier's expectations - works unchanged.
 type Client interface {
 	Name() string
-	// Introspection. May return ErrNoIntrospection.
+	// Introspects reports whether this client can answer migration
+	// progress at all. It is part of the interface rather than inferred
+	// from a concrete type so that every caller - and every test double -
+	// states the capability instead of guessing it.
+	Introspects() bool
+	// Introspection. Returns ErrNoIntrospection when Introspects is false.
 	Progress(ctx context.Context) (json.RawMessage, error)
 	ShadowRoot(ctx context.Context, hash string) (string, error)
 	// Standard RPC, answered by every client.
@@ -77,14 +82,13 @@ func NewClient(service, url string) Client {
 }
 
 // HasIntrospection reports whether a client can answer migration progress.
-func HasIntrospection(c Client) bool {
-	_, ok := c.(noIntrospection)
-	return !ok
-}
+func HasIntrospection(c Client) bool { return c.Introspects() }
 
 // noIntrospection wraps a standard-RPC client for an implementation whose
 // migration state is not reachable over RPC.
 type noIntrospection struct{ Client }
+
+func (n noIntrospection) Introspects() bool { return false }
 
 func (n noIntrospection) Progress(context.Context) (json.RawMessage, error) {
 	return nil, ErrNoIntrospection
@@ -103,7 +107,8 @@ type rpcClient struct {
 	reqID atomic.Uint64
 }
 
-func (c *rpcClient) Name() string { return c.name }
+func (c *rpcClient) Name() string      { return c.name }
+func (c *rpcClient) Introspects() bool { return true }
 
 type rpcRequest struct {
 	JSONRPC string `json:"jsonrpc"`

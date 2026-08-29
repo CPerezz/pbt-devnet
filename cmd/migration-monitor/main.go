@@ -33,6 +33,7 @@ func main() {
 	poll := flag.Duration("poll", 2*time.Second, "how often to poll debug_migrationProgress and eth_blockNumber")
 	sampleInterval := flag.Duration("sample-interval", 60*time.Second, "how often to draw a cross-node shadow-root sample")
 	jsonlPath := flag.String("jsonl", "", "path to write JSONL events (default stdout)")
+	httpAddr := flag.String("http", "", "serve a live status page on this address, e.g. :8080 (default off)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -63,9 +64,16 @@ func main() {
 		defer f.Close()
 		w = f
 	}
-	jsonl := migmon.NewLog(w)
+	snap := newSnapshot(binaryTrieT)
+	// snap.Write decodes the same JSONL lines going to w, so the live view
+	// stays in lockstep with the on-disk record without a second emit call
+	// at every finding site.
+	jsonl := migmon.NewLog(io.MultiWriter(w, snap))
 	quorum := migmon.NewBStarQuorum(binaryTrieT)
 	split := &splitWatch{}
+	if *httpAddr != "" {
+		serveHTTP(*httpAddr, snap, jsonl)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -78,6 +86,7 @@ func main() {
 	doPoll := func() {
 		for _, ns := range states {
 			pollOnce(ctx, jsonl, binaryTrieT, ns, quorum)
+			snap.setNode(ns)
 		}
 	}
 	doPoll() // first poll immediately rather than waiting a full --poll interval
@@ -91,7 +100,7 @@ func main() {
 		case <-pollTick.C:
 			doPoll()
 		case <-sampleTick.C:
-			sampleOnce(ctx, jsonl, states, split)
+			sampleOnce(ctx, jsonl, states, split, snap)
 		}
 	}
 }
