@@ -51,4 +51,4 @@ require (
 
 // The devnet's clients are built from this branch, and the genesis root these binaries
 // compute is only meaningful against the client that runs it. One module means one pin.
-replace github.com/ethereum/go-ethereum => github.com/CPerezz/go-ethereum v0.0.0-20260821115239-7ddb0d4b0275
+replace github.com/ethereum/go-ethereum => github.com/CPerezz/go-ethereum v0.0.0-20260829115506-d32d8c3759ac
