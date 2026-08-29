@@ -19,6 +19,13 @@ const (
 	// must come strictly after b*.
 	FindingBoundary = "F3"
 
+	// F4: a partition healed but the network did not converge - heads
+	// still disagree well past the heal. This is the failure a
+	// fork-straddling reorg risks: a node that cannot rewind across the
+	// header-root format swap stays on its own branch forever, and the
+	// run must fail loudly rather than wait for a verifier to notice.
+	FindingNoConvergence = "F4"
+
 	// Persistent-null sampling findings: a node keeps answering null for
 	// sampled shadow roots while claiming following|synced.
 	FindingNullWarn     = "NULL5"  // after NullWarnAfter
@@ -44,4 +51,12 @@ const (
 	// Persistent-null escalation while following|synced.
 	NullWarnAfterMinutes     = 5
 	NullCriticalAfterMinutes = 10
+)
+
+const (
+	// ConvergenceGrace is how long after a partition heals every node
+	// must agree on a head again. Measured heals land a reorg within
+	// seconds; two minutes is generous enough that only a genuinely
+	// stuck node trips it.
+	ConvergenceGrace = 120
 )
