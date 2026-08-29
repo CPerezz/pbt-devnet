@@ -128,7 +128,8 @@ if kurtosis service inspect "$ENCLAVE" migration-gate >/dev/null 2>&1; then
   say "waiting for the gate to hand over to the reorg service"
   handed_over=0
   for _ in $(seq 1 60); do
-    if gate_api "http://127.0.0.1:$CHAOS_PORT/status" | grep -q .; then handed_over=1; break; fi
+    if kurtosis service logs "$ENCLAVE" migration-gate -a 2>/dev/null \
+      | grep -q 'control API listening'; then handed_over=1; break; fi
     sleep 15
   done
   if [ "$handed_over" = 1 ]; then
@@ -158,7 +159,9 @@ kill $FOLLOW 2>/dev/null || true
 els=$(cd scripts && python3 -c "import pbt; print(' '.join('--el ' + n + '=' + pbt.url('$ENCLAVE', n, 'rpc') for n in pbt.services('$ENCLAVE','el-')))")
 chaos_args=""
 [ -s "$OUT/migration-chaos.jsonl" ] && chaos_args="--chaos-jsonl $OUT/migration-chaos.jsonl"
-[ -s "$OUT/migration-gate.jsonl" ] && cat "$OUT/migration-gate.jsonl" >> "$OUT/migration-chaos.jsonl"
+if [ -s "$OUT/migration-gate.jsonl" ]; then
+  grep '^{' "$OUT/migration-gate.jsonl" >> "$OUT/migration-chaos.jsonl" || true
+fi
 go build -o bin/verify-migration ./cmd/verify-migration
 set +e
 bin/verify-migration $els \
