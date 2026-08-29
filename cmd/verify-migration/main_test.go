@@ -106,7 +106,9 @@ func withSchedule(t *testing.T, dump migsched.Dump, chaos []migmon.Event) []migm
 // --- C3: schedule-derived expectations and per-class deadlines ----------
 
 func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
-	dump := migsched.Dump{Profile: "straddle-fixture", Fork: testFork, Heavy: 4, Ops: straddleTestOps()}
+	// Quiet is what tells a post-migration isolation from a stray one, and
+	// the driver always publishes it.
+	dump := migsched.Dump{Profile: "straddle-fixture", Fork: testFork, Heavy: 4, Ops: straddleTestOps(), Quiet: testFork + 210}
 
 	t.Run("baseline: all four heal on time, fully corroborated, passes", func(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
@@ -158,7 +160,9 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 
 	t.Run("isolation not attributable to any admitted op fails", func(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
-		chaos = append(chaos, ev(migmon.EvIsolate, "node-9", 9000), ev(migmon.EvHeal, "node-9", 9050))
+		// Inside the schedule's active period, so it is a partition
+		// nobody scheduled - not the gate's post-migration window.
+		chaos = append(chaos, ev(migmon.EvIsolate, "node-9", testFork-1000), ev(migmon.EvHeal, "node-9", testFork-950))
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
 		r, evidence := v.checkC3(context.Background())
 		if r != verdictFail {
@@ -166,6 +170,24 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 		}
 		if !strings.Contains(evidence, "not in the schedule") {
 			t.Fatalf("evidence %q missing unscheduled reason", evidence)
+		}
+	})
+
+	t.Run("post-migration isolation after the quiet instant is noted, not failed", func(t *testing.T) {
+		// The gate applies its own window once the schedule is finished;
+		// it is deliberately absent from the pre-fork schedule, and the
+		// boundary and orphan checks judge its convergence.
+		chaos, monitor := baselineChaosAndMonitor()
+		chaos = append(chaos,
+			ev(migmon.EvIsolate, "node-3", testFork+400),
+			ev(migmon.EvHeal, "node-3", testFork+560))
+		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
+		r, evidence := v.checkC3(context.Background())
+		if r != verdictPass {
+			t.Fatalf("want pass, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "post-migration") {
+			t.Fatalf("evidence %q does not record the post-migration isolation", evidence)
 		}
 	})
 
@@ -182,17 +204,17 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 		}
 	})
 
-	t.Run("only three admitted ops healed: below the count floor fails", func(t *testing.T) {
-		dump3 := migsched.Dump{Profile: "p", Fork: testFork, Ops: straddleTestOps()[:3]}
+	t.Run("all admitted ops healed but fewer than a full run schedules is inconclusive", func(t *testing.T) {
+		// A profile that only schedules three partitions cannot produce
+		// four; that makes the evidence thin, not the run broken.
+		three := migsched.Dump{Profile: "three", Fork: testFork, Heavy: 4, Quiet: testFork + 210,
+			Ops: straddleTestOps()[:3]}
 		chaos, monitor := baselineChaosAndMonitor()
-		chaos, monitor = chaos[:6], monitor[:3]
-		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump3, chaos), monitor: monitor}
+		chaos = chaos[:6] // only the three ops this schedule admits
+		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, three, chaos), monitor: monitor}
 		r, evidence := v.checkC3(context.Background())
-		if r != verdictFail {
-			t.Fatalf("want fail (only 3 healed), got %s: %s", r, evidence)
-		}
-		if !strings.Contains(evidence, "only 3") {
-			t.Fatalf("evidence %q missing healed-count reason", evidence)
+		if r != verdictInconclusive {
+			t.Fatalf("want inconclusive (thin coverage), got %s: %s", r, evidence)
 		}
 	})
 

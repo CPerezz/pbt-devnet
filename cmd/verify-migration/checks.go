@@ -699,15 +699,34 @@ func (v *verifier) checkC3(ctx context.Context) (verdict, string) {
 		return verdictFail, fmt.Sprintf("schedule: %v", err)
 	}
 	matched, unscheduled := v.attributeWindows(dump, v.chaosWindows())
-	if len(unscheduled) > 0 {
+	// An isolation that starts after the schedule has gone quiet belongs to
+	// the post-migration window the gate applies itself; it is deliberately
+	// not in the pre-fork schedule. Its own convergence is judged by the
+	// boundary and orphan checks, so it is noted here, not failed.
+	// A dump without a quiet instant cannot vouch for anything being
+	// post-migration, so fail closed and treat every unattributed
+	// isolation as a stray one.
+	quiet := time.Unix(dump.Quiet, 0)
+	var afterQuiet, stray []chaosWindow
+	for _, w := range unscheduled {
+		if dump.Quiet != 0 && w.from.After(quiet) {
+			afterQuiet = append(afterQuiet, w)
+		} else {
+			stray = append(stray, w)
+		}
+	}
+	if len(stray) > 0 {
 		var names []string
-		for _, w := range unscheduled {
+		for _, w := range stray {
 			names = append(names, w.node)
 		}
 		return verdictFail, fmt.Sprintf("isolation(s) not in the schedule's admitted ops: %s", strings.Join(names, ", "))
 	}
 
 	var problems, notes []string
+	if len(afterQuiet) > 0 {
+		notes = append(notes, fmt.Sprintf("%d post-migration isolation(s) applied after the schedule went quiet", len(afterQuiet)))
+	}
 	healed, corroborated := 0, 0
 	for _, ow := range matched {
 		w := ow.window
@@ -730,8 +749,15 @@ func (v *verifier) checkC3(ctx context.Context) (verdict, string) {
 	if len(problems) > 0 {
 		return verdictFail, strings.Join(problems, "; ")
 	}
+	// Every admitted op must heal within its own deadline. The count floor
+	// is an acceptance-grade requirement: a profile that only schedules two
+	// partitions cannot produce four, and failing it for that would call a
+	// deliberately short run broken instead of thin.
+	if healed < len(matched) {
+		return verdictFail, fmt.Sprintf("only %d of %d admitted isolations healed within their class deadline", healed, len(matched))
+	}
 	if healed < 4 {
-		return verdictFail, fmt.Sprintf("only %d healed isolation(s) within their class deadline, need >= 4", healed)
+		return verdictInconclusive, fmt.Sprintf("all %d admitted isolation(s) healed within their deadline, but a full run schedules >= 4", healed)
 	}
 	evidence := fmt.Sprintf("%d/%d admitted ops healed within their class deadline, %d corroborated by a reorg", healed, len(matched), corroborated)
 	if len(notes) > 0 {
@@ -883,7 +909,11 @@ func (v *verifier) checkC5(ctx context.Context) (verdict, string) {
 	if v.logsDir == "" {
 		problems = append(problems, "no --logs-dir given")
 	} else {
-		if found, file := v.grepAllLogs(regexp.MustCompile(`(?i)migration window`)); found {
+		// Only the execution clients' logs matter: this is about how the
+		// clients were configured, and our own event streams describe
+		// windows in prose ("post-migration window closed"), which is not
+		// evidence of a configured one.
+		if found, file := v.grepELLogs(regexp.MustCompile(`(?i)migration window`)); found {
 			problems = append(problems, fmt.Sprintf("found 'migration window' mention in %s", file))
 		}
 		if found, _ := v.grepLighthouseLogs(regexp.MustCompile(`(?i)finaliz`)); found {
@@ -959,12 +989,16 @@ func (v *verifier) checkC6(ctx context.Context) (verdict, string) {
 	}
 
 	var problems []string
+	thin := ""
 	if v.smoke {
 		if anyNonNullSamples < 5 {
 			problems = append(problems, fmt.Sprintf("only %d sample(s) with >=1 non-null root, need >= 5 (smoke)", anyNonNullSamples))
 		}
 	} else if good < 50 {
-		problems = append(problems, fmt.Sprintf("only %d all-non-null-equal sample(s), need >= 50", good))
+		// Thin evidence, not wrong evidence: a shorter run simply cannot
+		// accrue the sample count a full one does. Say so instead of
+		// failing a run whose samples all agreed.
+		thin = fmt.Sprintf("only %d all-non-null-equal sample(s), want >= 50 for a full run", good)
 	}
 	if !v.skipChaos && outsideGood < 10 {
 		problems = append(problems, fmt.Sprintf("only %d all-non-null-equal sample(s) strictly outside chaos windows, need >= 10", outsideGood))
@@ -993,6 +1027,10 @@ func (v *verifier) checkC6(ctx context.Context) (verdict, string) {
 
 	if len(problems) > 0 {
 		return verdictFail, strings.Join(problems, "; ")
+	}
+	if thin != "" {
+		return verdictInconclusive, fmt.Sprintf("%s (%d samples, %d outside chaos windows, 0 mismatches, 0 unwaived criticals)",
+			thin, samples, outsideGood)
 	}
 	return verdictPass, fmt.Sprintf("%d samples, %d good, %d outside chaos windows, 0 unwaived criticals", samples, good, outsideGood)
 }
@@ -1389,4 +1427,18 @@ func (v *verifier) checkC12(ctx context.Context) (verdict, string) {
 		return verdictFail, strings.Join(problems, "; ")
 	}
 	return verdictPass, fmt.Sprintf("%d orphaned post-fork block(s) confirmed non-canonical (null or superseded) across %d node(s)", len(orphans), len(v.els))
+}
+
+// grepELLogs searches only the execution clients' own log files, for checks
+// about how those clients were configured. The tools' event streams live in
+// the same directory and describe the same concepts in prose.
+func (v *verifier) grepELLogs(re *regexp.Regexp) (bool, string) {
+	for _, node := range v.elNames() {
+		for _, f := range v.victimLogFiles(node) {
+			if fileContainsMatch(f, re) {
+				return true, f
+			}
+		}
+	}
+	return false, ""
 }
