@@ -21,6 +21,7 @@ type fakeClient struct {
 	heads   uint64
 	hashAt  map[uint64]string
 	callsSt *int
+	peered  []string
 }
 
 func (f *fakeClient) Name() string      { return f.name }
@@ -53,6 +54,15 @@ func (f *fakeClient) HeaderByNumber(_ context.Context, h uint64) (*migmon.Header
 
 func (f *fakeClient) HeaderByTag(context.Context, string) (*migmon.Header, error) {
 	return nil, nil
+}
+
+func (f *fakeClient) NodeInfo(context.Context) (string, error) {
+	return "enode://" + f.name, nil
+}
+
+func (f *fakeClient) AddPeer(_ context.Context, enode string) error {
+	f.peered = append(f.peered, enode)
+	return nil
 }
 
 // The light set excludes the bootnode, the heavy victim, and anything
@@ -164,3 +174,27 @@ type capture struct{ b []byte }
 func (c *capture) Write(p []byte) (int, error) { c.b = append(c.b, p...); return len(p), nil }
 func (c *capture) String() string              { return string(c.b) }
 func (c *capture) contains(s string) bool      { return strings.Contains(string(c.b), s) }
+
+// Every heal must rebuild the execution layer's peer mesh: this devnet runs
+// it with almost no peers, because the consensus clients carry the block
+// traffic, and a victim that missed blocks then has nowhere to fetch them
+// from. One live run had a node stranded at block 147 while the chain
+// reached 387; it caught up ninety seconds after being given one peer.
+func TestRepeerConnectsEveryPair(t *testing.T) {
+	a := &fakeClient{name: "el-1-geth-lighthouse", phases: []string{"done"}}
+	b := &fakeClient{name: "el-2-geth-lighthouse", phases: []string{"done"}}
+	c := &fakeClient{name: "el-3-geth-lighthouse", phases: []string{"done"}}
+	if err := migmon.Repeer(context.Background(), []migmon.Client{a, b, c}); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []*fakeClient{a, b, c} {
+		if len(n.peered) != 2 {
+			t.Fatalf("%s was given %d peers, want the other two", n.name, len(n.peered))
+		}
+		for _, e := range n.peered {
+			if e == "enode://"+n.name {
+				t.Fatalf("%s was told to dial itself", n.name)
+			}
+		}
+	}
+}

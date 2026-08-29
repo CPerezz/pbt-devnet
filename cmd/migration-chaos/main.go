@@ -12,6 +12,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -30,15 +31,19 @@ import (
 // (partitions are applied by participant index, through disruptoor's own
 // selectors), but the FLAG ORDER is load-bearing: position i, 1-based, is
 // the participant index, exactly as the package renders the list.
-type elFlag struct{ names []string }
+type elFlag struct {
+	names []string
+	urls  []string
+}
 
 func (e *elFlag) String() string { return strings.Join(e.names, ",") }
 func (e *elFlag) Set(v string) error {
-	name, _, ok := strings.Cut(v, "=")
-	if !ok || name == "" {
+	name, url, ok := strings.Cut(v, "=")
+	if !ok || name == "" || url == "" {
 		return fmt.Errorf("want name=url, got %q", v)
 	}
 	e.names = append(e.names, name)
+	e.urls = append(e.urls, url)
 	return nil
 }
 
@@ -125,7 +130,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	run(log, d, sched, len(els.names))
+	// The execution clients are needed only to rebuild their peer mesh
+	// after a partition; nothing here reads chain state.
+	clients := make([]migmon.Client, 0, len(els.names))
+	for i, name := range els.names {
+		clients = append(clients, migmon.NewClient(name, els.urls[i]))
+	}
+	run(log, d, sched, len(els.names), clients)
 }
 
 // topology derives the victim layout from the flags: the heavy participant
@@ -189,7 +200,7 @@ func emitPlan(log *migmon.Log, s migsched.Schedule) {
 // construction; each ends with a global Clear, because disruptoor state is
 // global - two independent overlapping partitions are not expressible
 // through its API.
-func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participants int) {
+func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participants int, clients []migmon.Client) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
@@ -232,6 +243,7 @@ func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participant
 		for _, v := range o.Victims {
 			log.Emit(migmon.Event{Kind: migmon.EvHeal, Node: nodeName(v), Detail: "window closed"})
 		}
+		repeer(log, clients)
 	}
 
 	// Failsafe sweeps. Every instant fires a Clear whatever the loop above
@@ -256,6 +268,7 @@ func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participant
 		default:
 			log.Emit(migmon.Event{Kind: migmon.EvHeal, Detail: "failsafe sweep"})
 		}
+		repeer(log, clients)
 	}
 
 	if !sleepUntil(s.Quiet, stop) {
@@ -298,4 +311,21 @@ func nodeName(idx int) string { return fmt.Sprintf("node-%d", idx) }
 
 func window(o migsched.Op) string {
 	return fmt.Sprintf("class=%s start=%d end=%d", o.Class, o.Start.Unix(), o.End.Unix())
+}
+
+// repeer rebuilds the execution layer's peer mesh after a partition.
+// Without it a victim that missed blocks cannot get them: its consensus
+// client points it at a head it does not have, and the execution client has
+// no peers to fetch the gap from, so it sits at its old head for good.
+func repeer(log *migmon.Log, clients []migmon.Client) {
+	if len(clients) < 2 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := migmon.Repeer(ctx, clients); err != nil {
+		log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "re-peering after the heal: " + err.Error()})
+		return
+	}
+	log.Emit(migmon.Event{Kind: migmon.EvHeal, Detail: "execution clients re-peered"})
 }
