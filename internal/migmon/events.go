@@ -14,16 +14,22 @@ const (
 	EvProgress = "progress" // per-node debug_migrationProgress poll
 	EvSample   = "sample"   // cross-node shadow-root sample at one block
 	EvReorg    = "reorg"    // canonical hash changed under a sampled height
-	EvBStar    = "bstar"    // first header with time >= T, per node
+	EvBStar    = "bstar"    // first header with time >= T, per node (provisional)
 	EvHead     = "head"     // per-node head observation
 	EvCritical = "critical" // a finding that fails the run
 	EvWarn     = "warn"     // a finding that needs eyes, not failure
 
+	// A reorg can orphan the block a node first reported as the fork
+	// block, so that observation is provisional until it finalizes.
+	EvBStarReorged = "bstar-reorged" // Detail=old->new, the recorded fork block was orphaned
+	EvBStarFinal   = "bstar-final"   // the node's fork block is finalized and settled
+
 	// Chaos driver kinds, same stream shape, separate file.
-	EvIsolate = "isolate" // Node=victim, Number=planned seconds, Detail=window
-	EvHeal    = "heal"    // Node=victim ("" = heal-all), Detail=reason
-	EvPause   = "pause"   // schedule went permanently quiet (T-300 passed)
-	EvSkip    = "skip"    // an op was refused by the admission rule
+	EvSchedule = "schedule" // resolved schedule, once at startup, Raw=migsched.Dump
+	EvIsolate  = "isolate"  // Node=victim, Detail=window
+	EvHeal     = "heal"     // Node=victim ("" = heal-all), Detail=reason
+	EvPause    = "pause"    // the schedule went permanently quiet
+	EvSkip     = "skip"     // an op was refused by the admission rule
 )
 
 // Event is one JSONL line. Fields are a union across kinds; consumers key
