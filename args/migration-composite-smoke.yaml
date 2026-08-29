@@ -195,9 +195,14 @@ pbt_monitor:
 # cadence and answers scenario requests. Depth is capped because finality is
 # flowing again by then, and a reorg deeper than a light victim can heal
 # from would strand it.
-# No cadence after the switchover here: the gate's own partition is the
-# post-fork evidence, and a cadence would only lengthen the lap.
-pbt_chaos: {}
+# The gate runs, so there IS a partition after the switchover - that is the
+# third phase this profile exists to show. Its cadence stays off: the gate's
+# own window is the post-fork evidence here, and a cadence would only
+# lengthen the lap without adding a behaviour the full profile does not
+# already cover. Scenarios remain available on demand once it hands over.
+pbt_chaos:
+  gate: true
+  isolation: false
 pbt_migration:
   enabled: true
   # 780s: the straddling partition opens at +690, about two minutes after the

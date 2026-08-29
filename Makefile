@@ -17,7 +17,7 @@ BINARY_TRIE_TIME ?=
 LOGS_DIR ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help up down logs sources build besu besu-image bin genesis check verify-migration
+.PHONY: help up down logs sources build besu besu-image bin genesis check verify-migration lap
 
 help:
 	@echo "pbt-devnet — a differential test harness for EIP-8297 execution clients"
@@ -121,6 +121,9 @@ verify-migration: bin ## verify a migration run (required: LOGS_DIR=dir BINARY_T
 	  --logs-dir $(LOGS_DIR) \
 	  --pins $(PINS) \
 	  --binary-trie-time $(BINARY_TRIE_TIME)
+
+lap: check build ## run one migration lap end to end and judge it (ARGS=args/migration-composite.yaml)
+	ENCLAVE=$(ENCLAVE) ARGS=$(ARGS) scripts/lap.sh
 
 genesis: ## regenerate genesis/genesis.json and print its root (for single-client debugging)
 	@mkdir -p bin
