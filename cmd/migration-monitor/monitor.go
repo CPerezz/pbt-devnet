@@ -260,7 +260,7 @@ func (w *splitWatch) observe(now time.Time, split bool, height uint64, detail st
 // sampleOnce runs one cross-node shadow-root sample: pick a random depth
 // behind the shallowest head, fetch every node's canonical hash and shadow
 // root there, and run F1/reorg/null-persistence over the results.
-func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState, split *splitWatch) {
+func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState, split *splitWatch, snap *snapshot) {
 	var minHead uint64
 	haveHead := false
 	for _, ns := range states {
@@ -357,7 +357,9 @@ func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState, split
 		}
 		detail += node + "=" + hash
 	}
-	if e := split.observe(time.Now(), len(seen) > 1, height, detail); e != nil {
+	isSplit := len(seen) > 1
+	if e := split.observe(time.Now(), isSplit, height, detail); e != nil {
 		log.Emit(*e)
 	}
+	snap.addSample(time.Now(), height, states, samples, isSplit)
 }
