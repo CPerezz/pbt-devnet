@@ -60,3 +60,12 @@ const (
 	// stuck node trips it.
 	ConvergenceGrace = 120
 )
+
+const (
+	// BStarProvisionalGrace is how long nodes may disagree about which
+	// block is the fork block before it counts as a fault. A partition
+	// spanning the activation makes them disagree by design; the longest
+	// such window any shipped schedule holds is three minutes, plus a
+	// convergence allowance, so this sits comfortably past it.
+	BStarProvisionalGrace = 360
+)

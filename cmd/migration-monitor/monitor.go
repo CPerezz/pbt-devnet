@@ -21,7 +21,7 @@ const reorgRecheckWindow = 8
 // needs carried from one tick to the next.
 type nodeState struct {
 	name string
-	rpc  *node
+	rpc  migmon.Client
 
 	timeline *migmon.Timeline
 	reorg    *migmon.ReorgMemory
@@ -34,16 +34,23 @@ type nodeState struct {
 	haveProgress bool
 	lastProgress migmon.MigrationProgress
 
+	// introspection is false for a client with no migration surface: it is
+	// still watched over standard RPC, and its events say so rather than
+	// letting silence read as agreement.
+	introspection bool
+
 	down bool // rpc reachability, deduped so an outage logs one warn, not one per poll
 }
 
 func newNodeState(name, url string, binaryTrieTime uint64) *nodeState {
+	client := migmon.NewClient(name, url)
 	return &nodeState{
-		name:     name,
-		rpc:      newNode(name, url),
-		timeline: migmon.NewTimeline(name, binaryTrieTime),
-		reorg:    migmon.NewReorgMemory(name),
-		nullTr:   migmon.NewNullTracker(name),
+		name:          name,
+		rpc:           client,
+		introspection: migmon.HasIntrospection(client),
+		timeline:      migmon.NewTimeline(name, binaryTrieTime),
+		reorg:         migmon.NewReorgMemory(name),
+		nullTr:        migmon.NewNullTracker(name),
 	}
 }
 
@@ -66,43 +73,89 @@ func (ns *nodeState) clearDown(log *migmon.Log) {
 // pollOnce runs one node's poll tick: progress, head, the b* probe, and the
 // timeline's findings.
 func pollOnce(ctx context.Context, log *migmon.Log, binaryTrieTime uint64, ns *nodeState, quorum *migmon.BStarQuorum) {
-	raw, err := getMigrationProgress(ctx, ns.rpc)
-	if err != nil {
-		ns.warnDown(log, "debug_migrationProgress", err)
-		return
-	}
-	prog, err := migmon.DecodeProgress(raw)
-	if err != nil {
-		ns.warnDown(log, "debug_migrationProgress decode", err)
-		return
+	var prog migmon.MigrationProgress
+	if ns.introspection {
+		raw, err := ns.rpc.Progress(ctx)
+		if err != nil {
+			ns.warnDown(log, "migration progress", err)
+			return
+		}
+		prog, err = migmon.DecodeProgress(raw)
+		if err != nil {
+			ns.warnDown(log, "migration progress decode", err)
+			return
+		}
+		log.Emit(migmon.Event{Kind: migmon.EvProgress, Node: ns.name, Phase: prog.Phase, Raw: raw})
+		ns.lastProgress, ns.haveProgress = prog, true
 	}
 	ns.clearDown(log)
-	log.Emit(migmon.Event{Kind: migmon.EvProgress, Node: ns.name, Phase: prog.Phase, Raw: raw})
-	ns.lastProgress, ns.haveProgress = prog, true
 
-	head, err := getBlockNumber(ctx, ns.rpc)
+	head, err := ns.rpc.HeadNumber(ctx)
 	if err != nil {
-		ns.warnDown(log, "eth_blockNumber", err)
+		ns.warnDown(log, "head number", err)
 		return
 	}
 	log.Emit(migmon.Event{Kind: migmon.EvHead, Node: ns.name, Number: head})
 	ns.lastHead, ns.haveHead = head, true
 
+	// A recorded fork block is provisional until it finalizes: a reorg
+	// spanning the activation can orphan it, and a node still judging the
+	// boundary against a block nobody has would report a fault that no
+	// longer exists.
+	checkForkBlock(ctx, log, ns, quorum)
+
 	if ns.timeline.BStarRecord() == nil {
 		bstar, crossed, err := findBStar(ctx, ns.rpc, &ns.lastBelowT, head, binaryTrieTime)
 		if err != nil {
-			log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: ns.name, Detail: fmt.Sprintf("bstar probe: %v", err)})
+			log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: ns.name, Detail: fmt.Sprintf("fork-block probe: %v", err)})
 		} else if crossed {
 			for _, e := range ns.timeline.ObserveBStar(*bstar) {
 				log.Emit(e)
 			}
-			for _, e := range quorum.Add(ns.name, *bstar) {
+			for _, e := range quorum.Observe(ns.name, *bstar, time.Now()) {
 				log.Emit(e)
 			}
 		}
 	}
 
-	for _, e := range ns.timeline.ObservePoll(prog, head) {
+	if ns.introspection {
+		for _, e := range ns.timeline.ObservePoll(prog, head) {
+			log.Emit(e)
+		}
+	}
+}
+
+// checkForkBlock keeps one node's fork-block record honest: it drops the
+// record when a reorg has orphaned it, and marks it settled once the node
+// reports the height as finalized. Finality is read from the execution
+// client's own "finalized" tag, which the consensus layer sets through the
+// engine API - no second API to reach for.
+func checkForkBlock(ctx context.Context, log *migmon.Log, ns *nodeState, quorum *migmon.BStarQuorum) {
+	rec := ns.timeline.BStarRecord()
+	if rec == nil || ns.timeline.BStarIsFinal() {
+		return
+	}
+	hdr, err := ns.rpc.HeaderByNumber(ctx, rec.Number)
+	if err != nil || hdr == nil {
+		return // transient: the next tick tries again
+	}
+	if hdr.Hash != rec.Hash {
+		for _, e := range ns.timeline.BStarReorged(hdr.Hash) {
+			log.Emit(e)
+		}
+		// Re-probe from scratch: the whole branch changed, so the previous
+		// "highest head below the activation" no longer bounds the search.
+		ns.lastBelowT = 0
+		return
+	}
+	fin, err := ns.rpc.HeaderByTag(ctx, "finalized")
+	if err != nil || fin == nil || fin.Number < rec.Number {
+		return
+	}
+	for _, e := range ns.timeline.BStarFinalized() {
+		log.Emit(e)
+	}
+	for _, e := range quorum.Finalize(ns.name, *rec) {
 		log.Emit(e)
 	}
 }
@@ -112,12 +165,15 @@ func pollOnce(ctx context.Context, log *migmon.Log, binaryTrieTime uint64, ns *n
 // the highest head this node was last confirmed to be below T at, still
 // holds — so it only needs to binary-search the gap since the last poll,
 // not the whole chain.
-func findBStar(ctx context.Context, n *node, lastBelowT *uint64, head uint64, t uint64) (bstar *migmon.BStar, crossed bool, err error) {
-	hdr, err := getHeader(ctx, n, head)
+func findBStar(ctx context.Context, n migmon.Client, lastBelowT *uint64, head uint64, t uint64) (bstar *migmon.BStar, crossed bool, err error) {
+	hdr, err := n.HeaderByNumber(ctx, head)
 	if err != nil {
 		return nil, false, err
 	}
-	if uint64(hdr.Timestamp) < t {
+	if hdr == nil {
+		return nil, false, fmt.Errorf("head %d has no header", head)
+	}
+	if hdr.Time < t {
 		*lastBelowT = head
 		return nil, false, nil
 	}
@@ -125,11 +181,14 @@ func findBStar(ctx context.Context, n *node, lastBelowT *uint64, head uint64, t 
 	lo, hi := *lastBelowT, head
 	for lo+1 < hi {
 		mid := lo + (hi-lo)/2
-		midHdr, err := getHeader(ctx, n, mid)
+		midHdr, err := n.HeaderByNumber(ctx, mid)
 		if err != nil {
 			return nil, false, err
 		}
-		if uint64(midHdr.Timestamp) >= t {
+		if midHdr == nil {
+			return nil, false, fmt.Errorf("block %d has no header", mid)
+		}
+		if midHdr.Time >= t {
 			hi = mid
 		} else {
 			lo = mid
@@ -138,31 +197,70 @@ func findBStar(ctx context.Context, n *node, lastBelowT *uint64, head uint64, t 
 
 	boundary := hdr
 	if hi != head {
-		if boundary, err = getHeader(ctx, n, hi); err != nil {
+		if boundary, err = n.HeaderByNumber(ctx, hi); err != nil {
 			return nil, false, err
+		}
+		if boundary == nil {
+			return nil, false, fmt.Errorf("block %d has no header", hi)
 		}
 	}
 	var parentTime uint64
 	if hi > 0 {
-		parentHdr, err := getHeader(ctx, n, hi-1)
+		parentHdr, err := n.HeaderByNumber(ctx, hi-1)
 		if err != nil {
 			return nil, false, err
 		}
-		parentTime = uint64(parentHdr.Timestamp)
+		if parentHdr == nil {
+			return nil, false, fmt.Errorf("block %d has no header", hi-1)
+		}
+		parentTime = parentHdr.Time
 	}
 
 	return &migmon.BStar{
 		Number:     hi,
-		Hash:       boundary.Hash.Hex(),
-		Time:       uint64(boundary.Timestamp),
+		Hash:       boundary.Hash,
+		Time:       boundary.Time,
 		ParentTime: parentTime,
 	}, true, nil
+}
+
+// splitGrace is how long the nodes may disagree about the canonical chain
+// at a sampled height before it counts as a fault. Every partition a
+// schedule holds is minutes shorter than this, and a healed partition
+// converges within seconds, so only a node that cannot rewind - the risk a
+// reorg spanning the activation carries - stays split this long.
+const splitGrace = 6 * time.Minute
+
+// splitWatch times a cross-node canonical-chain disagreement.
+type splitWatch struct {
+	since time.Time
+	fired bool
+}
+
+// observe reports the finding a persistent split earns, if any.
+func (w *splitWatch) observe(now time.Time, split bool, height uint64, detail string) *migmon.Event {
+	if !split {
+		w.since, w.fired = time.Time{}, false
+		return nil
+	}
+	if w.since.IsZero() {
+		w.since = now
+	}
+	if w.fired || now.Sub(w.since) <= splitGrace {
+		return nil
+	}
+	w.fired = true
+	return &migmon.Event{
+		Kind: migmon.EvCritical, Finding: migmon.FindingNoConvergence, Number: height,
+		Detail: fmt.Sprintf("nodes have disagreed on the canonical chain for %.0fs, longer than any partition holds: %s",
+			now.Sub(w.since).Seconds(), detail),
+	}
 }
 
 // sampleOnce runs one cross-node shadow-root sample: pick a random depth
 // behind the shallowest head, fetch every node's canonical hash and shadow
 // root there, and run F1/reorg/null-persistence over the results.
-func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState) {
+func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState, split *splitWatch) {
 	var minHead uint64
 	haveHead := false
 	for _, ns := range states {
@@ -182,17 +280,19 @@ func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState) {
 	samples := make([]migmon.NodeSample, 0, len(states))
 	roots := make(map[string]string, len(states))
 	for _, ns := range states {
-		hdr, err := getHeader(ctx, ns.rpc, height)
-		if err != nil {
+		hdr, err := ns.rpc.HeaderByNumber(ctx, height)
+		if err != nil || hdr == nil {
 			log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: ns.name, Number: height, Detail: fmt.Sprintf("sample header fetch: %v", err)})
 			continue
 		}
-		root, err := getShadowStateRoot(ctx, ns.rpc, hdr.Hash)
-		if err != nil {
-			log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: ns.name, Number: height, Detail: fmt.Sprintf("shadowStateRoot: %v", err)})
-			continue
+		root := ""
+		if ns.introspection {
+			if root, err = ns.rpc.ShadowRoot(ctx, hdr.Hash); err != nil {
+				log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: ns.name, Number: height, Detail: fmt.Sprintf("shadow root: %v", err)})
+				continue
+			}
 		}
-		hash := hdr.Hash.Hex()
+		hash := hdr.Hash
 		samples = append(samples, migmon.NodeSample{Node: ns.name, Hash: hash, Root: root})
 		roots[ns.name] = root
 
@@ -203,16 +303,17 @@ func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState) {
 			if h == height {
 				continue
 			}
-			rHdr, err := getHeader(ctx, ns.rpc, h)
-			if err != nil {
+			rHdr, err := ns.rpc.HeaderByNumber(ctx, h)
+			if err != nil || rHdr == nil {
 				continue // a transient miss here just waits for the next tick
 			}
-			for _, e := range ns.reorg.Observe(h, rHdr.Hash.Hex(), ns.lastHead) {
+			for _, e := range ns.reorg.Observe(h, rHdr.Hash, ns.lastHead) {
 				log.Emit(e)
 			}
 		}
 
-		active := ns.haveProgress && (migmon.Active(ns.lastProgress.Binary) || migmon.Active(ns.lastProgress.Merkle))
+		active := ns.introspection && ns.haveProgress &&
+			(migmon.Active(ns.lastProgress.Binary) || migmon.Active(ns.lastProgress.Merkle))
 		for _, e := range ns.nullTr.Observe(time.Now(), active, root == "") {
 			log.Emit(e)
 		}
@@ -239,5 +340,24 @@ func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState) {
 	}
 	for _, e := range migmon.EvaluateSample(samples, postBStar) {
 		log.Emit(e)
+	}
+
+	// Canonical-chain disagreement at one height is legal during a
+	// partition; outliving one is not.
+	seen := map[string]string{}
+	for _, s := range samples {
+		if s.Hash != "" {
+			seen[s.Hash] = s.Node
+		}
+	}
+	detail := ""
+	for hash, node := range seen {
+		if detail != "" {
+			detail += " vs "
+		}
+		detail += node + "=" + hash
+	}
+	if e := split.observe(time.Now(), len(seen) > 1, height, detail); e != nil {
+		log.Emit(*e)
 	}
 }
