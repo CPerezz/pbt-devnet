@@ -30,6 +30,29 @@ func (c *chaos) isolationLoop(ctx context.Context) {
 	}
 }
 
+// isolationWindow returns how long the next isolation fork should hold the proposer, after
+// applying --max-depth. The window always needs at least one lead slot plus the proposal
+// slot itself -- that floor is depth 1, the single duty this command has always targeted --
+// so depth here counts the slots of headroom beyond that floor.
+//
+// requestedDepth is what the configured --isolate-for would have produced; depth is what
+// --max-depth allows. They differ only when the window had to be shortened, which is what
+// clamped reports.
+func (c *chaos) isolationWindow() (window time.Duration, depth, requestedDepth uint64, clamped bool) {
+	slots := uint64(1)
+	if c.cfg.slotSeconds > 0 {
+		if s := uint64(c.cfg.isolateFor / c.cfg.slotSeconds); s > 0 {
+			slots = s
+		}
+	}
+	requestedDepth = slots - 1
+	depth, clamped = clampDepth(requestedDepth, c.cfg.maxDepth)
+	if !clamped {
+		return c.cfg.isolateFor, depth, requestedDepth, false
+	}
+	return time.Duration(depth+1) * c.cfg.slotSeconds, depth, requestedDepth, true
+}
+
 // isolationFork cuts the p2p of the node that is about to propose.
 //
 // A partition, not shaping. disruptoor only accepts scope ["include_control"] for shaping,
@@ -39,7 +62,13 @@ func (c *chaos) isolationLoop(ctx context.Context) {
 // else builds on the parent, and unwinds when the partition clears. The reorg therefore
 // lands on the isolated node, which is where it must be observed.
 func (c *chaos) isolationFork(ctx context.Context) result {
-	res := result{Name: "proposer-fork", Started: time.Now().UTC().Format(time.RFC3339), Depth: 1}
+	window, depth, requestedDepth, depthClamped := c.isolationWindow()
+	res := result{Name: "proposer-fork", Started: time.Now().UTC().Format(time.RFC3339), Depth: depth}
+	if depthClamped {
+		res.RequestedDepth = requestedDepth
+		c.log.Warn("clamping periodic isolation window", "requested_depth", requestedDepth,
+			"max_depth", c.cfg.maxDepth, "applied_depth", depth)
+	}
 
 	node, slot, err := c.nextProposer(ctx)
 	if err != nil {
@@ -83,9 +112,9 @@ func (c *chaos) isolationFork(ctx context.Context) result {
 		res.Detail = fmt.Sprintf("could not isolate node %d: %v", node, err)
 		return res
 	}
-	c.log.Info("isolating proposer", "node", node, "slot", slot, "for", c.cfg.isolateFor)
+	c.log.Info("isolating proposer", "node", node, "slot", slot, "for", window)
 
-	sleep(ctx, c.cfg.isolateFor)
+	sleep(ctx, window)
 	if err := c.d.Clear(); err != nil {
 		c.log.Error("could not clear the isolation", "err", err)
 	}
@@ -107,6 +136,28 @@ func (c *chaos) isolationFork(ctx context.Context) result {
 		c.log.Info("no reorg from this attempt", "node", node, "slot", slot)
 	}
 	return res
+}
+
+// participantFor maps a validator index to its 1-based participant number, or 0 if the
+// index belongs to nobody known.
+//
+// With --validator-counts unset, ethereum-package hands out sequential validator ranges of
+// one uniform size, one range per participant, so the index divided by that size IS the
+// participant -- the formula this command has always used. With it set, stake is not shared
+// out evenly and the mapping is a prefix-sum lookup instead: participant i owns the
+// half-open range [sum(counts[0..i-1]), sum(counts[0..i])).
+func (c *chaos) participantFor(validatorIndex uint64) int {
+	if len(c.cfg.validatorCounts) == 0 {
+		return int(validatorIndex/c.cfg.validatorsPer) + 1
+	}
+	var sum uint64
+	for i, n := range c.cfg.validatorCounts {
+		if validatorIndex < sum+n {
+			return i + 1
+		}
+		sum += n
+	}
+	return 0
 }
 
 // nextProposer returns the participant number that proposes a few slots from now, and
@@ -139,9 +190,7 @@ func (c *chaos) nextProposer(ctx context.Context) (int, uint64, error) {
 		if d.Slot < head+2 {
 			continue // too soon to get the isolation in place
 		}
-		// ethereum-package hands out sequential validator ranges, one block per
-		// participant, so the index divided by the range size IS the participant.
-		node := int(d.ValidatorIndex/c.cfg.validatorsPer) + 1
+		node := c.participantFor(d.ValidatorIndex)
 		if node < 1 || node > c.cfg.nodeCount {
 			continue
 		}

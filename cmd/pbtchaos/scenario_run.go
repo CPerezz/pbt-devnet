@@ -253,10 +253,7 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 	// With two of each client this also produces the most interesting case on its own --
 	// one besu on the doomed branch while the other stays in the majority, so trie-log
 	// rollback is measured against a client that never left the chain.
-	idx := minorityPick
-	if idx < 1 || idx > len(c.els) || c.cfg.protected[idx] {
-		idx = c.nextMinority()
-	}
+	idx := c.minorityFor(minorityPick)
 	minority := c.els[idx-1]
 	minorityNode := idx
 	majority := make([]*el, 0, len(c.els)-1)
