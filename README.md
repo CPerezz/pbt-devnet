@@ -137,13 +137,56 @@ make verify-migration ENCLAVE=pbt LOGS_DIR=... BINARY_TRIE_TIME=...
 | `migration-smoke-fast` | 1 node, fork at ~block 40 | ~14 min |
 | `migration-smoke` | 1 node, fork at ~block 100 | ~20 min |
 | `migration-chaos-smoke` | 4 nodes, one 3-minute isolation, fork far away | ~15 min |
+| `migration-straddle-smoke` | 4 nodes, one partition spanning the fork | ~30 min |
+| `migration-composite-smoke` | 4 nodes, all three phases: before, across, after | ~35 min |
 | `migration-quiet` | 4 nodes, no chaos, full acceptance timeline | ~40 min |
-| `migration` | 4 nodes, full chaos schedule through the window | ~50 min |
+| `migration` | 4 nodes, full pre-fork chaos schedule | ~50 min |
+| `migration-composite` | 4 nodes, the whole lifecycle incl. the at-genesis suite after the switchover | ~65 min |
 
-`migration-monitor` watches every client's migration progress and cross-checks shadow roots
-between nodes; `migration-chaos` drives partitions on a fixed, admission-gated schedule that
-refuses any window still open 300s before the fork; `verify-migration` judges a finished run
-and exits with the number of failed checks. Validator stake is deliberately uneven — the deep
-victim holds 40% so that isolating it stalls finality below the 2/3 threshold for the window;
-with uniform stake the majority finalizes past the victim and its consensus client is banned
-by the survivors, permanently (measured, not theorized).
+`make lap` runs one profile end to end: it starts the devnet, prints one line per change from
+the monitor's live view, restarts a node in the gap the schedule leaves for it, asks for reorg
+scenarios once the switchover is done, dumps every service log and runs the acceptance checks.
+
+`migration-monitor` watches every client's migration progress, cross-checks shadow roots
+between nodes, and serves a live view (`make ui` prints its URL) with a fork panel and a matrix
+of roots per node. `migration-chaos` drives partitions on a fixed schedule that refuses any
+window still open when the network has to be whole again. `migration-gate` holds the
+at-genesis reorg service back until every client has finished migrating, runs one partition of
+its own on the far side of the boundary, then hands disruptoor over — so exactly one thing
+disrupts the network at a time. `verify-migration` judges a finished run and exits with the
+number of failed checks, listing separately any check whose precondition never occurred.
+
+**The reorg that matters most** is the one spanning the activation: each side of a partition
+crosses the fork on its own block, and when it heals the losing side has to rewind *across the
+header-root format swap* and re-cross. Nothing else exercises that path. Finding it wedged a
+node for 30 seconds and failed the import, which is fixed in the geth revision this pins.
+
+Validator stake is deliberately uneven — the deep victim holds 40%, so isolating it stalls
+finality below the two-thirds threshold for the window. With uniform stake the majority
+finalizes past the victim and the survivors ban its consensus client for good: measured over
+several runs, not theorised, and the reason a 12-minute partition never healed while a
+3-minute one always did.
+
+## Adding another execution client
+
+The migration profiles are geth-only today, and everything above is written so that a second
+client is an addition rather than a rewrite. It needs four things:
+
+1. **A migration bootstrap** — convert the merkle genesis, import the artifacts, mark the
+   datadir so restarts skip the work. For geth this is `scripts/geth-shim.sh`, wrapped into
+   the image so the launcher's own command line is untouched.
+2. **An introspection adapter** — migration progress and the shadow root of a block, behind
+   `migmon.Client`. Without one the client is still watched over standard RPC and its events
+   say the surface is unavailable; the monitor never reads silence as agreement.
+3. **A reorg log pattern**, so a heal can be corroborated from the client's own log when the
+   monitor did not sample the reorged height itself.
+4. **An args participant block**, and optionally `pbt_migration.heavy_node` pointed at it to
+   put that client in the victim seat.
+
+**Erigon is not ready for this yet**, and the gap is in the client, not here: it parses
+`binaryTrieTime` but its own genesis validation rejects any value later than the genesis
+timestamp (`this node can only commit through the binary tree from block 0`), and the
+commitment variant is a whole-datadir property chosen at `erigon init` from an environment
+variable. It has no follower building one tree while executing on the other, no snapshot
+import, and no migration introspection. It participates fully in the tree-at-genesis devnet
+(`args/devnet.yaml`), which is where it belongs until in-place migration exists.
