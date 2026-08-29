@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -29,15 +30,66 @@ import (
 )
 
 type config struct {
-	slotSeconds    time.Duration
-	validatorsPer  uint64
-	nodeCount      int
-	isolateEnabled bool
-	isolateMin     uint64
-	isolateMax     uint64
-	isolateFor     time.Duration
-	defaultDepth   uint64
-	protected      map[int]bool
+	slotSeconds   time.Duration
+	validatorsPer uint64
+	// validatorCounts holds one validator count per participant, in 1-based order, for a
+	// chain whose stake is not shared out evenly. Empty means it is, and validatorsPer
+	// describes every participant.
+	validatorCounts []uint64
+	nodeCount       int
+	isolateEnabled  bool
+	isolateMin      uint64
+	isolateMax      uint64
+	isolateFor      time.Duration
+	defaultDepth    uint64
+	// maxDepth caps how many blocks a reorg is allowed to reach, both for the periodic
+	// isolation cadence and for scenario depth (including the HTTP override). Zero means
+	// unbounded, which is today's behaviour.
+	maxDepth  uint64
+	protected map[int]bool
+}
+
+// parseValidatorCounts turns a comma-separated list into one validator count per
+// participant, 1-based order. Every entry must be a positive integer: a zero or negative
+// count would make a participant own no validators, or a negative range, neither of which
+// is a stake a real node can hold.
+func parseValidatorCounts(s string) ([]uint64, error) {
+	fields := strings.Split(s, ",")
+	counts := make([]uint64, 0, len(fields))
+	for _, f := range fields {
+		n, err := strconv.ParseUint(strings.TrimSpace(f), 10, 64)
+		if err != nil || n == 0 {
+			return nil, fmt.Errorf("wants a comma-separated list of positive integers, got %q", s)
+		}
+		counts = append(counts, n)
+	}
+	return counts, nil
+}
+
+// clampDepth applies --max-depth to a requested reorg depth. maxDepth of zero leaves the
+// request untouched, which keeps every existing caller byte-identical when the flag is
+// absent.
+func clampDepth(requested, maxDepth uint64) (applied uint64, clamped bool) {
+	if maxDepth == 0 || requested <= maxDepth {
+		return requested, false
+	}
+	return maxDepth, true
+}
+
+// resolveDepth parses the depth query parameter, defaulting to def when it is absent, and
+// applies --max-depth. requested is the depth actually asked for, before any clamp, so a
+// caller can tell an operator what happened rather than just what was applied.
+func resolveDepth(v string, def, maxDepth uint64) (applied, requested uint64, clamped bool, err error) {
+	requested = def
+	if v != "" {
+		parsed, perr := strconv.ParseUint(v, 10, 64)
+		if perr != nil {
+			return 0, 0, false, fmt.Errorf("bad depth: %s", v)
+		}
+		requested = parsed
+	}
+	applied, clamped = clampDepth(requested, maxDepth)
+	return applied, requested, clamped, nil
 }
 
 // chaos is the single owner of disruptoor state. Every disruption runs on the worker
@@ -92,6 +144,16 @@ func (c *chaos) nextMinority() int {
 	return idx
 }
 
+// minorityFor resolves an operator-pinned minority pick, falling back to the rotation when
+// the pick is out of range or protected. A pinned protected node must never proceed as the
+// doomed branch -- the rotation is what already knows how to choose an eligible one instead.
+func (c *chaos) minorityFor(pick int) int {
+	if pick < 1 || pick > len(c.els) || c.cfg.protected[pick] {
+		return c.nextMinority()
+	}
+	return pick
+}
+
 // keysFor hands each run a majority/minority pair, walking the pool so runs do not repeat
 // the same pair.
 //
@@ -128,15 +190,18 @@ type job struct {
 }
 
 type result struct {
-	Name     string `json:"name"`
-	Started  string `json:"started"`
-	Outcome  string `json:"outcome"`
-	Detail   string `json:"detail"`
-	Reorged  bool   `json:"reorged"`
-	Depth    uint64 `json:"depth,omitempty"`
-	Minority string `json:"minority,omitempty"`
-	Orphaned int    `json:"orphaned_blocks,omitempty"`
-	Survivor string `json:"survivor,omitempty"`
+	Name    string `json:"name"`
+	Started string `json:"started"`
+	Outcome string `json:"outcome"`
+	Detail  string `json:"detail"`
+	Reorged bool   `json:"reorged"`
+	Depth   uint64 `json:"depth,omitempty"`
+	// RequestedDepth is set only when --max-depth clamped the depth actually asked for,
+	// so a clamped run is visible in the result rather than looking like an ordinary one.
+	RequestedDepth uint64 `json:"requested_depth,omitempty"`
+	Minority       string `json:"minority,omitempty"`
+	Orphaned       int    `json:"orphaned_blocks,omitempty"`
+	Survivor       string `json:"survivor,omitempty"`
 }
 
 func main() {
@@ -149,11 +214,13 @@ func main() {
 	listen := flag.String("listen", ":7800", "control API listen address")
 	slotSeconds := flag.Duration("slot-seconds", 12*time.Second, "seconds per slot")
 	validatorsPer := flag.Uint64("validators-per-node", 128, "validators assigned to each participant")
+	validatorCounts := flag.String("validator-counts", "", "comma-separated validator count per participant, 1-based order, for uneven stake (default: derive from --validators-per-node)")
 	isolation := flag.Bool("isolation", true, "run the periodic proposer-isolation forks")
 	isoMin := flag.Uint64("isolate-min-blocks", 15, "minimum blocks between isolation forks")
 	isoMax := flag.Uint64("isolate-max-blocks", 30, "maximum blocks between isolation forks")
 	isolateFor := flag.Duration("isolate-for", 0, "how long to isolate the proposer (default: two slots)")
 	depth := flag.Uint64("depth", 10, "default scenario depth in blocks")
+	maxDepth := flag.Uint64("max-depth", 0, "clamp every reorg, periodic and scenario, to this many blocks (0: unbounded)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -217,6 +284,18 @@ func main() {
 	if len(protectedNodes) >= len(elc) {
 		cli.Fatal(log, "every node is protected, so there is nothing to disrupt")
 	}
+	var counts []uint64
+	if *validatorCounts != "" {
+		parsed, err := parseValidatorCounts(*validatorCounts)
+		if err != nil {
+			cli.Fatal(log, "--validator-counts: %v", err)
+		}
+		if len(parsed) != len(elc) {
+			cli.Fatal(log, "--validator-counts has %d entries but there are %d participants (--el given %d times)",
+				len(parsed), len(elc), len(elc))
+		}
+		counts = parsed
+	}
 
 	c := &chaos{
 		d: d, els: elc, cls: clc, keys: keys, log: log,
@@ -224,15 +303,17 @@ func main() {
 		reorgsBy:     map[string]int{},
 		minorityRuns: map[string]int{},
 		cfg: config{
-			slotSeconds:    *slotSeconds,
-			validatorsPer:  *validatorsPer,
-			nodeCount:      len(elc),
-			isolateEnabled: *isolation,
-			isolateMin:     *isoMin,
-			isolateMax:     *isoMax,
-			isolateFor:     *isolateFor,
-			defaultDepth:   *depth,
-			protected:      protectedNodes,
+			slotSeconds:     *slotSeconds,
+			validatorsPer:   *validatorsPer,
+			nodeCount:       len(elc),
+			isolateEnabled:  *isolation,
+			isolateMin:      *isoMin,
+			isolateMax:      *isoMax,
+			isolateFor:      *isolateFor,
+			defaultDepth:    *depth,
+			maxDepth:        *maxDepth,
+			validatorCounts: counts,
+			protected:       protectedNodes,
 		},
 	}
 
@@ -336,14 +417,14 @@ func (c *chaos) serve(ctx context.Context, addr string) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "unknown scenario " + name, "known": scenarioNames()})
 			return
 		}
-		depth := c.cfg.defaultDepth
-		if v := r.URL.Query().Get("depth"); v != "" {
-			parsed, err := strconv.ParseUint(v, 10, 64)
-			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad depth: " + v})
-				return
-			}
-			depth = parsed
+		depth, requestedDepth, depthClamped, err := resolveDepth(r.URL.Query().Get("depth"), c.cfg.defaultDepth, c.cfg.maxDepth)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if depthClamped {
+			c.log.Warn("clamping requested scenario depth", "scenario", name,
+				"requested", requestedDepth, "max_depth", c.cfg.maxDepth, "applied", depth)
 		}
 		// Optional: pin the doomed node instead of taking the next in the rotation.
 		minority := 0
@@ -356,15 +437,25 @@ func (c *chaos) serve(ctx context.Context, addr string) {
 			}
 			minority = parsed
 		}
-		err := c.submit(job{
+		err = c.submit(job{
 			name: name,
-			run:  func(ctx context.Context) result { return c.runScenario(ctx, sc, depth, minority) },
+			run: func(ctx context.Context) result {
+				res := c.runScenario(ctx, sc, depth, minority)
+				if depthClamped {
+					res.RequestedDepth = requestedDepth
+				}
+				return res
+			},
 		})
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusAccepted, map[string]any{"queued": name, "depth": depth})
+		body := map[string]any{"queued": name, "depth": depth}
+		if depthClamped {
+			body["requested_depth"] = requestedDepth
+		}
+		writeJSON(w, http.StatusAccepted, body)
 	})
 
 	srv := &http.Server{Addr: addr, Handler: mux}
