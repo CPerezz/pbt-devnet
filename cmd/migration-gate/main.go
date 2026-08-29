@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -47,6 +48,33 @@ const (
 	deepWindow  = 190 * time.Second
 	shortWindow = 150 * time.Second
 )
+
+// held marks a partition this process is holding itself, so the watchdog
+// does not treat its own window as a stuck one and heal it mid-flight. The
+// scheduled windows come from the shared schedule; this covers the one the
+// gate applies after the migration, which is not in it.
+type held struct {
+	mu    sync.Mutex
+	until time.Time
+}
+
+func (h *held) hold(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.until = time.Now().Add(d + migmon.ConvergenceGrace*time.Second)
+}
+
+func (h *held) release() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.until = time.Time{}
+}
+
+func (h *held) holding(t time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return !h.until.IsZero() && t.Before(h.until)
+}
 
 type elFlag struct {
 	names []string
@@ -148,8 +176,9 @@ func main() {
 	// The watchdog runs for the whole of this process's life, including
 	// while it waits for the migration to finish: a partition left applied
 	// by a crashed driver would otherwise sit there unnoticed.
+	mine := &held{}
 	if d != nil {
-		go watchdog(ctx, log, d, clients, sched)
+		go watchdog(ctx, log, d, clients, sched, mine)
 	}
 
 	if !waitForDone(ctx, log, clients) {
@@ -161,7 +190,7 @@ func main() {
 		if !sleep(ctx, settle) {
 			return
 		}
-		if err := runPostOp(ctx, log, d, clients, *postOp, *heavy, lights, len(els.names)); err != nil {
+		if err := runPostOp(ctx, log, d, clients, *postOp, *heavy, lights, len(els.names), mine); err != nil {
 			log.Emit(migmon.Event{Kind: migmon.EvCritical, Finding: migmon.FindingNoConvergence, Detail: err.Error()})
 			os.Exit(1)
 		}
@@ -261,7 +290,7 @@ func waitForDone(ctx context.Context, log *migmon.Log, clients []migmon.Client) 
 
 // runPostOp applies one partition after the migration has completed, heals
 // it, and waits for the network to agree again.
-func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clients []migmon.Client, kind string, heavy int, lights []int, participants int) error {
+func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clients []migmon.Client, kind string, heavy int, lights []int, participants int, mine *held) error {
 	victim, window := heavy, deepWindow
 	if kind == "short-light" {
 		if len(lights) == 0 {
@@ -274,7 +303,12 @@ func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clien
 	}
 
 	name := fmt.Sprintf("post-migration-%s", kind)
+	// Claim the window before applying it: the watchdog runs concurrently
+	// and would otherwise see this divergence as a partition nobody is
+	// holding and heal it a couple of minutes in.
+	mine.hold(window)
 	if err := d.Partition(name, others(participants, victim), []int{victim}); err != nil {
+		mine.release()
 		return fmt.Errorf("partitioning node %d after the migration: %w", victim, err)
 	}
 	log.Emit(migmon.Event{
@@ -302,7 +336,9 @@ func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clien
 		log.Emit(migmon.Event{Kind: migmon.EvHeal, Detail: "execution clients re-peered"})
 	}
 
-	return awaitConvergence(ctx, log, clients)
+	err := awaitConvergence(ctx, log, clients)
+	mine.release()
+	return err
 }
 
 // awaitConvergence waits for every client to agree on the canonical chain
@@ -364,7 +400,7 @@ func converged(ctx context.Context, clients []migmon.Client) (bool, string, erro
 // scheduled window is the schedule doing its job; divergence outside every
 // window, persisting past the convergence allowance, means a driver died
 // with a partition applied - and the run is lost unless someone clears it.
-func watchdog(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clients []migmon.Client, sched migsched.Schedule) {
+func watchdog(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clients []migmon.Client, sched migsched.Schedule, mine *held) {
 	var since time.Time
 	fired := false
 	for {
@@ -380,7 +416,7 @@ func watchdog(ctx context.Context, log *migmon.Log, d *disruptoor.Client, client
 			since, fired = time.Time{}, false
 			continue
 		}
-		if sched.Covers(now) {
+		if sched.Covers(now) || mine.holding(now) {
 			// A window the schedule is holding: expected, and healing it
 			// here would destroy the evidence it exists to produce.
 			since = time.Time{}

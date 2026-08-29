@@ -62,6 +62,7 @@ func readEvents(path string) ([]migmon.Event, error) {
 	}
 	defer f.Close()
 	var out []migmon.Event
+	skipped := 0
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -69,14 +70,29 @@ func readEvents(path string) ([]migmon.Event, error) {
 		if line == "" {
 			continue
 		}
+		// A service's log is not exclusively this stream: the gate hands
+		// over to another process that writes its own structured lines
+		// into the same stdout. Skip what is not one of our events rather
+		// than refusing the whole file - the alternative is a run that
+		// cannot be judged because a downstream service logged normally.
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
 		var ev migmon.Event
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
+			skipped++
+			continue
+		}
+		if ev.Kind == "" {
+			continue
 		}
 		out = append(out, ev)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
+	}
+	if len(out) == 0 && skipped > 0 {
+		return nil, fmt.Errorf("%s: no readable events (%d unparsable lines)", path, skipped)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
 	return out, nil
