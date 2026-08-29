@@ -291,6 +291,17 @@ func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clien
 	}
 	log.Emit(migmon.Event{Kind: migmon.EvHeal, Node: nodeName(victim), Detail: "post-migration window closed"})
 
+	// Rebuild the peer mesh before waiting: a victim that missed blocks
+	// needs peers to fetch them, and this devnet's execution layer runs
+	// with almost none because the consensus clients carry the traffic.
+	rctx, rcancel := context.WithTimeout(ctx, 30*time.Second)
+	defer rcancel()
+	if err := migmon.Repeer(rctx, clients); err != nil {
+		log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "re-peering after the heal: " + err.Error()})
+	} else {
+		log.Emit(migmon.Event{Kind: migmon.EvHeal, Detail: "execution clients re-peered"})
+	}
+
 	return awaitConvergence(ctx, log, clients)
 }
 
@@ -386,6 +397,9 @@ func watchdog(ctx context.Context, log *migmon.Log, d *disruptoor.Client, client
 		if err := d.Clear(); err != nil {
 			log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "watchdog heal failed: " + err.Error()})
 			continue
+		}
+		if err := migmon.Repeer(ctx, clients); err != nil {
+			log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "re-peering after the watchdog heal: " + err.Error()})
 		}
 		log.Emit(migmon.Event{
 			Kind: migmon.EvCritical, Finding: migmon.FindingNoConvergence,

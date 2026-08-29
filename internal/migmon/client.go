@@ -51,6 +51,12 @@ type Client interface {
 	ShadowRoot(ctx context.Context, hash string) (string, error)
 	// Standard RPC, answered by every client.
 	HeadNumber(ctx context.Context) (uint64, error)
+	// Peer management, used to rebuild the execution layer's mesh after a
+	// partition. Every implementation exposes these under the same admin
+	// namespace, so they sit with the standard calls rather than behind
+	// the introspection split.
+	NodeInfo(ctx context.Context) (string, error)
+	AddPeer(ctx context.Context, enode string) error
 	HeaderByNumber(ctx context.Context, height uint64) (*Header, error)
 	HeaderByTag(ctx context.Context, tag string) (*Header, error)
 }
@@ -229,4 +235,27 @@ func (c *rpcClient) ShadowRoot(ctx context.Context, hash string) (string, error)
 		return "", nil
 	}
 	return out.Hex(), nil
+}
+
+// NodeInfo returns this client's own enode, for handing to another client.
+func (c *rpcClient) NodeInfo(ctx context.Context) (string, error) {
+	var out struct {
+		Enode string `json:"enode"`
+	}
+	if err := c.call(ctx, "admin_nodeInfo", &out); err != nil {
+		return "", err
+	}
+	return out.Enode, nil
+}
+
+// AddPeer asks this client to dial another one.
+func (c *rpcClient) AddPeer(ctx context.Context, enode string) error {
+	var ok bool
+	if err := c.call(ctx, "admin_addPeer", &ok, enode); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%s refused the peer", c.name)
+	}
+	return nil
 }

@@ -85,21 +85,25 @@ func (d Dump) Admitted() []DumpOp {
 }
 
 // HealDeadline returns the instant by which op must have been healed, per
-// its class: pre-fork ops before the network has to be whole again for the
-// approach to the fork, the straddle by its own end plus the convergence
+// its class: a pre-fork op by the time the network has to be whole again for
+// the approach to the fork, the straddle by its own end plus the convergence
 // allowance. A verifier applying one global deadline would fail every
-// straddle for healing after it.
+// straddle for healing after the fork, which is what a straddle does.
+//
+// A pre-fork op's deadline is deliberately NOT its own scheduled end. The
+// heal is applied after sleeping to that end, so its recorded time is always
+// a moment later, and an op whose end coincides with a sweep instant could
+// never pass. The requirement is that the network is whole before the fork
+// approach, so the last sweep at or before the fork is the deadline.
 func (d Dump) HealDeadline(o DumpOp) time.Time {
 	if Class(o.Class) == ClassStraddle {
 		return time.Unix(o.End, 0).Add(straddleExclusiveAfter * time.Second)
 	}
-	// The pre-fork sweep instant: the last failsafe at or before the fork.
-	deadline := time.Unix(d.Fork, 0)
+	fork := time.Unix(d.Fork, 0)
+	deadline := fork
 	for _, f := range d.Failsafes {
-		if t := time.Unix(f, 0); !t.After(deadline) {
-			if t.After(time.Unix(o.End, 0)) || t.Equal(time.Unix(o.End, 0)) {
-				return t
-			}
+		if t := time.Unix(f, 0); !t.After(fork) && t.After(deadline) || deadline.Equal(fork) && !t.After(fork) {
+			deadline = t
 		}
 	}
 	return deadline
