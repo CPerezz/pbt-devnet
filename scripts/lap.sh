@@ -34,8 +34,8 @@ kurtosis enclave rm -f "$ENCLAVE" >/dev/null 2>&1 || true
 kurtosis run . --enclave "$ENCLAVE" --args-file "$ARGS" --privileged > "$OUT/run.log" 2>&1 || {
   say "the run failed to start; tail of the log:"; tail -20 "$OUT/run.log"; exit 1; }
 
-FORK=$(grep -oE 'binaryTrieTime=[0-9]+' "$OUT/run.log" | head -1 | cut -d= -f2)
-GENESIS=$(grep -oE 'genesis_time=[0-9]+' "$OUT/run.log" | head -1 | cut -d= -f2)
+FORK=$( { grep -oE 'binaryTrieTime=[0-9]+' "$OUT/run.log" || true; } | head -1 | cut -d= -f2)
+GENESIS=$( { grep -oE 'genesis_time=[0-9]+' "$OUT/run.log" || true; } | head -1 | cut -d= -f2)
 if [ -z "${FORK:-}" ] || [ -z "${GENESIS:-}" ]; then
   say "the plan printed no fork time; this is not a migration profile"; exit 1
 fi
@@ -91,7 +91,7 @@ trap 'kill $FOLLOW 2>/dev/null || true' EXIT
 if [ -n "$RESTART_NODE" ] && [ "$RESTART_NODE" != "0" ]; then
   target=$((GENESIS + RESTART_AT))
   now=$(date +%s)
-  [ "$target" -gt "$now" ] && sleep $((target - now))
+  if [ "$target" -gt "$now" ]; then sleep $((target - now)); fi
   svc=$(cd scripts && python3 -c "import pbt; print([n for n in pbt.services('$ENCLAVE','el-') if n.startswith('el-$RESTART_NODE-')][0])")
   say "restarting $svc for ${RESTART_FOR}s (follower must recover its cursor)"
   kurtosis service stop "$ENCLAVE" "$svc" >/dev/null
@@ -103,13 +103,18 @@ fi
 # Wait for every client to finish migrating, then for the gate's own window.
 say "waiting for the migration to complete on every client"
 deadline=$((FORK + 1500))
+done_seen=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  done_count=$(kurtosis service logs "$ENCLAVE" migration-monitor -a 2>/dev/null \
-    | grep -o '"phase":"done"' | wc -l | tr -d ' ')
-  [ "${done_count:-0}" -gt 0 ] && break
+  done_count=$( { kurtosis service logs "$ENCLAVE" migration-monitor -a 2>/dev/null \
+    | grep -c '"phase":"done"' || true; } | tr -d ' ')
+  if [ "${done_count:-0}" -gt 0 ]; then done_seen=1; break; fi
   sleep 30
 done
-say "migration reported done"
+if [ "$done_seen" = 1 ]; then
+  say "migration reported done"
+else
+  say "no client reported the migration done before the deadline; judging anyway"
+fi
 
 # Scenarios, if the reorg service is running behind the gate. Its API is
 # reachable only inside the enclave: the gate declares no ports, because
