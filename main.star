@@ -605,14 +605,17 @@ def _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer_senders, 
         plan, chaos, args, net, els, hammer_senders,
         [migration["heavy_node"]], ",".join(counts))
 
+    # No ports are declared, deliberately. Kurtosis waits for a declared
+    # port to accept connections before calling a service started, and this
+    # one listens on nothing until it hands over - which is the whole point,
+    # and is minutes away. The reorg service still binds its API inside the
+    # container once it takes over; reach it with
+    # `kurtosis service exec <enclave> migration-gate -- wget -qO- ...`,
+    # which is what scripts/lap.sh does.
     plan.add_service(
         name="migration-gate",
-        config=ServiceConfig(
-            image=migration["gate_image"],
-            cmd=cmd,
-            ports={"http": PortSpec(number=CHAOS_API_PORT, transport_protocol="TCP", application_protocol="http")},
-        ),
+        config=ServiceConfig(image=migration["gate_image"], cmd=cmd),
     )
     plan.print(("started migration-gate: waits for every client to finish, runs a {0} " +
-                "partition, then hands over to the reorg service on port {1}").format(
-        migration["post_op"], CHAOS_API_PORT))
+                "partition, then hands the reorg service its API on port {1} inside " +
+                "the enclave").format(migration["post_op"], CHAOS_API_PORT))

@@ -21,6 +21,8 @@ RESTART_FOR="${RESTART_FOR:-60}"
 # Scenarios to ask the reorg service for after the switchover.
 SCENARIOS="${SCENARIOS:-code-shared storage-del}"
 SCENARIO_DEPTH="${SCENARIO_DEPTH:-8}"
+# The reorg service's API port inside the enclave, matching main.star.
+CHAOS_PORT="${CHAOS_PORT:-7800}"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 mkdir -p "$OUT"
@@ -109,19 +111,32 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 done
 say "migration reported done"
 
-# Scenarios, if the reorg service is running behind the gate.
-if api=$(kurtosis port print "$ENCLAVE" migration-gate http 2>/dev/null); then
+# Scenarios, if the reorg service is running behind the gate. Its API is
+# reachable only inside the enclave: the gate declares no ports, because
+# kurtosis would wait for one to open and nothing listens there until the
+# handover. So ask from inside the container.
+gate_api() {
+  kurtosis service exec "$ENCLAVE" migration-gate \
+    "wget -qO- --timeout=5 $1 2>/dev/null" 2>/dev/null | tail -n +2
+}
+if kurtosis service inspect "$ENCLAVE" migration-gate >/dev/null 2>&1; then
   say "waiting for the gate to hand over to the reorg service"
-  for _ in $(seq 1 40); do
-    curl -s --max-time 3 "$api/status" >/dev/null 2>&1 && break
+  handed_over=0
+  for _ in $(seq 1 60); do
+    if gate_api "http://127.0.0.1:$CHAOS_PORT/status" | grep -q .; then handed_over=1; break; fi
     sleep 15
   done
-  for s in $SCENARIOS; do
-    say "scenario $s at depth $SCENARIO_DEPTH"
-    curl -s -X POST --max-time 10 "$api/scenario/$s?depth=$SCENARIO_DEPTH" >/dev/null || true
-    sleep 90
-  done
-  curl -s --max-time 10 "$api/status" > "$OUT/chaos-status.json" 2>/dev/null || true
+  if [ "$handed_over" = 1 ]; then
+    for s in $SCENARIOS; do
+      say "scenario $s at depth $SCENARIO_DEPTH"
+      kurtosis service exec "$ENCLAVE" migration-gate \
+        "wget -qO- --timeout=10 --post-data= 'http://127.0.0.1:$CHAOS_PORT/scenario/$s?depth=$SCENARIO_DEPTH'" >/dev/null 2>&1 || true
+      sleep 90
+    done
+    gate_api "http://127.0.0.1:$CHAOS_PORT/status" > "$OUT/chaos-status.json" 2>/dev/null || true
+  else
+    say "the gate never handed over; skipping scenarios"
+  fi
 fi
 
 say "dumping evidence"
