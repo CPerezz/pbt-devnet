@@ -1,4 +1,13 @@
-# Config for the MIGRATION devnet: EIP-8347 empty-state MPT→PBT, geth only.
+# The FULL-LIFECYCLE migration devnet: EIP-8347 empty-state MPT→PBT with
+# reorgs before the fork, across it, and after it.
+#
+# This is args/migration.yaml plus two things: one partition spans the
+# activation itself, so both sides cross it on their own block and the victim
+# has to rewind across the header-root format swap when the network heals;
+# and the tree-at-genesis reorg service runs after the switchover, behind a
+# gate that waits for every client to finish migrating. The result is one run
+# that exercises the same workloads and reorg scenarios as the at-genesis
+# devnet, with the migration in the middle of them.
 #
 # Unlike args/devnet.yaml (PBT at genesis, six clients under test), this chain
 # STARTS on the merkle-patricia trie: the egg emits binaryTrieTime =
@@ -179,20 +188,21 @@ pbt_monitor:
 # nothing about the activation. Set gate: true (see migration-composite.yaml)
 # to run it after the switchover instead. Disruption until then comes from
 # pbt_migration.chaos_profile below.
-pbt_chaos: {}
-
-# Ours (main.star): the single source of truth for the fork offset. T =
-# genesis(block 0).timestamp + fork_offset_seconds. 1800s = 300 slots at 6s;
-# expected canonical blocks before T ≈ 300 − bring-up misses (~10-30) −
-# chaos losses under the full profile (~15-25) ≈ 250 — wide margin over the
-# ≥100 the acceptance harness needs (it counts blocks strictly before the
-# fork block; a chaos-off run at this exact offset measured 298).
-# chaos_profile: full is the complete pre-fork reorg profile, admission-gated
-# to heal every partition before the network approaches the fork.
+# The tree-at-genesis reorg service, gated on the migration finishing: the
+# gate waits for every client to report done, runs one deep partition on the
+# far side of the boundary (binary-canonical execution is a different path
+# from the pre-fork case), then execs this service, which takes over the
+# cadence and answers scenario requests. Depth is capped because finality is
+# flowing again by then, and a reorg deeper than a light victim can heal
+# from would strand it.
+pbt_chaos:
+  gate: true
+  gate_max_depth: 8
 pbt_migration:
   enabled: true
-  fork_offset_seconds: 1800  # floor is 1750: last chaos window ends +1450 plus the 300s heal margin;
-                              # 50s admission slack. Measured margins at this offset: 298 canonical
-                              # blocks before the fork (the harness wants 101) and about 70 usable
-                              # cross-node root samples (it wants 50).
-  chaos_profile: full
+  # 1800s = 300 slots at 6s. The pre-fork schedule ends at +940, the restart
+  # gap runs to +1300, the network is left whole from +1410, and the
+  # straddling partition holds from 90s before the fork to 90s after it.
+  fork_offset_seconds: 1800
+  chaos_profile: composite
+  post_op: deep-heavy

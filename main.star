@@ -62,14 +62,32 @@ DEFAULT_MIGRATION = {
     "enabled": False,
     "fork_offset_seconds": 1800,
     # What drives disruption around the boundary. "none" launches no chaos at
-    # all (quiet acceptance runs); "smoke" and "full" are migration-chaos's own
-    # admission-gated profiles.
+    # all; the rest are migration-chaos's own admission-gated profiles, and
+    # the ones with "composite" or "straddle" in the name hold a partition
+    # across the activation itself.
     "chaos_profile": "none",
     "monitor_image": "pbt-migration-monitor:local",
     "chaos_image": "pbt-migration-chaos:local",
+    "gate_image": "pbt-migration-gate:local",
     # Same convention as pbt_chaos.protect_nodes: participant 1 is the sole
     # bootnode and must never be disrupted. 1-based.
     "protect_nodes": [1],
+    # Which participant carries the heavy validator share, and therefore
+    # every deep and fork-straddling partition. Stake and the victim role
+    # travel together: isolating a node with more than a third of the
+    # validators stalls finality for the window instead of finalizing past
+    # it, and a victim whose branch conflicts with a finalized checkpoint is
+    # banned by the survivors and never rejoins. Measured, not theorised.
+    "heavy_node": 2,
+    "heavy_validators": 256,
+    "light_validators": 128,
+    # What the gate runs once every client reports the migration done:
+    # none, short-light, or deep-heavy. A reorg after the switchover
+    # exercises binary-canonical execution, a different path from the same
+    # reorg before it.
+    "post_op": "deep-heavy",
+    # The monitor's live view. Empty disables it.
+    "monitor_http_port": 8080,
 }
 
 DEFAULT_HAMMER = {
@@ -94,6 +112,15 @@ DEFAULT_HAMMER = {
 DEFAULT_CHAOS = {
     "enabled": True,
     "image": "pbt-chaos:local",
+    # In migration mode this service must not touch the network until the
+    # switchover is finished, so it runs behind the gate rather than being
+    # skipped outright: set gate: true to have the full lifecycle - chaos
+    # before the fork, across it, and after it - in one run.
+    "gate": False,
+    # Depth ceiling for the gated run. After the switchover finality is
+    # flowing again, so a reorg deeper than a light victim can heal from
+    # would strand it; the deep case belongs to the gate's own window.
+    "gate_max_depth": 8,
     # Periodic one-block reorgs, produced by isolating whichever node proposes next: it
     # builds a block nobody else receives, then has to unwind it. The doomed node rotates,
     # so reorgs land on both client types.
@@ -196,6 +223,11 @@ def run(plan, args={}):
         extra["PBT_OFFSET_SECONDS"] = str(migration["fork_offset_seconds"])
         egg["extra_env"] = extra
         upstream_args["ethereum_genesis_generator_params"] = egg
+        # Only profiles that actually partition need the skewed stake; a
+        # quiet or single-node run keeps the package's own even split.
+        if migration["chaos_profile"] != "none":
+            upstream_args["participants"] = _weight_participants(
+                upstream_args.get("participants", []), migration)
     net = ethereum_package.run(plan, upstream_args)
 
     # Execution clients only. all_participants includes the consensus side too, and a
@@ -225,11 +257,13 @@ def run(plan, args={}):
     if hammer["enabled"]:
         _launch_hammer(plan, hammer, els, net.pre_funded_accounts)
     if migration["enabled"]:
-        if chaos["enabled"]:
-            plan.print("pbtchaos SKIPPED: its reorg cadence is not admission-gated against " +
-                       "the fork boundary; migration-chaos (pbt_migration.chaos_profile) owns " +
-                       "disruption in migration mode")
-        _launch_migration(plan, migration, args, els)
+        t, genesis_time = _launch_migration(plan, migration, args, els)
+        if chaos["enabled"] and chaos["gate"]:
+            _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer["senders"], t, genesis_time)
+        elif chaos["enabled"]:
+            plan.print("pbtchaos SKIPPED: its reorg cadence knows nothing about the fork " +
+                       "boundary. Set pbt_chaos.gate: true to run it after the switchover, " +
+                       "or leave it off; migration-chaos owns disruption until then")
     elif chaos["enabled"]:
         _launch_chaos(plan, chaos, args, net, els, hammer["senders"])
 
@@ -296,7 +330,13 @@ def _launch_hammer(plan, cfg, els, prefunded):
     plan.print("started pbthammer: 11 workloads, round-robin, from {0} prefunded accounts".format(n))
 
 
-def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
+def _chaos_cmd(plan, cfg, args, net, els, hammer_senders, extra_protect, validator_counts):
+    """The reorg service's argv, shared by the plain and gated launches.
+
+    Built once so the gated run cannot drift from the one the tree-at-genesis
+    devnet uses: same endpoints, same accounts, same cadence, with only the
+    stake mapping and the extra protected node added.
+    """
     # disruptoor is what applies the partitions and the shaping. Without it pbtchaos has
     # nothing to drive, and a missing selector target is the one failure that looks like
     # success, so refuse rather than start a no-op.
@@ -346,13 +386,21 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
         "--validators-per-node", str(args.get("network_params", {}).get("num_validator_keys_per_node", 128)),
         "--slot-seconds", "{0}s".format(args.get("network_params", {}).get("seconds_per_slot", 12)),
     ]
-    for n in cfg["protect_nodes"]:
+    for n in cfg["protect_nodes"] + extra_protect:
         cmd += ["--protect-node", str(n)]
     if cfg["isolate_for"] != "":
         cmd += ["--isolate-for", cfg["isolate_for"]]
     if not cfg["isolation"]:
         cmd += ["--isolation=false"]
+    if validator_counts != "":
+        cmd += ["--validator-counts", validator_counts]
+    if cfg["gate_max_depth"] > 0 and validator_counts != "":
+        cmd += ["--max-depth", str(cfg["gate_max_depth"])]
+    return cmd
 
+
+def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
+    cmd = _chaos_cmd(plan, cfg, args, net, els, hammer_senders, [], "")
     plan.add_service(
         name="pbtchaos",
         config=ServiceConfig(
@@ -386,38 +434,98 @@ def _genesis_field(plan, name, jq_filter, fmt):
     return result.output
 
 
+MIGRATION_PROFILES = ["none", "smoke", "full", "composite", "composite-smoke", "straddle-smoke"]
+
+
+def _weight_participants(participants, cfg):
+    """Give the heavy participant its validator share, everyone else the rest.
+
+    Stake is the chaos design, so it is rendered here rather than repeated
+    in every args file: the heavy node's share and the victim role travel
+    together, and a file that set one without the other would produce a
+    devnet whose partitions cannot heal. Isolating a node holding more than
+    a third of the validators stalls finality for the window instead of
+    finalizing past it; with the stake spread evenly the majority finalizes
+    past an isolated node and the survivors ban it for good.
+    """
+    heavy = cfg["heavy_node"]
+    out = []
+    for i, p in enumerate(participants):
+        weighted = dict(p)
+        if i + 1 == heavy:
+            weighted["validator_count"] = cfg["heavy_validators"]
+        else:
+            weighted["validator_count"] = cfg["light_validators"]
+        out.append(weighted)
+    return out
+
+
+def _heavy_share(cfg, els):
+    """The heavy participant's share of the validator set.
+
+    Derived from the same numbers that render validator_count, so the chaos
+    driver's admission arithmetic and the chain's actual stake cannot drift
+    apart. The driver refuses a fork-straddling partition whose victim
+    share would make the heal rewind unbounded, and that refusal is only
+    meaningful if this number is the real one.
+    """
+    heavy = cfg["heavy_validators"]
+    total = heavy + (len(els) - 1) * cfg["light_validators"]
+    return float(heavy) / float(total)
+
+
 def _launch_migration(plan, cfg, args, els):
     profile = cfg["chaos_profile"]
-    if profile not in ["none", "smoke", "full"]:
-        fail("pbt_migration.chaos_profile must be none, smoke or full, got {0}".format(profile))
+    if profile not in MIGRATION_PROFILES:
+        fail("pbt_migration.chaos_profile must be one of {0}, got {1}".format(
+            MIGRATION_PROFILES, profile))
 
-    # T and the genesis time come from the generated genesis, never recomputed: the
-    # egg wrote binaryTrieTime there and every client reads that file, so the tooling
-    # must see the identical values. b* and every acceptance window derive from these.
+    # The fork time and the genesis time come from the GENERATED genesis,
+    # never recomputed: the generator wrote binaryTrieTime there and every
+    # client reads that file, so the tooling has to see the identical value.
+    # Every window and acceptance check derives from these two numbers.
     t = _genesis_field(plan, "read-binary-trie-time", ".config.binaryTrieTime", "%s")
     genesis_time = _genesis_field(plan, "read-genesis-time", ".timestamp", "%d")
     plan.print("migration fork: binaryTrieTime={0} genesis_time={1}".format(t, genesis_time))
 
-    cmd = []
-    for el in els:
-        cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
-    # Poll cadence stays on the binary's own 2s default. JSONL on
-    # stdout so `kurtosis service logs` is the log, with nothing to mount or lose.
-    # Samples every 30s, not the binary's 60s default: C6 counts all-non-null
-    # samples, and a measured 30-minute-offset run accrued only ~37 at 1/min -
-    # usable window, under the >=50 bar. Polling at 30s clears it with margin
-    # (A3's ws fallback stays unneeded).
-    cmd += ["--binary-trie-time", t, "--sample-interval", "30s", "--jsonl", "/dev/stdout"]
-    plan.add_service(
-        name="migration-monitor",
-        config=ServiceConfig(image=cfg["monitor_image"], cmd=cmd),
-    )
-    plan.print("started migration-monitor: {0} execution clients, JSONL on stdout".format(len(els)))
+    _launch_migration_monitor(plan, cfg, els, t)
 
     if profile == "none":
         plan.print("migration-chaos not launched: pbt_migration.chaos_profile is none")
-        return
+        return t, genesis_time
+
+    heavy = cfg["heavy_node"]
+    if heavy in cfg["protect_nodes"]:
+        fail(("pbt_migration.heavy_node is {0}, which is also in protect_nodes: the deep and " +
+              "fork-straddling partitions would have no victim").format(heavy))
+    if heavy < 1 or heavy > len(els):
+        fail("pbt_migration.heavy_node is {0}, outside the {1} execution clients".format(
+            heavy, len(els)))
     _launch_migration_chaos(plan, cfg, args, els, t, genesis_time)
+    return t, genesis_time
+
+
+def _launch_migration_monitor(plan, cfg, els, t):
+    cmd = []
+    for el in els:
+        cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
+    # The poll cadence stays on the binary's own 2s default. Sampling runs at
+    # 30s rather than the default minute: a measured run at a half-hour
+    # offset accrued only about 37 usable cross-node root samples at one a
+    # minute, which is thin evidence for a chain that produced hundreds of
+    # blocks. JSONL goes to stdout, so `kurtosis service logs` IS the log,
+    # with nothing to mount and nothing to lose.
+    cmd += ["--binary-trie-time", t, "--sample-interval", "30s", "--jsonl", "/dev/stdout"]
+    ports = {}
+    if cfg["monitor_http_port"] > 0:
+        cmd += ["--http", ":{0}".format(cfg["monitor_http_port"])]
+        ports["http"] = PortSpec(
+            number=cfg["monitor_http_port"], transport_protocol="TCP", application_protocol="http")
+    plan.add_service(
+        name="migration-monitor",
+        config=ServiceConfig(image=cfg["monitor_image"], cmd=cmd, ports=ports),
+    )
+    plan.print("started migration-monitor: {0} execution clients, JSONL on stdout".format(len(els)))
 
 
 def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time):
@@ -437,10 +545,74 @@ def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time):
         "--genesis-time", genesis_time,
         "--binary-trie-time", t,
         "--profile", cfg["chaos_profile"],
+        "--heavy-node", str(cfg["heavy_node"]),
+        "--heavy-share", str(_heavy_share(cfg, els)),
+        "--seconds-per-slot", str(_slot_seconds(args)),
         "--jsonl", "/dev/stdout",
     ]
     plan.add_service(
         name="migration-chaos",
         config=ServiceConfig(image=cfg["chaos_image"], cmd=cmd),
     )
-    plan.print("started migration-chaos: profile {0}, hard stop at T-300s".format(cfg["chaos_profile"]))
+    plan.print("started migration-chaos: profile {0}, heavy victim is participant {1}".format(
+        cfg["chaos_profile"], cfg["heavy_node"]))
+
+
+def _slot_seconds(args):
+    return int(args.get("network_params", {}).get("seconds_per_slot", 12))
+
+
+def _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer_senders, t, genesis_time):
+    """Run the tree-at-genesis reorg service behind the migration gate.
+
+    That service's cadence knows nothing about the activation, so it must not
+    touch the network until the switchover is finished. The gate waits for
+    every client to report the migration done, runs one partition of its own
+    on the far side of the boundary, and then execs the service - so
+    disruptoor passes from one owner to the next with no overlap, provable
+    from the timeline alone.
+    """
+    disruptoor = plan.get_service(name=DISRUPTOOR_SERVICE)
+    api = "http://{0}:{1}".format(disruptoor.ip_address, DISRUPTOOR_PORT)
+
+    cmd = ["--disruptoor", api]
+    for el in els:
+        cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
+    for n in migration["protect_nodes"]:
+        cmd += ["--protect-node", str(n)]
+    cmd += [
+        "--genesis-time", genesis_time,
+        "--binary-trie-time", t,
+        "--profile", migration["chaos_profile"],
+        "--heavy-node", str(migration["heavy_node"]),
+        "--heavy-share", str(_heavy_share(migration, els)),
+        "--seconds-per-slot", str(_slot_seconds(args)),
+        "--post-op", migration["post_op"],
+        "--jsonl", "/dev/stdout",
+    ]
+
+    # Everything from here on is the command the gate execs once it hands
+    # over. The heavy node joins the protected set for that run: its
+    # scenarios are sized for a light victim, and a deep reorg off a
+    # heavy share after the switchover belongs to the gate's own window.
+    counts = []
+    for i in range(len(els)):
+        if i + 1 == migration["heavy_node"]:
+            counts.append(str(migration["heavy_validators"]))
+        else:
+            counts.append(str(migration["light_validators"]))
+    cmd += ["pbtchaos"] + _chaos_cmd(
+        plan, chaos, args, net, els, hammer_senders,
+        [migration["heavy_node"]], ",".join(counts))
+
+    plan.add_service(
+        name="migration-gate",
+        config=ServiceConfig(
+            image=migration["gate_image"],
+            cmd=cmd,
+            ports={"http": PortSpec(number=CHAOS_API_PORT, transport_protocol="TCP", application_protocol="http")},
+        ),
+    )
+    plan.print(("started migration-gate: waits for every client to finish, runs a {0} " +
+                "partition, then hands over to the reorg service on port {1}").format(
+        migration["post_op"], CHAOS_API_PORT))

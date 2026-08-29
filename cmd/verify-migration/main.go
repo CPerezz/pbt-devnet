@@ -3,8 +3,12 @@
 // It reads the migration-monitor's JSONL stream, the chaos driver's JSONL
 // stream, a kurtosis service-log dump directory, and a pins file, and asks
 // the live execution clients the few questions only the chain can answer.
-// It prints one PASS/FAIL line per check (C1..C8) with evidence and exits
-// with the number of failed checks, so 0 means the run passed.
+// It prints one PASS/FAIL/INCONCLUSIVE line per check (C1..C12) with
+// evidence and exits with the number of FAILED checks, so 0 means no
+// check failed. An inconclusive check does not fail the run: it reports
+// that a genuinely stochastic precondition never occurred, so the run
+// proved less than a clean pass. Those ids are repeated in a trailing
+// "inconclusive:" line.
 //
 // b* is the first canonical block whose header timestamp is >= T
 // (--binary-trie-time). It is taken from the monitor's bstar events and
@@ -63,6 +67,19 @@ func main() {
 	binaryTrieTime := flag.Uint64("binary-trie-time", 0, "unix time T of the binary-trie fork (required)")
 	skipChaos := flag.Bool("skip-chaos", false, "chaos was not run: C3 is skipped, C6 drops its window math")
 	smoke := flag.Bool("smoke", false, "single-node smoke run: relaxed C4/C6/C7 thresholds")
+	summaryPath := flag.String("summary", "", "write a one-page markdown record of the run to this path")
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		fmt.Fprint(out, "usage: verify-migration [flags]\n\n"+
+			"Every check prints one line: PASS, FAIL, or INCONCLUSIVE. INCONCLUSIVE\n"+
+			"means a precondition the chain had to supply by chance never occurred\n"+
+			"(no reorg deep enough, no post-fork block from the straddle victim), so\n"+
+			"the check neither passed nor failed. The exit code is the number of\n"+
+			"FAILED checks only; inconclusive ids are listed in a trailing\n"+
+			"\"inconclusive:\" line so an operator can see the run proved less than a\n"+
+			"clean pass.\n\n")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	usage := func(format string, args ...any) {
@@ -94,14 +111,15 @@ func main() {
 	}
 
 	v := &verifier{
-		els:       els,
-		T:         *binaryTrieTime,
-		monitor:   monitor,
-		chaos:     chaos,
-		logsDir:   *logsDir,
-		skipChaos: *skipChaos,
-		smoke:     *smoke,
-		fetch:     httpFetcher(&http.Client{Timeout: 15 * time.Second}),
+		els:         els,
+		T:           *binaryTrieTime,
+		monitor:     monitor,
+		chaos:       chaos,
+		logsDir:     *logsDir,
+		skipChaos:   *skipChaos,
+		smoke:       *smoke,
+		summaryPath: *summaryPath,
+		fetch:       httpFetcher(&http.Client{Timeout: 15 * time.Second}),
 	}
 	if *pinsPath == "" {
 		v.pinsErr = fmt.Errorf("no --pins file given")
@@ -114,13 +132,58 @@ func main() {
 	os.Exit(v.Run(context.Background(), os.Stdout))
 }
 
-// Run executes every check in order, prints one verdict line each, and
-// returns the number of failures (the process exit code).
+// verdict is a check's outcome. Only verdictFail counts against the
+// process exit code: verdictInconclusive means a precondition the chain
+// had to supply by chance never occurred (no reorg reached depth >= 10,
+// no post-fork block came from the straddle victim, a healed isolation
+// left no observable reorg), so the check neither passed nor failed and
+// the run proved less than a clean pass.
+type verdict int
+
+const (
+	verdictPass verdict = iota
+	verdictFail
+	verdictInconclusive
+)
+
+func (r verdict) String() string {
+	switch r {
+	case verdictPass:
+		return "PASS"
+	case verdictInconclusive:
+		return "INCONCLUSIVE"
+	default:
+		return "FAIL"
+	}
+}
+
+// boolVerdict lifts a plain pass/fail check into a verdict, for checks
+// that have no stochastic precondition of their own.
+func boolVerdict(ok bool) verdict {
+	if ok {
+		return verdictPass
+	}
+	return verdictFail
+}
+
+// checkResult is one check's outcome, kept after Run so --summary can
+// render it alongside the run's other evidence.
+type checkResult struct {
+	id       string
+	verdict  verdict
+	evidence string
+}
+
+// Run executes every check in order, prints one verdict line each,
+// prints a trailing "inconclusive:" line naming any INCONCLUSIVE checks,
+// optionally writes the --summary artifact, and returns the number of
+// FAILED checks (the process exit code; inconclusive checks do not
+// count).
 func (v *verifier) Run(ctx context.Context, w io.Writer) int {
 	v.resolveBStar(ctx)
 	checks := []struct {
 		id string
-		fn func(context.Context) (bool, string)
+		fn func(context.Context) (verdict, string)
 	}{
 		{"C1", v.checkC1},
 		{"C2", v.checkC2},
@@ -130,18 +193,41 @@ func (v *verifier) Run(ctx context.Context, w io.Writer) int {
 		{"C6", v.checkC6},
 		{"C7", v.checkC7},
 		{"C8", v.checkC8},
+		{"C9", v.checkC9},
+		{"C10", v.checkC10},
+		{"C11", v.checkC11},
+		{"C12", v.checkC12},
 	}
-	failed := 0
+	var results []checkResult
 	for _, c := range checks {
-		pass, evidence := c.fn(ctx)
-		verdict := "PASS"
-		if !pass {
-			verdict = "FAIL"
-			failed++
+		r, evidence := c.fn(ctx)
+		fmt.Fprintf(w, "%s %s: %s\n", r, c.id, evidence)
+		results = append(results, checkResult{id: c.id, verdict: r, evidence: evidence})
+	}
+	failed, inconclusiveIDs := summarizeVerdicts(results)
+	if len(inconclusiveIDs) > 0 {
+		fmt.Fprintf(w, "inconclusive: %s\n", strings.Join(inconclusiveIDs, ","))
+	}
+	if v.summaryPath != "" {
+		if err := os.WriteFile(v.summaryPath, []byte(v.renderSummary(results)), 0o644); err != nil {
+			fmt.Fprintf(w, "warning: --summary write failed: %v\n", err)
 		}
-		fmt.Fprintf(w, "%s %s: %s\n", verdict, c.id, evidence)
 	}
 	return failed
+}
+
+// summarizeVerdicts counts FAILED checks (the exit code) and collects
+// the ids of every INCONCLUSIVE check, in order.
+func summarizeVerdicts(results []checkResult) (failed int, inconclusiveIDs []string) {
+	for _, r := range results {
+		switch r.verdict {
+		case verdictFail:
+			failed++
+		case verdictInconclusive:
+			inconclusiveIDs = append(inconclusiveIDs, r.id)
+		}
+	}
+	return failed, inconclusiveIDs
 }
 
 // fetcher performs one JSON-RPC call against url and decodes result into out.
@@ -230,6 +316,18 @@ func (v *verifier) getBlock(ctx context.Context, e el, numberOrTag string) (*rpc
 	}
 	if blk == nil {
 		return nil, fmt.Errorf("%s has no block %s", e.name, numberOrTag)
+	}
+	return blk, nil
+}
+
+// getBlockByHash fetches by hash, tolerating a null result: unlike
+// getBlock (used for canonical-tag/number lookups where an absent block
+// is always wrong), a null answer to eth_getBlockByHash on an orphaned
+// hash is exactly the expected, healthy outcome.
+func (v *verifier) getBlockByHash(ctx context.Context, e el, hash string) (*rpcBlock, error) {
+	var blk *rpcBlock
+	if err := v.fetch(ctx, e.url, "eth_getBlockByHash", &blk, hash, false); err != nil {
+		return nil, fmt.Errorf("%s: %w", e.name, err)
 	}
 	return blk, nil
 }
