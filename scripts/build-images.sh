@@ -145,6 +145,7 @@ if want tools; then
   build_cmd pbt-chaos:local   pbtchaos
   build_cmd pbt-migration-monitor:local migration-monitor
   build_cmd pbt-migration-chaos:local   migration-chaos
+  build_cmd pbt-migration-gate:local    migration-gate
 fi
 
 echo

@@ -15,25 +15,33 @@ import (
 	"time"
 
 	"github.com/CPerezz/pbt-devnet/internal/migmon"
+	"github.com/CPerezz/pbt-devnet/internal/migsched"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 // verifier holds every input the checks read, plus the resolved b*. It is
 // built once by main and never mutated concurrently: checks run in sequence.
 type verifier struct {
-	els       []el
-	T         uint64 // --binary-trie-time
-	monitor   []migmon.Event
-	chaos     []migmon.Event
-	logsDir   string
-	pins      map[string]string
-	pinsErr   error
-	skipChaos bool
-	smoke     bool
-	fetch     fetcher
+	els         []el
+	T           uint64 // --binary-trie-time
+	monitor     []migmon.Event
+	chaos       []migmon.Event
+	logsDir     string
+	pins        map[string]string
+	pinsErr     error
+	skipChaos   bool
+	smoke       bool
+	summaryPath string
+	fetch       fetcher
 
 	bstar    bstarResult
 	bstarErr error
+
+	// schedule caches the chaos driver's published schedule, read once
+	// from the chaos stream's "schedule" record by scheduleDump.
+	scheduleLoaded bool
+	schedule       migsched.Dump
+	scheduleErr    error
 }
 
 func (v *verifier) elNames() []string {
@@ -230,8 +238,113 @@ func (v *verifier) chaosWindows() []chaosWindow {
 	return closed
 }
 
+// scheduleDump returns the chaos driver's published schedule, read once
+// from the first "schedule" event in the chaos stream (Raw carries a
+// migsched.Dump). The schedule is the authority on which ops actually
+// ran, their class, and their windows: a check that needs it and finds
+// none fails with that as the evidence, since a run's own schedule is
+// mandatory input.
+func (v *verifier) scheduleDump() (migsched.Dump, error) {
+	if v.scheduleLoaded {
+		return v.schedule, v.scheduleErr
+	}
+	v.scheduleLoaded = true
+	for _, ev := range v.chaos {
+		if ev.Kind == migmon.EvSchedule {
+			v.schedule, v.scheduleErr = migsched.ParseDump(ev.Raw)
+			return v.schedule, v.scheduleErr
+		}
+	}
+	v.scheduleErr = fmt.Errorf("chaos log has no schedule record")
+	return v.schedule, v.scheduleErr
+}
+
+// opAttributionSlop tolerates the gap between an admitted op's own
+// [Start, End] and the chaos driver's actual isolate/heal event times
+// for it.
+const opAttributionSlop = 30 * time.Second
+
+// opWindow pairs one admitted schedule op with the chaosWindow the run
+// actually recorded for it.
+type opWindow struct {
+	op     migsched.DumpOp
+	window chaosWindow
+}
+
+// attributeWindows matches every chaos window this run recorded to the
+// admitted op it belongs to, by victim participant index and by falling
+// inside the op's own window (± slop). A window matching no admitted op
+// is chaos evidence the schedule does not account for.
+func (v *verifier) attributeWindows(dump migsched.Dump, windows []chaosWindow) (matched []opWindow, unscheduled []chaosWindow) {
+	admitted := dump.Admitted()
+	for _, w := range windows {
+		found := false
+		for _, op := range admitted {
+			if opOwns(op, w) {
+				matched = append(matched, opWindow{op: op, window: w})
+				found = true
+				break
+			}
+		}
+		if !found {
+			unscheduled = append(unscheduled, w)
+		}
+	}
+	return matched, unscheduled
+}
+
+// opOwns reports whether w is the isolation the chaos driver ran for op:
+// w's victim participant index is one of op's, and w started inside
+// op's own [Start, End] (± opAttributionSlop).
+func opOwns(op migsched.DumpOp, w chaosWindow) bool {
+	idx, ok := nodeIndex(w.node)
+	if !ok {
+		return false
+	}
+	inVictims := false
+	for _, victim := range op.Victims {
+		if victim == idx {
+			inVictims = true
+			break
+		}
+	}
+	if !inVictims {
+		return false
+	}
+	start := time.Unix(op.Start, 0).Add(-opAttributionSlop)
+	end := time.Unix(op.End, 0).Add(opAttributionSlop)
+	return !w.from.Before(start) && !w.from.After(end)
+}
+
 var reorgDepthRe = regexp.MustCompile(`\(depth (\d+)\)`)
-var reorgDropRe = regexp.MustCompile(`Chain reorg detected.*\bdrop=(\d+)`)
+
+// clientLogPatterns maps an execution client's name (parsed by clientOf
+// from the "el-<n>-<client>-<cl>" naming convention) to the regexp its
+// reorg log line matches, with named captures "drop" (dropped-branch
+// length) and, where available, "ancestor" (common-ancestor height). A
+// client with no entry here degrades to monitor-events-only
+// corroboration - matchReorg records that in the evidence it returns.
+var clientLogPatterns = map[string]*regexp.Regexp{
+	// geth logs "Chain reorg detected number=N hash=H drop=D
+	// dropfrom=H add=A addfrom=H" (or "Large chain reorg detected" past
+	// 63 dropped blocks). number is the common-ancestor block height:
+	// go-ethereum's core/blockchain.go walks both chains back until
+	// their headers match and logs that block as commonBlock, so it
+	// needs no arithmetic to use directly as the ancestor height.
+	"geth": regexp.MustCompile(`Chain reorg detected.*\bnumber=(?P<ancestor>\d+).*\bdrop=(?P<drop>\d+)`),
+}
+
+// clientOf extracts the execution client name from a node/service name
+// shaped "el-<n>-<client>-<cl>" (kurtosis's convention). The chaos
+// driver's own "node-<n>" names carry no client type.
+func clientOf(node string) string {
+	parts := strings.Split(node, "-")
+	if len(parts) < 4 || parts[0] != "el" {
+		return ""
+	}
+	return parts[2]
+}
+
 var nodeIndexRe = regexp.MustCompile(`^(?:node|el)-(\d+)\b|^(?:node|el)-(\d+)-`)
 
 // nodeIndex extracts the participant index shared by the two naming
@@ -263,13 +376,73 @@ func sameNode(a, b string) bool {
 	return oka && okb && ia == ib
 }
 
+// victimClient resolves node's execution client type for the
+// clientLogPatterns registry. The chaos driver speaks participant
+// indices ("node-2"); the client type lives in the monitor's or
+// logsDir's "el-N-<client>-<cl>" names, so a bare index is resolved
+// through those first.
+func (v *verifier) victimClient(node string) string {
+	if c := clientOf(node); c != "" {
+		return c
+	}
+	idx, ok := nodeIndex(node)
+	if !ok {
+		return ""
+	}
+	for _, ev := range v.monitor {
+		if i, ok := nodeIndex(ev.Node); ok && i == idx {
+			if c := clientOf(ev.Node); c != "" {
+				return c
+			}
+		}
+	}
+	if v.logsDir == "" {
+		return ""
+	}
+	for _, f := range v.victimLogFiles(node) {
+		if c := clientOf(filepath.Base(f)); c != "" {
+			return c
+		}
+	}
+	return ""
+}
+
+// reorgEvidence is what the run can prove about the reorg tied to one
+// isolation's heal.
+type reorgEvidence struct {
+	depth    int
+	matched  bool
+	ancestor int    // common-ancestor block height, 0 if unknown
+	source   string // "monitor", or a client name for a log-line match
+	// degraded is true when the victim's client has no registered log
+	// pattern, so only a monitor reorg event could have corroborated
+	// this isolation.
+	degraded bool
+}
+
+func (e reorgEvidence) String() string {
+	if !e.matched {
+		if e.degraded {
+			return "no matching monitor reorg event (client has no registered log pattern, degraded to monitor-events-only)"
+		}
+		return "no matching reorg evidence"
+	}
+	note := fmt.Sprintf("depth %d via %s", e.depth, e.source)
+	if e.ancestor > 0 {
+		note += fmt.Sprintf(" (common ancestor height %d)", e.ancestor)
+	}
+	return note
+}
+
 // matchReorg looks for evidence that w's isolation actually caused a
-// reorg on the victim: a monitor reorg event of depth >= 1 within the
-// window (+30s slop), or a geth "Chain reorg detected ... drop=N" line in
-// the victim's log - drop is the dropped-branch length, exactly the depth
-// C3 counts, so log evidence can satisfy the >= 10 requirement too.
-func (v *verifier) matchReorg(w chaosWindow) (depth int, ok bool) {
+// reorg on the victim. Monitor reorg events are the primary evidence: a
+// depth >= 1 event within the window (+30s slop). A client's own reorg
+// log line, via the clientLogPatterns registry, is the fallback; a
+// client with no registered pattern degrades to monitor-events-only,
+// which the returned evidence records.
+func (v *verifier) matchReorg(w chaosWindow) reorgEvidence {
 	const slop = 30 * time.Second
+	var best reorgEvidence
 	for _, ev := range v.monitor {
 		if ev.Kind != migmon.EvReorg || !sameNode(ev.Node, w.node) {
 			continue
@@ -281,21 +454,26 @@ func (v *verifier) matchReorg(w chaosWindow) (depth int, ok bool) {
 		if m := reorgDepthRe.FindStringSubmatch(ev.Detail); m != nil {
 			d, _ = strconv.Atoi(m[1])
 		}
-		if d >= 1 && d > depth {
-			depth, ok = d, true
+		if d >= 1 && d > best.depth {
+			best = reorgEvidence{depth: d, matched: true, source: "monitor"}
 		}
+	}
+	client := v.victimClient(w.node)
+	re, registered := clientLogPatterns[client]
+	if !registered {
+		best.degraded = !best.matched
+		return best
 	}
 	if v.logsDir != "" {
 		for _, f := range v.victimLogFiles(w.node) {
-			for _, m := range fileAllMatches(f, reorgDropRe) {
-				d, _ := strconv.Atoi(m)
-				if d >= 1 && d > depth {
-					depth, ok = d, true
+			for _, m := range logReorgMatches(f, re) {
+				if m.drop >= 1 && m.drop > best.depth {
+					best = reorgEvidence{depth: m.drop, matched: true, source: client, ancestor: m.ancestor}
 				}
 			}
 		}
 	}
-	return depth, ok
+	return best
 }
 
 // victimLogFiles resolves a chaos victim name to its log dump files via
@@ -311,15 +489,38 @@ func (v *verifier) victimLogFiles(node string) []string {
 	return files
 }
 
-// fileAllMatches returns the first submatch of every re match in f.
-func fileAllMatches(f string, re *regexp.Regexp) []string {
+// reorgLogMatch is one reorg log line's parsed drop length and, if the
+// pattern captured it, common-ancestor height.
+type reorgLogMatch struct {
+	drop     int
+	ancestor int
+}
+
+// logReorgMatches returns every reorg re matches in file f, via its
+// named "drop" and (optional) "ancestor" capture groups.
+func logReorgMatches(f string, re *regexp.Regexp) []reorgLogMatch {
 	data, err := os.ReadFile(f)
 	if err != nil {
 		return nil
 	}
-	var out []string
+	dropIdx, ancestorIdx := re.SubexpIndex("drop"), re.SubexpIndex("ancestor")
+	if dropIdx < 0 {
+		return nil
+	}
+	var out []reorgLogMatch
 	for _, m := range re.FindAllStringSubmatch(string(data), -1) {
-		out = append(out, m[1])
+		if dropIdx >= len(m) {
+			continue
+		}
+		drop, err := strconv.Atoi(m[dropIdx])
+		if err != nil {
+			continue
+		}
+		row := reorgLogMatch{drop: drop}
+		if ancestorIdx >= 0 && ancestorIdx < len(m) && m[ancestorIdx] != "" {
+			row.ancestor, _ = strconv.Atoi(m[ancestorIdx])
+		}
+		out = append(out, row)
 	}
 	return out
 }
@@ -392,24 +593,24 @@ func fileContainsMatch(path string, re *regexp.Regexp) bool {
 }
 
 // checkC1 requires at least 100 canonical blocks strictly before b*.
-func (v *verifier) checkC1(ctx context.Context) (bool, string) {
+func (v *verifier) checkC1(ctx context.Context) (verdict, string) {
 	if v.bstarErr != nil {
-		return false, fmt.Sprintf("b* unresolved: %v", v.bstarErr)
+		return verdictFail, fmt.Sprintf("b* unresolved: %v", v.bstarErr)
 	}
 	if v.bstar.number < 101 {
-		return false, fmt.Sprintf("b*=%d, need >= 101 for 100 canonical blocks before it", v.bstar.number)
+		return verdictFail, fmt.Sprintf("b*=%d, need >= 101 for 100 canonical blocks before it", v.bstar.number)
 	}
-	return true, v.bstar.evidence
+	return verdictPass, v.bstar.evidence
 }
 
 // checkC2 requires an early first transaction (s0 <= 50) and at least one
 // transacting block in every 25-block bucket of [s0, b*-1].
-func (v *verifier) checkC2(ctx context.Context) (bool, string) {
+func (v *verifier) checkC2(ctx context.Context) (verdict, string) {
 	if v.bstarErr != nil {
-		return false, fmt.Sprintf("b* unresolved: %v", v.bstarErr)
+		return verdictFail, fmt.Sprintf("b* unresolved: %v", v.bstarErr)
 	}
 	if len(v.els) == 0 {
-		return false, "no --el configured"
+		return verdictFail, "no --el configured"
 	}
 	e := v.els[0]
 
@@ -418,7 +619,7 @@ func (v *verifier) checkC2(ctx context.Context) (bool, string) {
 	for n := uint64(0); n <= 50; n++ {
 		cnt, err := v.txCount(ctx, e, n)
 		if err != nil {
-			return false, fmt.Sprintf("tx count for block %d: %v", n, err)
+			return verdictFail, fmt.Sprintf("tx count for block %d: %v", n, err)
 		}
 		if cnt > 0 {
 			s0, found = n, true
@@ -426,10 +627,10 @@ func (v *verifier) checkC2(ctx context.Context) (bool, string) {
 		}
 	}
 	if !found {
-		return false, "no block with >=1 tx found in [0,50]"
+		return verdictFail, "no block with >=1 tx found in [0,50]"
 	}
 	if v.bstar.number == 0 || v.bstar.number-1 < s0 {
-		return false, fmt.Sprintf("s0=%d is not before b*-1 (b*=%d)", s0, v.bstar.number)
+		return verdictFail, fmt.Sprintf("s0=%d is not before b*-1 (b*=%d)", s0, v.bstar.number)
 	}
 	end := v.bstar.number - 1
 
@@ -443,7 +644,7 @@ func (v *verifier) checkC2(ctx context.Context) (bool, string) {
 		for n := lo; n <= hi; n++ {
 			cnt, err := v.txCount(ctx, e, n)
 			if err != nil {
-				return false, fmt.Sprintf("tx count for block %d: %v", n, err)
+				return verdictFail, fmt.Sprintf("tx count for block %d: %v", n, err)
 			}
 			if cnt > 0 {
 				bucketHasTx = true
@@ -455,75 +656,86 @@ func (v *verifier) checkC2(ctx context.Context) (bool, string) {
 		}
 	}
 	if len(emptyBuckets) > 0 {
-		return false, fmt.Sprintf("s0=%d but empty 25-block bucket(s): %s", s0, strings.Join(emptyBuckets, ","))
+		return verdictFail, fmt.Sprintf("s0=%d but empty 25-block bucket(s): %s", s0, strings.Join(emptyBuckets, ","))
 	}
-	return true, fmt.Sprintf("s0=%d, every 25-block bucket in [%d,%d] has >=1 tx block", s0, s0, end)
+	return verdictPass, fmt.Sprintf("s0=%d, every 25-block bucket in [%d,%d] has >=1 tx block", s0, s0, end)
 }
 
-// checkC3 requires >=4 healed chaos isolations corroborated by a reorg
-// (monitor event or victim log line), at least one of depth >= 10, all
-// healed no later than T-300. The floor is a COUNT of matched
-// isolations, not all-must-match: a short window can legitimately heal
-// without an observable reorg when the victim proposed nothing alone.
-func (v *verifier) checkC3(ctx context.Context) (bool, string) {
+// checkC3 asks the run's own schedule which chaos ops actually ran and
+// applies each op's class-specific heal deadline instead of one global
+// rule: a straddle heals after the fork by design, so a single pre-fork
+// deadline would fail every straddle by construction. It fails only on
+// an admitted op that never healed, one healed past its class deadline,
+// or an isolation the chaos evidence shows that the schedule does not
+// admit - the schedule record is mandatory input, and its absence fails
+// the check outright (unless --skip-chaos). Corroboration by a reorg is
+// a floor of >=4, not all-must-match: a healed, converged op that
+// produces no matchable reorg evidence is a stochastic miss (a light
+// victim can legitimately mint nothing in its window), so falling short
+// only on corroboration is INCONCLUSIVE rather than a failure. Reorg
+// depth plays no part here - see C9.
+func (v *verifier) checkC3(ctx context.Context) (verdict, string) {
 	if v.skipChaos {
-		return true, "skipped (--skip-chaos)"
+		return verdictPass, "skipped (--skip-chaos)"
 	}
-	var healed []chaosWindow
-	for _, w := range v.chaosWindows() {
-		if w.healed {
-			healed = append(healed, w)
+	dump, err := v.scheduleDump()
+	if err != nil {
+		return verdictFail, fmt.Sprintf("schedule: %v", err)
+	}
+	matched, unscheduled := v.attributeWindows(dump, v.chaosWindows())
+	if len(unscheduled) > 0 {
+		var names []string
+		for _, w := range unscheduled {
+			names = append(names, w.node)
 		}
-	}
-	if len(healed) < 4 {
-		return false, fmt.Sprintf("only %d healed isolation(s), need >= 4", len(healed))
+		return verdictFail, fmt.Sprintf("isolation(s) not in the schedule's admitted ops: %s", strings.Join(names, ", "))
 	}
 
-	deadline := time.Unix(int64(v.T), 0).Add(-300 * time.Second)
-	anyDeep := false
-	matched := 0
 	var problems, notes []string
-	for i, w := range healed {
-		if w.to.After(deadline) {
-			problems = append(problems, fmt.Sprintf("isolation #%d (%s) healed at %s, after T-300 deadline %s",
-				i, w.node, w.to.Format(time.RFC3339), deadline.Format(time.RFC3339)))
+	healed, corroborated := 0, 0
+	for _, ow := range matched {
+		w := ow.window
+		if !w.healed {
+			problems = append(problems, fmt.Sprintf("op %s (%s) never healed", ow.op.Name, w.node))
 			continue
 		}
-		depth, ok := v.matchReorg(w)
-		if !ok {
-			notes = append(notes, fmt.Sprintf("isolation #%d (%s) unmatched", i, w.node))
+		if deadline := dump.HealDeadline(ow.op); w.to.After(deadline) {
+			problems = append(problems, fmt.Sprintf("op %s (%s) healed at %s, after its %s deadline %s",
+				ow.op.Name, w.node, w.to.Format(time.RFC3339), ow.op.Class, deadline.Format(time.RFC3339)))
 			continue
 		}
-		matched++
-		if depth >= 10 {
-			anyDeep = true
+		healed++
+		if ev := v.matchReorg(w); ev.matched {
+			corroborated++
+		} else {
+			notes = append(notes, fmt.Sprintf("op %s (%s): %s", ow.op.Name, w.node, ev.String()))
 		}
 	}
 	if len(problems) > 0 {
-		return false, strings.Join(problems, "; ")
+		return verdictFail, strings.Join(problems, "; ")
 	}
-	if matched < 4 {
-		return false, fmt.Sprintf("only %d isolation(s) matched by a reorg, need >= 4 (%s)", matched, strings.Join(notes, "; "))
+	if healed < 4 {
+		return verdictFail, fmt.Sprintf("only %d healed isolation(s) within their class deadline, need >= 4", healed)
 	}
-	if !anyDeep {
-		return false, fmt.Sprintf("%d isolation(s) matched but none reached reorg depth >= 10", matched)
-	}
-	evidence := fmt.Sprintf("%d/%d healed isolations matched, >=1 at depth >= 10, all healed before T-300", matched, len(healed))
+	evidence := fmt.Sprintf("%d/%d admitted ops healed within their class deadline, %d corroborated by a reorg", healed, len(matched), corroborated)
 	if len(notes) > 0 {
 		evidence += " (" + strings.Join(notes, "; ") + ")"
 	}
-	return true, evidence
+	if corroborated < 4 {
+		return verdictInconclusive, evidence
+	}
+	return verdictPass, evidence
 }
 
 // checkC4 requires 3-way (or self-consistent, under --smoke) agreement on
 // (hash, stateRoot) for the trailing 32 blocks before b* and for
 // [b*-1, b*+10].
-func (v *verifier) checkC4(ctx context.Context) (bool, string) {
+func (v *verifier) checkC4(ctx context.Context) (verdict, string) {
 	if v.bstarErr != nil {
-		return false, fmt.Sprintf("b* unresolved: %v", v.bstarErr)
+		return verdictFail, fmt.Sprintf("b* unresolved: %v", v.bstarErr)
 	}
 	if len(v.els) == 0 {
-		return false, "no --el configured"
+		return verdictFail, "no --el configured"
 	}
 	b := v.bstar.number
 	lo := uint64(0)
@@ -561,9 +773,9 @@ func (v *verifier) checkC4(ctx context.Context) (bool, string) {
 		}
 	}
 	if len(problems) > 0 {
-		return false, strings.Join(problems, "; ")
+		return verdictFail, strings.Join(problems, "; ")
 	}
-	return true, fmt.Sprintf("%d block(s) in [%d,%d] agree across %d node(s)", checked, lo, hi, len(v.els))
+	return verdictPass, fmt.Sprintf("%d block(s) in [%d,%d] agree across %d node(s)", checked, lo, hi, len(v.els))
 }
 
 func progressStage(p migmon.MigrationProgress) int {
@@ -649,7 +861,7 @@ func (v *verifier) checkNodeTimeline(node string) error {
 // checkC5 rejects any log mention of migration-window configuration,
 // requires each node's phase timeline to be strictly ordered relative to
 // b*, and surfaces (never gates on) beacon finality corroboration.
-func (v *verifier) checkC5(ctx context.Context) (bool, string) {
+func (v *verifier) checkC5(ctx context.Context) (verdict, string) {
 	var problems, notes []string
 
 	if v.logsDir == "" {
@@ -677,7 +889,7 @@ func (v *verifier) checkC5(ctx context.Context) (bool, string) {
 	if evidence == "" {
 		evidence = "no migration-window mentions; all node timelines strictly ordered"
 	}
-	return len(problems) == 0, evidence
+	return boolVerdict(len(problems) == 0), evidence
 }
 
 // checkC6 applies F1 semantics to the sample stream: full mode wants >=50
@@ -685,7 +897,7 @@ func (v *verifier) checkC5(ctx context.Context) (bool, string) {
 // strictly outside chaos windows; --smoke relaxes the sample floor. Any
 // critical F1 fails unconditionally; other criticals are waived only when
 // fully inside a chaos window (+30s slop) for that event's node.
-func (v *verifier) checkC6(ctx context.Context) (bool, string) {
+func (v *verifier) checkC6(ctx context.Context) (verdict, string) {
 	windows := v.chaosWindows()
 	const slop = 30 * time.Second
 	names := v.elNames()
@@ -764,9 +976,9 @@ func (v *verifier) checkC6(ctx context.Context) (bool, string) {
 	}
 
 	if len(problems) > 0 {
-		return false, strings.Join(problems, "; ")
+		return verdictFail, strings.Join(problems, "; ")
 	}
-	return true, fmt.Sprintf("%d samples, %d good, %d outside chaos windows, 0 unwaived criticals", samples, good, outsideGood)
+	return verdictPass, fmt.Sprintf("%d samples, %d good, %d outside chaos windows, 0 unwaived criticals", samples, good, outsideGood)
 }
 
 // checkC7 compares the pins file against every node's real genesis block.
@@ -775,20 +987,20 @@ func (v *verifier) checkC6(ctx context.Context) (bool, string) {
 // kurtosis stamps each run's genesis timestamp at render time, so the hash
 // is per-run by design: kurtosis stamps it at render time. "pending" fails, except
 // under --smoke where it is a warning.
-func (v *verifier) checkC7(ctx context.Context) (bool, string) {
+func (v *verifier) checkC7(ctx context.Context) (verdict, string) {
 	if v.pinsErr != nil {
-		return false, fmt.Sprintf("pins: %v", v.pinsErr)
+		return verdictFail, fmt.Sprintf("pins: %v", v.pinsErr)
 	}
 	hash, hok := v.pins["genesis_hash"]
 	root, rok := v.pins["genesis_state_root"]
 	if !rok {
-		return false, "pins file missing genesis_state_root"
+		return verdictFail, "pins file missing genesis_state_root"
 	}
 	if (hok && hash == "pending") || root == "pending" {
 		if v.smoke {
-			return true, "WARN: genesis pins are 'pending' (allowed under --smoke)"
+			return verdictPass, "WARN: genesis pins are 'pending' (allowed under --smoke)"
 		}
-		return false, "genesis pins are 'pending'"
+		return verdictFail, "genesis pins are 'pending'"
 	}
 
 	var problems []string
@@ -806,13 +1018,13 @@ func (v *verifier) checkC7(ctx context.Context) (bool, string) {
 		}
 	}
 	if len(problems) > 0 {
-		return false, strings.Join(problems, "; ")
+		return verdictFail, strings.Join(problems, "; ")
 	}
 	what := "stateRoot"
 	if hok {
 		what = "hash/stateRoot"
 	}
-	return true, fmt.Sprintf("genesis %s match pins across %d node(s)", what, len(v.els))
+	return verdictPass, fmt.Sprintf("genesis %s match pins across %d node(s)", what, len(v.els))
 }
 
 var digestLineRe = regexp.MustCompile(`PBT_ARTIFACT_DIGESTS\s+\S*snapshot=([0-9a-fA-F]{64})\s+\S*preimages=([0-9a-fA-F]{64})`)
@@ -821,9 +1033,9 @@ type artifactDigests struct{ snapshot, preimages string }
 
 // checkC8 requires exactly one PBT_ARTIFACT_DIGESTS line per EL log file,
 // with identical snapshot/preimages digests across every node.
-func (v *verifier) checkC8(ctx context.Context) (bool, string) {
+func (v *verifier) checkC8(ctx context.Context) (verdict, string) {
 	if v.logsDir == "" {
-		return false, "no --logs-dir given"
+		return verdictFail, "no --logs-dir given"
 	}
 	perNode := map[string]artifactDigests{}
 	var problems []string
@@ -850,7 +1062,7 @@ func (v *verifier) checkC8(ctx context.Context) (bool, string) {
 		perNode[node] = matches[0]
 	}
 	if len(problems) > 0 {
-		return false, strings.Join(problems, "; ")
+		return verdictFail, strings.Join(problems, "; ")
 	}
 
 	var first artifactDigests
@@ -866,7 +1078,299 @@ func (v *verifier) checkC8(ctx context.Context) (bool, string) {
 		}
 	}
 	if len(problems) > 0 {
-		return false, strings.Join(problems, "; ")
+		return verdictFail, strings.Join(problems, "; ")
 	}
-	return true, fmt.Sprintf("snapshot=%s preimages=%s identical across %d node(s)", first.snapshot, first.preimages, len(perNode))
+	return verdictPass, fmt.Sprintf("snapshot=%s preimages=%s identical across %d node(s)", first.snapshot, first.preimages, len(perNode))
+}
+
+// checkC9 asks whether any healed isolation's corroborated reorg
+// reached a dropped-branch depth >= 10 - the threshold C3 used to gate
+// on directly, which failed every straddle by construction (a straddle
+// heals after the fork, so if it already cleared its own class deadline
+// in C3 there is nothing left for a global depth floor to add). Depth
+// depends on what the isolated victim minted alone in its window, which
+// a light victim or bad luck can legitimately fail to produce, so its
+// absence is a stochastic miss, not a failure.
+func (v *verifier) checkC9(ctx context.Context) (verdict, string) {
+	if v.skipChaos {
+		return verdictPass, "skipped (--skip-chaos)"
+	}
+	dump, err := v.scheduleDump()
+	if err != nil {
+		return verdictFail, fmt.Sprintf("schedule: %v", err)
+	}
+	matched, _ := v.attributeWindows(dump, v.chaosWindows())
+	best, bestOp := 0, ""
+	for _, ow := range matched {
+		if !ow.window.healed {
+			continue
+		}
+		if ev := v.matchReorg(ow.window); ev.matched && ev.depth > best {
+			best, bestOp = ev.depth, ow.op.Name
+		}
+	}
+	if best >= 10 {
+		return verdictPass, fmt.Sprintf("op %s reorged at depth %d (>= 10)", bestOp, best)
+	}
+	return verdictInconclusive, fmt.Sprintf("no admitted op reorged at depth >= 10 (max observed %d)", best)
+}
+
+// checkC10 asks whether the run actually exercised a fork-straddling
+// partition: the schedule must have admitted a straddle op whose window
+// contains the fork time, the victim's fork block must have been
+// orphaned by the heal (a bstar-reorged event), and the dropped branch
+// must be at least 6 blocks deep - proof the reorg crossed a real span
+// of chain, not a one-block wobble. A profile that never scheduled a
+// straddle, or a straddle victim that minted no post-fork block to
+// orphan, is INCONCLUSIVE: the run simply never got to prove this.
+func (v *verifier) checkC10(ctx context.Context) (verdict, string) {
+	if v.skipChaos {
+		return verdictPass, "skipped (--skip-chaos)"
+	}
+	dump, err := v.scheduleDump()
+	if err != nil {
+		return verdictFail, fmt.Sprintf("schedule: %v", err)
+	}
+	fork := time.Unix(dump.Fork, 0)
+	admitted := dump.Admitted()
+	var straddle *migsched.DumpOp
+	for i := range admitted {
+		o := admitted[i]
+		if migsched.Class(o.Class) != migsched.ClassStraddle {
+			continue
+		}
+		start, end := time.Unix(o.Start, 0), time.Unix(o.End, 0)
+		if !fork.Before(start) && !fork.After(end) {
+			straddle = &admitted[i]
+			break
+		}
+	}
+	if straddle == nil {
+		return verdictInconclusive, fmt.Sprintf("no admitted straddle op spans the fork time %s in this run's schedule", fork.Format(time.RFC3339))
+	}
+	if len(straddle.Victims) == 0 {
+		return verdictFail, fmt.Sprintf("schedule straddle op %s has no victims", straddle.Name)
+	}
+	victimNode := fmt.Sprintf("node-%d", straddle.Victims[0])
+
+	reorged := false
+	for _, ev := range v.monitor {
+		if ev.Kind == migmon.EvBStarReorged && sameNode(ev.Node, victimNode) {
+			reorged = true
+			break
+		}
+	}
+	if !reorged {
+		return verdictInconclusive, fmt.Sprintf("straddle op %s admitted (window contains fork %s), but victim's fork block was never orphaned (no bstar-reorged event)",
+			straddle.Name, fork.Format(time.RFC3339))
+	}
+
+	w := chaosWindow{
+		node:   victimNode,
+		from:   time.Unix(straddle.Start, 0),
+		to:     time.Unix(straddle.End, 0).Add(migmon.ConvergenceGrace * time.Second),
+		healed: true,
+	}
+	reorg := v.matchReorg(w)
+	if !reorg.matched {
+		return verdictInconclusive, fmt.Sprintf("straddle op %s: victim's fork block was orphaned but no matchable reorg depth evidence (%s)", straddle.Name, reorg.String())
+	}
+	if reorg.depth < 6 {
+		return verdictFail, fmt.Sprintf("straddle op %s dropped branch depth %d < 6 (%s)", straddle.Name, reorg.depth, reorg.String())
+	}
+	return verdictPass, fmt.Sprintf("straddle op %s spans fork %s, victim's fork block orphaned, dropped branch depth %d (%s)",
+		straddle.Name, fork.Format(time.RFC3339), reorg.depth, reorg.String())
+}
+
+// forkBlockRecord is one node's view of the fork block: the height b*
+// landed on and the hash it holds.
+type forkBlockRecord struct {
+	number uint64
+	hash   string
+}
+
+// finalForkBlock determines the run's authoritative final fork block:
+// the bstar-final record every node that reached it agrees on, or - if
+// none finalized within the observed stream - the latest bstar record
+// every node that reported one agrees on. Disagreement, or no record at
+// all, is a hard error: this is not a stochastic precondition, it is
+// the fork block the whole run is organized around.
+func (v *verifier) finalForkBlock() (forkBlockRecord, error) {
+	final := map[string]forkBlockRecord{}
+	latest := map[string]forkBlockRecord{}
+	for _, ev := range v.monitor {
+		switch ev.Kind {
+		case migmon.EvBStar, migmon.EvBStarReorged:
+			latest[ev.Node] = forkBlockRecord{number: ev.Number, hash: ev.Hash}
+		case migmon.EvBStarFinal:
+			final[ev.Node] = forkBlockRecord{number: ev.Number, hash: ev.Hash}
+		}
+	}
+	records, source := final, "bstar-final"
+	if len(records) == 0 {
+		records, source = latest, "bstar"
+	}
+	if len(records) == 0 {
+		return forkBlockRecord{}, fmt.Errorf("no bstar record observed to establish a final fork block")
+	}
+	var ref forkBlockRecord
+	set := false
+	var disagree []string
+	for node, r := range records {
+		if !set {
+			ref, set = r, true
+			continue
+		}
+		if r != ref {
+			disagree = append(disagree, node)
+		}
+	}
+	if len(disagree) > 0 {
+		sort.Strings(disagree)
+		return forkBlockRecord{}, fmt.Errorf("%s records disagree across nodes: reference block %d %s, disagreeing %s", source, ref.number, ref.hash, strings.Join(disagree, ","))
+	}
+	return ref, nil
+}
+
+// checkC11 requires that once a fork-straddling partition heals, the
+// two branches that crossed the fork independently actually converge:
+// every configured node must agree on the final canonical fork block's
+// height and hash, no F4 (no-convergence) critical may go unwaived, and
+// at least 2 distinct provisional fork-block hashes must have been
+// observed across the run - proof that two branches genuinely crossed
+// independently, not that only one node ever saw a fork block at all.
+// An F4 is waived under the same rule C6 applies to other criticals: a
+// fresh chaos window already covering that node and moment explains a
+// transient non-convergence without a stuck node.
+func (v *verifier) checkC11(ctx context.Context) (verdict, string) {
+	final, err := v.finalForkBlock()
+	if err != nil {
+		return verdictFail, err.Error()
+	}
+
+	var problems []string
+	for _, e := range v.els {
+		blk, err := v.getBlock(ctx, e, hexutil.EncodeUint64(final.number))
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", e.name, err))
+			continue
+		}
+		if !strings.EqualFold(blk.Hash.Hex(), final.hash) {
+			problems = append(problems, fmt.Sprintf("%s block %d hash %s != final fork-block hash %s", e.name, final.number, blk.Hash.Hex(), final.hash))
+		}
+	}
+	if len(problems) > 0 {
+		return verdictFail, strings.Join(problems, "; ")
+	}
+
+	windows := v.chaosWindows()
+	const slop = 30 * time.Second
+	for _, ev := range v.monitor {
+		if ev.Kind != migmon.EvCritical || ev.Finding != migmon.FindingNoConvergence {
+			continue
+		}
+		waived := false
+		for _, w := range windows {
+			if w.covers(ev.Node, ev.Time, slop) {
+				waived = true
+				break
+			}
+		}
+		if !waived {
+			problems = append(problems, fmt.Sprintf("unwaived F4 at %s (node %s): %s", ev.Time.Format(time.RFC3339), ev.Node, ev.Detail))
+		}
+	}
+	if len(problems) > 0 {
+		return verdictFail, strings.Join(problems, "; ")
+	}
+
+	provisional := map[string]bool{}
+	for _, ev := range v.monitor {
+		if (ev.Kind == migmon.EvBStar || ev.Kind == migmon.EvBStarReorged) && ev.Hash != "" {
+			provisional[ev.Hash] = true
+		}
+	}
+	if len(provisional) < 2 {
+		return verdictInconclusive, fmt.Sprintf("all %d node(s) agree on final fork block %d (%s), 0 unwaived F4, but only %d distinct provisional fork-block hash(es) observed, need >= 2 to prove two branches crossed independently",
+			len(v.els), final.number, final.hash, len(provisional))
+	}
+	return verdictPass, fmt.Sprintf("all %d node(s) agree on final fork block %d (%s), 0 unwaived F4, %d distinct provisional fork-block hashes observed",
+		len(v.els), final.number, final.hash, len(provisional))
+}
+
+// orphanBlock is one post-fork block a bstar-reorged event shows a node
+// abandoned.
+type orphanBlock struct {
+	height uint64
+	hash   string
+}
+
+var orphanHashRe = regexp.MustCompile(`0x[0-9a-fA-F]{64}`)
+
+// orphanedForkBlocks collects the post-fork blocks bstar-reorged events
+// show were orphaned: the old hash embedded in each event's Detail
+// ("fork block N 0x... was orphaned; ..."), at the height its Number
+// field records.
+func (v *verifier) orphanedForkBlocks() []orphanBlock {
+	var out []orphanBlock
+	seen := map[string]bool{}
+	for _, ev := range v.monitor {
+		if ev.Kind != migmon.EvBStarReorged {
+			continue
+		}
+		old := orphanHashRe.FindString(ev.Detail)
+		if old == "" || seen[old] {
+			continue
+		}
+		seen[old] = true
+		out = append(out, orphanBlock{height: ev.Number, hash: old})
+	}
+	return out
+}
+
+// checkC12 requires that the straddle victim's orphaned post-fork
+// blocks are truly gone: identified from bstar-reorged events' old
+// hashes, eth_getBlockByHash on every configured node must return
+// either null or a block that is not canonical (its height's own
+// canonical hash differs). No identifiable orphan hash - no victim ever
+// minted a post-fork block to orphan - is INCONCLUSIVE, not a pass: the
+// check proved nothing.
+func (v *verifier) checkC12(ctx context.Context) (verdict, string) {
+	orphans := v.orphanedForkBlocks()
+	if len(orphans) == 0 {
+		return verdictInconclusive, "no orphaned post-fork block identified (no bstar-reorged event with a parsable old hash)"
+	}
+
+	var problems []string
+	canonical := map[uint64]string{} // height -> canonical hash, memoised across nodes and orphans
+	for _, orphan := range orphans {
+		for _, e := range v.els {
+			blk, err := v.getBlockByHash(ctx, e, orphan.hash)
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("%s: eth_getBlockByHash(%s): %v", e.name, orphan.hash, err))
+				continue
+			}
+			if blk == nil {
+				continue // gone: exactly the expected outcome
+			}
+			height := uint64(blk.Number)
+			canonHash, ok := canonical[height]
+			if !ok {
+				head, err := v.getBlock(ctx, e, hexutil.EncodeUint64(height))
+				if err != nil {
+					problems = append(problems, fmt.Sprintf("%s: canonical block %d: %v", e.name, height, err))
+					continue
+				}
+				canonHash = head.Hash.Hex()
+				canonical[height] = canonHash
+			}
+			if strings.EqualFold(blk.Hash.Hex(), canonHash) {
+				problems = append(problems, fmt.Sprintf("%s still serves orphaned block %s at height %d as canonical", e.name, orphan.hash, height))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return verdictFail, strings.Join(problems, "; ")
+	}
+	return verdictPass, fmt.Sprintf("%d orphaned post-fork block(s) confirmed non-canonical (null or superseded) across %d node(s)", len(orphans), len(v.els))
 }

@@ -1,4 +1,13 @@
-# Config for the MIGRATION devnet: EIP-8347 empty-state MPT→PBT, geth only.
+# All three phases, small: the fast way to WATCH a migration reorg before,
+# across, and after the fork.
+#
+# One light partition before the fork, one spanning it, one after the
+# switchover, and no cadence afterwards - about half an hour end to end
+# instead of an hour. The offset is deliberately short but not too short:
+# the straddling partition needs a finalized checkpoint behind it, or it
+# tests a different situation from the one an operator cares about.
+# Acceptance evidence comes from the full profile; this one is for
+# iterating and for looking at the live view while it happens.
 #
 # Unlike args/devnet.yaml (PBT at genesis, six clients under test), this chain
 # STARTS on the merkle-patricia trie: the egg emits binaryTrieTime =
@@ -179,20 +188,21 @@ pbt_monitor:
 # nothing about the activation. Set gate: true (see migration-composite.yaml)
 # to run it after the switchover instead. Disruption until then comes from
 # pbt_migration.chaos_profile below.
+# The tree-at-genesis reorg service, gated on the migration finishing: the
+# gate waits for every client to report done, runs one deep partition on the
+# far side of the boundary (binary-canonical execution is a different path
+# from the pre-fork case), then execs this service, which takes over the
+# cadence and answers scenario requests. Depth is capped because finality is
+# flowing again by then, and a reorg deeper than a light victim can heal
+# from would strand it.
+# No cadence after the switchover here: the gate's own partition is the
+# post-fork evidence, and a cadence would only lengthen the lap.
 pbt_chaos: {}
-
-# Ours (main.star): the single source of truth for the fork offset. T =
-# genesis(block 0).timestamp + fork_offset_seconds. 1800s = 300 slots at 6s;
-# expected canonical blocks before T ≈ 300 − bring-up misses (~10-30) −
-# chaos losses under the full profile (~15-25) ≈ 250 — wide margin over the
-# ≥100 the acceptance harness needs (it counts blocks strictly before the
-# fork block; a chaos-off run at this exact offset measured 298).
-# chaos_profile: full is the complete pre-fork reorg profile, admission-gated
-# to heal every partition before the network approaches the fork.
 pbt_migration:
   enabled: true
-  fork_offset_seconds: 1800  # floor is 1750: last chaos window ends +1450 plus the 300s heal margin;
-                              # 50s admission slack. Measured margins at this offset: 298 canonical
-                              # blocks before the fork (the harness wants 101) and about 70 usable
-                              # cross-node root samples (it wants 50).
-  chaos_profile: full
+  # 780s: the straddling partition opens at +690, about two minutes after the
+  # first checkpoint the chain can finalize, and roughly ten minutes of
+  # pre-fork load gives the reorgs some state to bite on.
+  fork_offset_seconds: 780
+  chaos_profile: composite-smoke
+  post_op: short-light
