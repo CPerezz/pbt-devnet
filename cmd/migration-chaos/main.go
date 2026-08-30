@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -22,9 +23,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/CPerezz/pbt-devnet/internal/cli"
 	"github.com/CPerezz/pbt-devnet/internal/disruptoor"
 	"github.com/CPerezz/pbt-devnet/internal/migmon"
 	"github.com/CPerezz/pbt-devnet/internal/migsched"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // elFlag collects repeated --el name=url flags. The URL goes unused here
@@ -72,7 +75,9 @@ func main() {
 		slotSecs  = flag.Int("seconds-per-slot", 6, "chain slot duration")
 		dryRun    = flag.Bool("dry-run", false, "print the resolved schedule and exit")
 		jsonlPath = flag.String("jsonl", "", "JSONL event path (default stdout)")
+		keys      cli.MultiFlag
 	)
+	flag.Var(&keys, "key", "hex private key of a prefunded account for straddle state injection (repeatable; 2+ enables the injector)")
 	flag.Var(&els, "el", "execution client as name=url, repeatable; order is the participant index")
 	flag.Var(&protected, "protect-node", "participant index never isolated, repeatable")
 	flag.Parse()
@@ -136,7 +141,37 @@ func main() {
 	for i, name := range els.names {
 		clients = append(clients, migmon.NewClient(name, els.urls[i]))
 	}
-	run(log, d, sched, len(els.names), clients)
+
+	// The straddle injector needs one door into each island: the victim's
+	// own RPC (participant indices are 1-based flag order) and a protected
+	// node's RPC, which is majority-side by construction. Fewer than two
+	// keys, or no straddle in this profile, leaves it off - the schedule
+	// runs identically, minus the engineered writes.
+	var inj *injector
+	if str, ok := sched.Straddle(); ok && len(keys) >= 2 {
+		majority := 1
+		if len(protected.vals) > 0 {
+			majority = protected.vals[0]
+		}
+		victimIdx, majIdx := str.Victims[0]-1, majority-1
+		if victimIdx >= 0 && victimIdx < len(els.urls) && majIdx >= 0 && majIdx < len(els.urls) {
+			parsed := make([]*ecdsa.PrivateKey, 0, len(keys))
+			for _, k := range keys {
+				key, err := crypto.HexToECDSA(strings.TrimPrefix(k, "0x"))
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "bad --key: %v\n", err)
+					os.Exit(2)
+				}
+				parsed = append(parsed, key)
+			}
+			var err error
+			if inj, err = newInjector(els.urls[victimIdx], els.urls[majIdx], parsed); err != nil {
+				fmt.Fprintf(os.Stderr, "injector: %v\n", err)
+				os.Exit(2)
+			}
+		}
+	}
+	run(log, d, sched, len(els.names), clients, inj)
 }
 
 // topology derives the victim layout from the flags: the heavy participant
@@ -180,6 +215,8 @@ func publish(log *migmon.Log, s migsched.Schedule, genesis, fork time.Time, heav
 }
 
 // emitPlan prints what the schedule would do, without touching disruptoor.
+// Plan records carry plan=true so a reader can never mistake a dry-run's
+// isolate lines for partitions that actually happened.
 func emitPlan(log *migmon.Log, s migsched.Schedule) {
 	for _, o := range s.Ops {
 		kind, detail := migmon.EvIsolate, window(o)
@@ -187,88 +224,120 @@ func emitPlan(log *migmon.Log, s migsched.Schedule) {
 			kind, detail = migmon.EvSkip, o.Refused
 		}
 		for _, v := range o.Victims {
-			log.Emit(migmon.Event{Kind: kind, Node: nodeName(v), Detail: detail})
+			log.Emit(migmon.Event{Kind: kind, Node: nodeName(v), Detail: detail, Plan: true})
 		}
 	}
 	for _, f := range s.Failsafes {
-		log.Emit(migmon.Event{Kind: migmon.EvHeal, Detail: "sweep at " + f.UTC().Format(time.RFC3339)})
+		log.Emit(migmon.Event{Kind: migmon.EvHeal, Detail: "sweep at " + f.UTC().Format(time.RFC3339), Plan: true})
 	}
-	log.Emit(migmon.Event{Kind: migmon.EvPause, Detail: "quiet from " + s.Quiet.UTC().Format(time.RFC3339)})
+	log.Emit(migmon.Event{Kind: migmon.EvPause, Detail: "quiet from " + s.Quiet.UTC().Format(time.RFC3339), Plan: true})
 }
 
-// run executes the schedule in wall-clock time. Ops are strictly serial by
-// construction; each ends with a global Clear, because disruptoor state is
-// global - two independent overlapping partitions are not expressible
-// through its API.
-func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participants int, clients []migmon.Client) {
+// run executes the schedule as ONE serial action list: op starts, op ends
+// and failsafe sweeps interleaved in wall-clock order. Running ops and
+// sweeps as separate passes bundles every sweep after the last op, which
+// live runs proved fires them minutes late - harmless while every heal
+// works, and exactly wrong the day one does not.
+func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participants int, clients []migmon.Client, inj *injector) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-
-	// Tracks whether the last op's own heal is known to have worked; the
-	// repeat sweep turns an unhealed partition into a loud finding rather
-	// than a silently split network.
-	healed := true
 
 	for _, o := range s.Ops {
 		if !o.Admitted() {
 			for _, v := range o.Victims {
 				log.Emit(migmon.Event{Kind: migmon.EvSkip, Node: nodeName(v), Detail: o.Refused})
 			}
-			continue
 		}
-		if !sleepUntil(o.Start, stop) {
-			d.Clear()
-			return
-		}
-		if err := d.Partition(o.Name, others(participants, o.Victims), o.Victims); err != nil {
-			for _, v := range o.Victims {
-				log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: nodeName(v), Detail: "partition failed: " + err.Error()})
-			}
-			continue
-		}
-		healed = false
-		for _, v := range o.Victims {
-			log.Emit(migmon.Event{Kind: migmon.EvIsolate, Node: nodeName(v), Detail: window(o)})
-		}
-		if !sleepUntil(o.End, stop) {
-			// Dying mid-partition would leave the network split for good.
-			d.Clear()
-			return
-		}
-		if err := d.Clear(); err != nil {
-			log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "heal failed: " + err.Error()})
-			continue
-		}
-		healed = true
-		for _, v := range o.Victims {
-			log.Emit(migmon.Event{Kind: migmon.EvHeal, Node: nodeName(v), Detail: "window closed"})
-		}
-		repeer(log, clients)
 	}
 
-	// Failsafe sweeps. Every instant fires a Clear whatever the loop above
-	// believes it healed: bookkeeping is not a safety mechanism, and a
-	// partition surviving into the fork approach would invalidate the run.
-	for _, f := range s.Failsafes {
-		if !sleepUntil(f, stop) {
-			d.Clear()
-			return
-		}
-		err := d.Clear()
-		switch {
-		case err != nil:
-			log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "failsafe heal failed: " + err.Error()})
-		case !healed:
-			log.Emit(migmon.Event{
-				Kind:    migmon.EvCritical,
-				Finding: migmon.FindingNoConvergence,
-				Detail:  "a partition outlived its own heal; the failsafe sweep cleared it",
-			})
+	// Tracks whether the last op's own heal is known to have worked; a
+	// failsafe sweep that finds it false announces the rescue loudly.
+	healed := true
+
+	for _, a := range s.Actions() {
+		switch a.Kind {
+		case migsched.ActOpStart:
+			// The injection contract deploys shortly before the straddle
+			// opens: the network is still whole, so the deploy is plainly
+			// canonical, and close enough that ambient reorgs cannot age it.
+			if inj != nil && a.Op.Class == migsched.ClassStraddle {
+				if !sleepUntil(a.At.Add(-60*time.Second), stop) {
+					d.Clear()
+					return
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+				if err := inj.deploy(ctx, log); err != nil {
+					log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "injection deploy: " + err.Error()})
+				}
+				cancel()
+			}
+			if !sleepUntil(a.At, stop) {
+				d.Clear()
+				return
+			}
+			if a.StaleAt(time.Now()) {
+				log.Emit(migmon.Event{Kind: migmon.EvSkip, Node: nodeName(a.Op.Victims[0]),
+					Detail: fmt.Sprintf("op %s window already closed at execution time; skipped, not run zero-length", a.Op.Name)})
+				continue
+			}
+			if err := d.Partition(a.Op.Name, others(participants, a.Op.Victims), a.Op.Victims); err != nil {
+				for _, v := range a.Op.Victims {
+					log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: nodeName(v), Detail: "partition failed: " + err.Error()})
+				}
+				continue
+			}
+			healed = false
+			for _, v := range a.Op.Victims {
+				log.Emit(migmon.Event{Kind: migmon.EvIsolate, Node: nodeName(v), Detail: window(a.Op)})
+			}
+			if inj != nil && a.Op.Class == migsched.ClassStraddle {
+				// Let the islands mint their first separate blocks, then
+				// write the conflicting state through each island's door.
+				if !sleepUntil(a.At.Add(15*time.Second), stop) {
+					d.Clear()
+					return
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 110*time.Second)
+				inj.splitWrites(ctx, log)
+				cancel()
+			}
+
+		case migsched.ActOpEnd:
+			if !sleepUntil(a.At, stop) {
+				d.Clear()
+				return
+			}
+			if err := d.Clear(); err != nil {
+				log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "heal failed: " + err.Error()})
+				continue
+			}
 			healed = true
-		default:
-			log.Emit(migmon.Event{Kind: migmon.EvHeal, Detail: "failsafe sweep"})
+			for _, v := range a.Op.Victims {
+				log.Emit(migmon.Event{Kind: migmon.EvHeal, Node: nodeName(v), Detail: "window closed"})
+			}
+			repeer(log, clients)
+
+		case migsched.ActSweep:
+			if !sleepUntil(a.At, stop) {
+				d.Clear()
+				return
+			}
+			err := d.Clear()
+			switch {
+			case err != nil:
+				log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "failsafe heal failed: " + err.Error()})
+			case !healed:
+				log.Emit(migmon.Event{
+					Kind:    migmon.EvCritical,
+					Finding: migmon.FindingNoConvergence,
+					Detail:  "a partition outlived its own heal; the failsafe sweep cleared it",
+				})
+				healed = true
+			default:
+				log.Emit(migmon.Event{Kind: migmon.EvHeal, Detail: "failsafe sweep"})
+			}
+			repeer(log, clients)
 		}
-		repeer(log, clients)
 	}
 
 	if !sleepUntil(s.Quiet, stop) {
