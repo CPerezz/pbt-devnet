@@ -30,7 +30,24 @@ const (
 	EvHeal     = "heal"     // Node=victim ("" = heal-all), Detail=reason
 	EvPause    = "pause"    // the schedule went permanently quiet
 	EvSkip     = "skip"     // an op was refused by the admission rule
+	EvInject   = "inject"   // engineered state write around the straddle, Raw=Injection
 )
+
+// Injection is one engineered state write the chaos driver placed around
+// the fork-straddling partition: a known slot set to a known value from a
+// known island, so the doomed branch carries state whose post-heal fate is
+// checkable instead of whatever traffic happened to land there.
+type Injection struct {
+	Contract string `json:"contract"` // 0x address of the target contract
+	Slot     string `json:"slot"`     // 0x storage slot key
+	Value    string `json:"value"`    // 0x32-byte value this write set
+	Side     string `json:"side"`     // "majority" | "victim": which island took the tx
+	TxHash   string `json:"tx_hash"`
+	// IslandBlock is the block hash that first included a victim-side tx,
+	// as seen from inside the victim island; after the heal it must be
+	// non-canonical everywhere.
+	IslandBlock string `json:"island_block,omitempty"`
+}
 
 // Event is one JSONL line. Fields are a union across kinds; consumers key
 // off Kind and ignore absent fields.
@@ -45,6 +62,7 @@ type Event struct {
 	Detail  string            `json:"detail,omitempty"`  // human line
 	Finding string            `json:"finding,omitempty"` // F1, F2, F3, NULL5, NULL10, ...
 	Raw     json.RawMessage   `json:"raw,omitempty"`     // progress: verbatim RPC result
+	Plan    bool              `json:"plan,omitempty"`    // dry-run: this isolate/skip was never executed
 }
 
 // Log serialises events to one writer, one JSON object per line.

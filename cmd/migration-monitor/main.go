@@ -71,6 +71,13 @@ func main() {
 	jsonl := migmon.NewLog(io.MultiWriter(w, snap))
 	quorum := migmon.NewBStarQuorum(binaryTrieT)
 	split := &splitWatch{}
+	resample := newResampleQueue()
+	if singleImplementation(states) {
+		// Say it once, at the top of the stream: every cross-node check on
+		// this run compares one binary against itself.
+		jsonl.Emit(migmon.Event{Kind: migmon.EvWarn, Node: "monitor",
+			Detail: "single-implementation run: cross-node checks prove determinism, not spec agreement"})
+	}
 	if *httpAddr != "" {
 		serveHTTP(*httpAddr, snap, jsonl)
 	}
@@ -85,7 +92,7 @@ func main() {
 
 	doPoll := func() {
 		for _, ns := range states {
-			pollOnce(ctx, jsonl, binaryTrieT, ns, quorum)
+			pollOnce(ctx, jsonl, binaryTrieT, ns, quorum, resample)
 			snap.setNode(ns)
 		}
 	}
@@ -100,7 +107,7 @@ func main() {
 		case <-pollTick.C:
 			doPoll()
 		case <-sampleTick.C:
-			sampleOnce(ctx, jsonl, states, split, snap)
+			sampleOnce(ctx, jsonl, states, split, snap, resample)
 		}
 	}
 }

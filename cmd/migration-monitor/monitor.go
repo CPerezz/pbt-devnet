@@ -16,6 +16,64 @@ import (
 // failure mode; widen if a scenario needs a deeper window.
 const reorgRecheckWindow = 8
 
+// resampleQueueCap bounds the targeted-resample queue: reorg windows are a
+// handful of heights per event and a finality burst is capped at
+// forkBurstWindow, so 64 comfortably holds several concurrent events
+// without growing memory over a long chaotic run.
+const resampleQueueCap = 64
+
+// forkBurstWindow is how far back of b* a bstar-final burst reaches when
+// the node has no recorded reorg to anchor it - the same depth
+// reorgRecheckWindow already treats as "recent" for reorg detection.
+const forkBurstWindow = 8
+
+// resampleQueue holds heights a reorg or fork-block event just made
+// interesting for the next sample tick, FIFO, deduped, dropping the
+// oldest entry once full. Reorged heights are exactly where rebuilt
+// shadow state must be re-proven cross-node, and random sampling rarely
+// lands there before the trail goes cold.
+//
+// The poll loop and the sample loop both push into the same queue instance
+// from main's single select loop, never concurrently, so this needs no
+// lock of its own.
+type resampleQueue struct {
+	heights []uint64
+	seen    map[uint64]bool
+}
+
+func newResampleQueue() *resampleQueue {
+	return &resampleQueue{seen: make(map[uint64]bool)}
+}
+
+// push enqueues height for immediate sampling. Heights below 1 (a clamped
+// range's underflow) and repeats already queued are dropped.
+func (q *resampleQueue) push(height uint64) {
+	if height < 1 || q.seen[height] {
+		return
+	}
+	if len(q.heights) >= resampleQueueCap {
+		delete(q.seen, q.heights[0])
+		q.heights = q.heights[1:]
+	}
+	q.heights = append(q.heights, height)
+	q.seen[height] = true
+}
+
+// pushRange enqueues every height in [lo, hi].
+func (q *resampleQueue) pushRange(lo, hi uint64) {
+	for h := lo; h <= hi; h++ {
+		q.push(h)
+	}
+}
+
+// drain removes and returns every queued height, oldest first.
+func (q *resampleQueue) drain() []uint64 {
+	out := q.heights
+	q.heights = nil
+	q.seen = make(map[uint64]bool)
+	return out
+}
+
 // nodeState is one execution client's poll-to-poll bookkeeping. All findings
 // logic lives in internal/migmon; this struct only remembers what a node
 // needs carried from one tick to the next.
@@ -40,6 +98,21 @@ type nodeState struct {
 	introspection bool
 
 	down bool // rpc reachability, deduped so an outage logs one warn, not one per poll
+
+	// prevDone and doneFinalFired implement the live completion invariant:
+	// a node's own "done" is only trustworthy once its fork block has
+	// finalized. The critical fires only after done has held for two
+	// consecutive polls with no finality yet, tolerating the ~2s race
+	// between crossing the boundary and consensus marking it finalized.
+	prevDone       bool
+	doneFinalFired bool
+
+	// lastReorgAncestor is the height of this node's most recent
+	// fork-block reorg, if any - the anchor a bstar-final resample burst
+	// starts from, since that is exactly where the settled record's
+	// history last diverged.
+	lastReorgAncestor uint64
+	haveReorgAncestor bool
 }
 
 func newNodeState(name, url string, binaryTrieTime uint64) *nodeState {
@@ -52,6 +125,29 @@ func newNodeState(name, url string, binaryTrieTime uint64) *nodeState {
 		reorg:         migmon.NewReorgMemory(name),
 		nullTr:        migmon.NewNullTracker(name),
 	}
+}
+
+// singleImplementation reports whether every state's node name resolves to
+// the same registry entry: a run against N copies of one client image
+// proves the chain is deterministic under chaos, not that independent
+// implementations agree on the migration - the property cross-node checks
+// exist to catch. Any node that matches no registry entry, or a set that
+// splits across entries, is not "single-implementation" by this measure.
+func singleImplementation(states []*nodeState) bool {
+	if len(states) == 0 {
+		return false
+	}
+	first, ok := migmon.SpecFor(states[0].name)
+	if !ok {
+		return false
+	}
+	for _, ns := range states[1:] {
+		spec, ok := migmon.SpecFor(ns.name)
+		if !ok || spec != first {
+			return false
+		}
+	}
+	return true
 }
 
 func (ns *nodeState) warnDown(log *migmon.Log, method string, err error) {
@@ -72,7 +168,7 @@ func (ns *nodeState) clearDown(log *migmon.Log) {
 
 // pollOnce runs one node's poll tick: progress, head, the b* probe, and the
 // timeline's findings.
-func pollOnce(ctx context.Context, log *migmon.Log, binaryTrieTime uint64, ns *nodeState, quorum *migmon.BStarQuorum) {
+func pollOnce(ctx context.Context, log *migmon.Log, binaryTrieTime uint64, ns *nodeState, quorum *migmon.BStarQuorum, q *resampleQueue) {
 	var prog migmon.MigrationProgress
 	if ns.introspection {
 		raw, err := ns.rpc.Progress(ctx)
@@ -102,7 +198,7 @@ func pollOnce(ctx context.Context, log *migmon.Log, binaryTrieTime uint64, ns *n
 	// spanning the activation can orphan it, and a node still judging the
 	// boundary against a block nobody has would report a fault that no
 	// longer exists.
-	checkForkBlock(ctx, log, ns, quorum)
+	checkForkBlock(ctx, log, ns, quorum, q)
 
 	if ns.timeline.BStarRecord() == nil {
 		bstar, crossed, err := findBStar(ctx, ns.rpc, &ns.lastBelowT, head, binaryTrieTime)
@@ -118,11 +214,27 @@ func pollOnce(ctx context.Context, log *migmon.Log, binaryTrieTime uint64, ns *n
 		}
 	}
 
+	done := false
 	if ns.introspection {
+		done = prog.Phase == migmon.PhaseDone
 		for _, e := range ns.timeline.ObservePoll(prog, head) {
 			log.Emit(e)
 		}
 	}
+
+	// F3 live completion: a node reporting done while its own fork block
+	// has not finalized might just be the ~2s race between crossing the
+	// boundary and consensus marking it finalized - tolerated by requiring
+	// done on two consecutive polls before this fires, latched so a run
+	// that stays done-but-not-final only reports it once.
+	if done && ns.prevDone && !ns.timeline.BStarIsFinal() && !ns.doneFinalFired {
+		ns.doneFinalFired = true
+		log.Emit(migmon.Event{
+			Kind: migmon.EvCritical, Node: ns.name, Finding: migmon.FindingBoundary,
+			Detail: "reported done before its fork block finalized",
+		})
+	}
+	ns.prevDone = done
 }
 
 // checkForkBlock keeps one node's fork-block record honest: it drops the
@@ -130,7 +242,7 @@ func pollOnce(ctx context.Context, log *migmon.Log, binaryTrieTime uint64, ns *n
 // reports the height as finalized. Finality is read from the execution
 // client's own "finalized" tag, which the consensus layer sets through the
 // engine API - no second API to reach for.
-func checkForkBlock(ctx context.Context, log *migmon.Log, ns *nodeState, quorum *migmon.BStarQuorum) {
+func checkForkBlock(ctx context.Context, log *migmon.Log, ns *nodeState, quorum *migmon.BStarQuorum, q *resampleQueue) {
 	rec := ns.timeline.BStarRecord()
 	if rec == nil || ns.timeline.BStarIsFinal() {
 		return
@@ -142,6 +254,15 @@ func checkForkBlock(ctx context.Context, log *migmon.Log, ns *nodeState, quorum 
 	if hdr.Hash != rec.Hash {
 		for _, e := range ns.timeline.BStarReorged(hdr.Hash) {
 			log.Emit(e)
+			// The orphaned fork block is exactly where rebuilt shadow
+			// state must be re-proven cross-node; resample around it now
+			// rather than waiting for random sampling to land there.
+			lo := uint64(1)
+			if e.Number > 2 {
+				lo = e.Number - 2
+			}
+			q.pushRange(lo, e.Number+2)
+			ns.lastReorgAncestor, ns.haveReorgAncestor = e.Number, true
 		}
 		// Re-probe from scratch: the whole branch changed, so the previous
 		// "highest head below the activation" no longer bounds the search.
@@ -155,6 +276,18 @@ func checkForkBlock(ctx context.Context, log *migmon.Log, ns *nodeState, quorum 
 	for _, e := range ns.timeline.BStarFinalized() {
 		log.Emit(e)
 	}
+	// The fork block just settled: burst-sample from where this node's b*
+	// record last diverged (or a fixed lookback if it never diverged) up
+	// to b* itself, re-proving the rebuilt shadow state around the
+	// boundary before random sampling gets around to it.
+	ancestor := ns.lastReorgAncestor
+	if !ns.haveReorgAncestor {
+		ancestor = uint64(1)
+		if rec.Number > forkBurstWindow {
+			ancestor = rec.Number - forkBurstWindow
+		}
+	}
+	q.pushRange(ancestor, rec.Number)
 	for _, e := range quorum.Finalize(ns.name, *rec) {
 		log.Emit(e)
 	}
@@ -262,10 +395,17 @@ func (w *splitWatch) observe(now time.Time, split bool, height uint64, detail st
 	}
 }
 
-// sampleOnce runs one cross-node shadow-root sample: pick a random depth
-// behind the shallowest head, fetch every node's canonical hash and shadow
-// root there, and run F1/reorg/null-persistence over the results.
-func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState, split *splitWatch, snap *snapshot) {
+// sampleOnce runs one cross-node shadow-root sample tick: first it drains
+// any heights a reorg or fork-block event just queued, sampling those
+// immediately, then it draws one random-depth sample behind the shallowest
+// head the way it always has. Queued heights go first because that is
+// where rebuilt shadow state must be re-proven; random picks rarely land
+// there before the trail goes cold.
+func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState, split *splitWatch, snap *snapshot, q *resampleQueue) {
+	for _, h := range q.drain() {
+		sampleAt(ctx, log, states, split, snap, q, h)
+	}
+
 	var minHead uint64
 	haveHead := false
 	for _, ns := range states {
@@ -280,8 +420,12 @@ func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState, split
 	if depth > minHead {
 		return // nothing this deep in the chain yet
 	}
-	height := minHead - depth
+	sampleAt(ctx, log, states, split, snap, q, minHead-depth)
+}
 
+// sampleAt fetches every node's canonical hash and shadow root at height
+// and runs F1/reorg/null-persistence over the results.
+func sampleAt(ctx context.Context, log *migmon.Log, states []*nodeState, split *splitWatch, snap *snapshot, q *resampleQueue, height uint64) {
 	samples := make([]migmon.NodeSample, 0, len(states))
 	roots := make(map[string]string, len(states))
 	for _, ns := range states {
@@ -303,6 +447,7 @@ func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState, split
 
 		for _, e := range ns.reorg.Observe(height, hash, ns.lastHead) {
 			log.Emit(e)
+			q.push(e.Number)
 		}
 		for _, h := range ns.reorg.Recent(reorgRecheckWindow) {
 			if h == height {
@@ -314,6 +459,7 @@ func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState, split
 			}
 			for _, e := range ns.reorg.Observe(h, rHdr.Hash, ns.lastHead) {
 				log.Emit(e)
+				q.push(e.Number)
 			}
 		}
 

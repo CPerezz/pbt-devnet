@@ -274,12 +274,16 @@ func (q *BStarQuorum) Finalize(node string, b BStar) []Event {
 	return evs
 }
 
-// checkShape validates one record against the activation time, once.
+// checkShape validates one record against the activation time, once per
+// record. The latch is keyed by record identity, not node: a reorg can
+// replace a node's provisional record, and the replacement's shape is
+// unproven until checked.
 func (q *BStarQuorum) checkShape(node string, b BStar) []Event {
-	if q.shaped[node] {
+	key := node + "/" + b.Hash
+	if q.shaped[key] {
 		return nil
 	}
-	q.shaped[node] = true
+	q.shaped[key] = true
 	if b.Time >= q.T && b.ParentTime < q.T {
 		return nil
 	}
@@ -322,7 +326,10 @@ func (q *BStarQuorum) checkProvisional(now time.Time) []Event {
 		}
 	}
 	if agreed {
+		// Re-arm both the timer and the latch: a later, unrelated
+		// disagreement must be able to fire on its own merits.
 		q.disagreeSince = time.Time{}
+		q.disagreeFired = false
 	}
 	return nil
 }
