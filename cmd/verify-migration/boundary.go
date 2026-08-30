@@ -223,7 +223,7 @@ func (v *verifier) checkC17(ctx context.Context) (verdict, string) {
 	if postSamples == 0 {
 		return verdictInconclusive, "no cross-node samples at or past b*"
 	}
-	windows := v.chaosWindows()
+	windows := v.waiverWindows()
 	const slop = 30 * time.Second
 	var problems []string
 	for _, ev := range v.monitor {

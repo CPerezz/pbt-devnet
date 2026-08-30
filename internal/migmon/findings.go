@@ -1,5 +1,7 @@
 package migmon
 
+import "time"
+
 // Finding identifiers and thresholds shared by the monitor (emitter) and
 // verify-migration (consumer). The numbers encode the acceptance contract
 // the tools were calibrated against on live runs; they are not tunables.
@@ -60,6 +62,16 @@ const (
 	// stuck node trips it.
 	ConvergenceGrace = 120
 )
+
+// SplitGrace is how long nodes may disagree about the canonical chain
+// before it counts as a fault - the system's one pathological cap, shared
+// by the monitor's split watch and the verifier's straddle waivers so the
+// two can never disagree about what "too long" means. Sized from both
+// ends by measurement: a genuinely banned node never rejoins (infinity),
+// while the slowest legal recovery observed - a PAIR of victims rewinding
+// across the format swap together - converged in minutes-not-seconds but
+// well inside this bound relative to each critical's own firing clock.
+const SplitGrace = 12 * time.Minute
 
 const (
 	// BStarProvisionalGrace is how long nodes may disagree about which
