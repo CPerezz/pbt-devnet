@@ -21,6 +21,9 @@ func (c *chaos) isolationLoop(ctx context.Context) {
 		if err := waitBlocks(ctx, c.els, gap); err != nil {
 			return // context cancelled
 		}
+		if c.quiesced.Load() {
+			return // quiesced is terminal: no more forks will ever be scheduled
+		}
 		if c.busy() {
 			continue
 		}
