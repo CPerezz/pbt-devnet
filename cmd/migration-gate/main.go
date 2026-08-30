@@ -182,6 +182,14 @@ func main() {
 	}
 
 	if !waitForDone(ctx, log, clients) {
+		if ctx.Err() == nil {
+			// waitForDone only returns false with no live context error when
+			// it never entered its poll loop at all: no client had a
+			// migration surface to watch. A devnet where nothing can report
+			// done is a misconfiguration, not a quiet success, and must not
+			// exit clean.
+			os.Exit(1)
+		}
 		return // signalled; nothing has been disturbed
 	}
 	log.Emit(migmon.Event{Kind: migmon.EvPause, Detail: "every client reports the migration done"})
@@ -189,6 +197,17 @@ func main() {
 	if d != nil && *postOp != "none" {
 		if !sleep(ctx, settle) {
 			return
+		}
+		// migration-chaos may still be issuing its own scheduled disruptions until the
+		// schedule's Quiet instant. The gate already resolved this schedule to run its
+		// watchdog, so waiting on sched.Quiet is the cheap, exact option here -- no need
+		// to infer quiet from an absence of chaos events when the deadline is already
+		// known outright.
+		if wait := time.Until(sched.Quiet); wait > 0 {
+			log.Emit(migmon.Event{Kind: migmon.EvPause, Detail: fmt.Sprintf("waiting %.0fs for the schedule to go quiet before the post-op partition", wait.Seconds())})
+			if !sleep(ctx, wait) {
+				return
+			}
 		}
 		if err := runPostOp(ctx, log, d, clients, *postOp, *heavy, lights, len(els.names), mine); err != nil {
 			log.Emit(migmon.Event{Kind: migmon.EvCritical, Finding: migmon.FindingNoConvergence, Detail: err.Error()})
@@ -342,23 +361,106 @@ func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clien
 }
 
 // awaitConvergence waits for every client to agree on the canonical chain
-// again. A post-migration reorg that never converges is the failure this
-// whole run is looking for, so it is an error rather than a warning.
+// again. A post-migration reorg that never converges is normally the
+// failure this whole run is looking for, and an error. But a genuinely
+// converging deep recovery must not be amputated just because it needed
+// longer than the deadline sized for an ordinary heal: on deadline expiry
+// this samples the head spread across ~3 more polls, and only if it is
+// actually shrinking does it extend the wait once, by the same deadline.
+// Static or growing spread means the split is not resolving on its own, and
+// exec-ing the wrapped service onto it would produce evidence nobody could
+// interpret, so that case still fails immediately.
 func awaitConvergence(ctx context.Context, log *migmon.Log, clients []migmon.Client) error {
 	deadline := time.Now().Add(migmon.ConvergenceGrace * time.Second)
+	extended := false
 	for {
 		agreed, detail, err := converged(ctx, clients)
 		if err == nil && agreed {
 			log.Emit(migmon.Event{Kind: migmon.EvHeal, Detail: "every client agrees on the canonical chain again"})
 			return nil
 		}
-		if time.Now().After(deadline) {
+		if !time.Now().After(deadline) {
+			if !sleep(ctx, 5*time.Second) {
+				return nil
+			}
+			continue
+		}
+		if extended {
+			return fmt.Errorf("clients still disagree %ds after the extended deadline: %s", 2*migmon.ConvergenceGrace, detail)
+		}
+		shrinking, trend, err := spreadShrinking(ctx, clients)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			return fmt.Errorf("clients still disagree %ds after the heal: %s", migmon.ConvergenceGrace, detail)
 		}
-		if !sleep(ctx, 5*time.Second) {
-			return nil
+		if !shrinking {
+			return fmt.Errorf("clients still disagree %ds after the heal and the head spread is not shrinking (%s): %s",
+				migmon.ConvergenceGrace, trend, detail)
+		}
+		log.Emit(migmon.Event{
+			Kind: migmon.EvCritical, Finding: migmon.FindingNoConvergence,
+			Detail: fmt.Sprintf("clients still disagree %ds after the heal but the head spread is shrinking (%s); extending the wait once: %s",
+				migmon.ConvergenceGrace, trend, detail),
+		})
+		deadline = time.Now().Add(migmon.ConvergenceGrace * time.Second)
+		extended = true
+	}
+}
+
+// spreadShrinking samples the spread between clients' head numbers three
+// times, 5s apart, and reports whether it is strictly narrowing. A hard
+// split advances both branches at close to the same rate, so its spread
+// stays flat or grows; a laggard genuinely catching up after a heal narrows
+// it every sample. Three samples is the least that shows a trend rather
+// than noise from one poll racing a block.
+func spreadShrinking(ctx context.Context, clients []migmon.Client) (bool, string, error) {
+	samples := make([]uint64, 0, 3)
+	for i := range 3 {
+		if i > 0 && !sleep(ctx, 5*time.Second) {
+			return false, "", fmt.Errorf("context ended while sampling the trend")
+		}
+		s, err := headSpread(ctx, clients)
+		if err != nil {
+			return false, "", err
+		}
+		samples = append(samples, s)
+	}
+	trend := fmt.Sprintf("%d -> %d -> %d", samples[0], samples[1], samples[2])
+	return trendShrinking(samples), trend, nil
+}
+
+// trendShrinking reports whether three spread samples are strictly
+// narrowing, sample over sample -- the shape a laggard catching up
+// produces, distinct from the flat or growing shape of a hard split.
+func trendShrinking(samples []uint64) bool {
+	return samples[2] < samples[1] && samples[1] < samples[0]
+}
+
+// headSpread returns the difference between the highest and lowest head
+// number reported by any client, as a cheap proxy for how far apart two
+// branches have grown.
+func headSpread(ctx context.Context, clients []migmon.Client) (uint64, error) {
+	var min, max uint64
+	first := true
+	for _, c := range clients {
+		h, err := c.HeadNumber(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if first {
+			min, max, first = h, h, false
+			continue
+		}
+		if h < min {
+			min = h
+		}
+		if h > max {
+			max = h
 		}
 	}
+	return max - min, nil
 }
 
 // converged reports whether every client has the same canonical hash at the
@@ -430,6 +532,14 @@ func watchdog(ctx context.Context, log *migmon.Log, d *disruptoor.Client, client
 			continue
 		}
 		fired = true
+		// disruptoor only exposes Clear(), not which partition it held, but State()
+		// still says whether one was actually applied right before the clear: if so,
+		// some driver claimed a window and died holding it open (dead-driver); if none
+		// was applied, the divergence was mesh-level and re-peering is what actually
+		// fixed it, not the clear (mesh-repeer). That distinction is what the verifier
+		// needs to tell "a driver got killed mid-partition" apart from "peers just
+		// dropped off".
+		partsBefore, _, stateErr := d.State()
 		if err := d.Clear(); err != nil {
 			log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "watchdog heal failed: " + err.Error()})
 			continue
@@ -437,12 +547,26 @@ func watchdog(ctx context.Context, log *migmon.Log, d *disruptoor.Client, client
 		if err := migmon.Repeer(ctx, clients); err != nil {
 			log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "re-peering after the watchdog heal: " + err.Error()})
 		}
+		prefix := healKind(partsBefore, stateErr)
 		log.Emit(migmon.Event{
 			Kind: migmon.EvCritical, Finding: migmon.FindingNoConvergence,
-			Detail: fmt.Sprintf("healed a partition no schedule was holding after %.0fs of divergence: %s",
+			Detail: prefix + fmt.Sprintf("healed a partition no schedule was holding after %.0fs of divergence: %s",
 				now.Sub(since).Seconds(), detail),
 		})
 	}
+}
+
+// healKind names a watchdog heal by the evidence available: disruptoor
+// exposes no memory of which partition it held, but State() taken right
+// before Clear() still says whether one was applied. If so, some driver
+// claimed a window and died holding it open; if none was applied (or the
+// state read itself failed, leaving nothing to claim otherwise), the
+// divergence was mesh-level and re-peering is what actually fixed it.
+func healKind(partsBefore int, stateErr error) string {
+	if stateErr == nil && partsBefore > 0 {
+		return "dead-driver: "
+	}
+	return "mesh-repeer: "
 }
 
 // sleep waits d, reporting false if the context ended first.

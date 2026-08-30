@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/CPerezz/pbt-devnet/internal/disruptoor"
@@ -23,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -103,6 +105,11 @@ type chaos struct {
 	log  *slog.Logger
 
 	jobs chan job
+
+	// quiesced stops NEW disruptions while letting a running job finish. The verifier
+	// judges end-state agreement after the run; judging while the cadence keeps cutting
+	// the network measures this driver, not the clients.
+	quiesced atomic.Bool
 
 	mu      sync.Mutex
 	running string
@@ -369,9 +376,16 @@ func (c *chaos) work(ctx context.Context) {
 	}
 }
 
+// errQuiesced marks a submission refused because the driver has been quiesced, so the
+// HTTP handler can answer 409 rather than the 503 a full queue gets.
+var errQuiesced = errors.New("quiesced: no new disruptions are accepted")
+
 // submit queues a job, refusing rather than blocking when the queue is full: a backlog
 // of disruptions is never what anyone wanted.
 func (c *chaos) submit(j job) error {
+	if c.quiesced.Load() {
+		return errQuiesced
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	select {
@@ -389,7 +403,9 @@ func (c *chaos) busy() bool {
 	return c.running != "" || len(c.queued) > 0
 }
 
-func (c *chaos) serve(ctx context.Context, addr string) {
+// mux builds the control API's routes. Split out from serve so tests can exercise
+// handlers directly, with no real listener involved.
+func (c *chaos) mux() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
@@ -408,6 +424,27 @@ func (c *chaos) serve(ctx context.Context, addr string) {
 			body["applied_shaping"] = shaping
 		}
 		writeJSON(w, http.StatusOK, body)
+	})
+
+	// quiesceBody reports whether the driver is quiesced and whether a job is
+	// currently running, so a caller polling GET can tell "accepted, draining" from
+	// "accepted, idle" without a second endpoint.
+	quiesceBody := func() map[string]any {
+		return map[string]any{"quiesced": c.quiesced.Load(), "idle": !c.busy()}
+	}
+
+	// The verifier judges end-state agreement across clients after the run. Judging
+	// while the periodic isolation cadence keeps cutting the network mid-verification
+	// would measure this driver's timing, not the clients' actual convergence, so
+	// quiescing stops new disruptions from being scheduled without touching one already
+	// running.
+	mux.HandleFunc("POST /quiesce", func(w http.ResponseWriter, r *http.Request) {
+		c.quiesced.Store(true)
+		writeJSON(w, http.StatusOK, quiesceBody())
+	})
+
+	mux.HandleFunc("GET /quiesce", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, quiesceBody())
 	})
 
 	mux.HandleFunc("POST /scenario/{name}", func(w http.ResponseWriter, r *http.Request) {
@@ -447,6 +484,10 @@ func (c *chaos) serve(ctx context.Context, addr string) {
 				return res
 			},
 		})
+		if errors.Is(err, errQuiesced) {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+			return
+		}
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
 			return
@@ -458,7 +499,11 @@ func (c *chaos) serve(ctx context.Context, addr string) {
 		writeJSON(w, http.StatusAccepted, body)
 	})
 
-	srv := &http.Server{Addr: addr, Handler: mux}
+	return mux
+}
+
+func (c *chaos) serve(ctx context.Context, addr string) {
+	srv := &http.Server{Addr: addr, Handler: c.mux()}
 	go func() {
 		<-ctx.Done()
 		sd, cancel := context.WithTimeout(context.Background(), 5*time.Second)
