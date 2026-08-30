@@ -66,16 +66,20 @@ func newInjector(victimURL, majorityURL string, keys []*ecdsa.PrivateKey) (*inje
 }
 
 // deploy places the shared target contract on the canonical chain before
-// the straddle opens, seeded with a few non-zero slots so deletes are
-// expressible later. Runs against the majority node: pre-straddle the
-// network is whole, so this is simply the canonical chain.
+// the straddle opens: WriterRuntime stores calldata word 1 at the slot
+// named by word 0, so every later injection is a plain call with
+// slot||value calldata - state changes that EXECUTE, not bytecode mailed
+// to a contract that ignores its input. A seed prefix leaves two non-zero
+// slots behind for delete-shaped writes. Runs against the majority node:
+// pre-straddle the network is whole, so this is simply the canonical chain.
 func (in *injector) deploy(ctx context.Context, log *migmon.Log) error {
 	c, err := ethclient.DialContext(ctx, in.majorityURL)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	tx, err := in.send(ctx, c, in.majorityKey, nil, txkit.StorageInitCode(4))
+	init := txkit.DeployCodeAfter(txkit.SeedCode([]uint64{3, 4}), txkit.WriterRuntime())
+	tx, err := in.send(ctx, c, in.majorityKey, nil, init)
 	if err != nil {
 		return err
 	}
@@ -86,6 +90,11 @@ func (in *injector) deploy(ctx context.Context, log *migmon.Log) error {
 	in.contract = rcpt.ContractAddress
 	log.Emit(migmon.Event{Kind: migmon.EvHeal, Detail: fmt.Sprintf("injection contract deployed at %s", in.contract.Hex())})
 	return nil
+}
+
+// writeCall is the WriterRuntime calldata for "store val at slot".
+func writeCall(slot, val common.Hash) []byte {
+	return append(slot.Bytes(), val.Bytes()...)
 }
 
 // splitWrites fires the conflicting writes while the partition is open:
@@ -111,7 +120,7 @@ func (in *injector) splitWrites(ctx context.Context, log *migmon.Log) {
 			injectionSlot:         majorityValue,
 			injectionSlotMajority: majorityOnlyValue,
 		} {
-			tx, err := in.send(ctx, c, in.majorityKey, &in.contract, txkit.SStore(slot, val))
+			tx, err := in.send(ctx, c, in.majorityKey, &in.contract, writeCall(slot, val))
 			if err != nil {
 				log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "majority injection: " + err.Error()})
 				continue
@@ -129,7 +138,7 @@ func (in *injector) splitWrites(ctx context.Context, log *migmon.Log) {
 
 	// Victim island: the conflicting write on the doomed branch.
 	if c, err := ethclient.DialContext(ctx, in.victimURL); err == nil {
-		tx, err := in.send(ctx, c, in.victimKey, &in.contract, txkit.SStore(injectionSlot, victimValue))
+		tx, err := in.send(ctx, c, in.victimKey, &in.contract, writeCall(injectionSlot, victimValue))
 		if err != nil {
 			log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "victim injection: " + err.Error()})
 		} else if rcpt, err := waitReceipt(ctx, c, tx.Hash(), 45*time.Second); err != nil {

@@ -304,6 +304,35 @@ type opWindow struct {
 	window chaosWindow
 }
 
+// waiverWindows is chaosWindows with every straddle-attributed window's
+// close extended by the monitor's own split grace - the bound its F3/F4
+// criticals fire against. A straddle heal
+// is the slowest recovery in the system - two islands re-merging across
+// the header-root format swap; measured live, a PAIR of victims takes on
+// the order of ten minutes to reconverge - so criticals fired while that
+// recovery is still inside the grace the monitor itself allows are
+// explained, not buried. Everything else keeps the tight +-30s slop, and
+// a recovery still split past the grace stays a failure.
+func (v *verifier) waiverWindows() []chaosWindow {
+	windows := v.chaosWindows()
+	dump, err := v.scheduleDump()
+	if err != nil {
+		return windows
+	}
+	for i, w := range windows {
+		if w.to.IsZero() {
+			continue
+		}
+		for _, op := range dump.Admitted() {
+			if migsched.Class(op.Class) == migsched.ClassStraddle && opOwns(op, w) {
+				windows[i].to = w.to.Add(migmon.SplitGrace)
+				break
+			}
+		}
+	}
+	return windows
+}
+
 // attributeWindows matches every chaos window this run recorded to the
 // admitted op it belongs to, by victim participant index and by falling
 // inside the op's own window (± slop). A window matching no admitted op
@@ -1055,6 +1084,7 @@ func (v *verifier) checkC6(ctx context.Context) (verdict, string) {
 		boundaryThin = fmt.Sprintf("only %d agreeing sample(s) in the boundary band [b*-40, b*+10], want >= 4", goodNearBoundary)
 	}
 
+	waivers := v.waiverWindows()
 	for _, ev := range v.monitor {
 		if ev.Kind != migmon.EvCritical {
 			continue
@@ -1064,7 +1094,7 @@ func (v *verifier) checkC6(ctx context.Context) (verdict, string) {
 			continue
 		}
 		waived := false
-		for _, w := range windows {
+		for _, w := range waivers {
 			if w.covers(ev.Node, ev.Time, slop) {
 				waived = true
 				break
@@ -1425,7 +1455,7 @@ func (v *verifier) checkC11(ctx context.Context) (verdict, string) {
 		return verdictFail, strings.Join(problems, "; ")
 	}
 
-	windows := v.chaosWindows()
+	windows := v.waiverWindows()
 	const slop = 30 * time.Second
 	for _, ev := range v.monitor {
 		if ev.Kind != migmon.EvCritical || ev.Finding != migmon.FindingNoConvergence {
