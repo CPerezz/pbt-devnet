@@ -268,6 +268,27 @@ func TestBStarQuorum(t *testing.T) {
 			t.Fatalf("converged nodes must not fire later, got %+v", evs)
 		}
 	})
+	t.Run("disagreement fires again after an intervening agreement", func(t *testing.T) {
+		q := NewBStarQuorum(999)
+		q.Observe("a", good(100, "0xa"), now)
+		q.Observe("b", good(105, "0xb"), now)
+		late1 := now.Add((BStarProvisionalGrace + 30) * time.Second)
+		if evs := q.Observe("b", good(105, "0xb"), late1); !hasFinding(evs, EvCritical, FindingBoundary) {
+			t.Fatalf("first disagreement outliving the grace must fire, got %+v", evs)
+		}
+		// The branches converge: disagreeFired must reset alongside
+		// disagreeSince, or a second genuine disagreement can never fire.
+		agreedAt := late1.Add(time.Second)
+		if evs := q.Observe("b", good(100, "0xa"), agreedAt); len(evs) != 0 {
+			t.Fatalf("agreement must not fire, got %+v", evs)
+		}
+		q.Observe("b", good(110, "0xc"), agreedAt.Add(time.Second))
+		late2 := agreedAt.Add((BStarProvisionalGrace + 30) * time.Second)
+		evs := q.Observe("b", good(110, "0xc"), late2)
+		if !hasFinding(evs, EvCritical, FindingBoundary) {
+			t.Fatalf("second disagreement outliving the grace must fire again, got %+v", evs)
+		}
+	})
 
 	t.Run("finalized disagreement fires at once", func(t *testing.T) {
 		q := NewBStarQuorum(999)
@@ -289,6 +310,19 @@ func TestBStarQuorum(t *testing.T) {
 		evs := q.Observe("a", BStar{Number: 100, Hash: "0xa", Time: 990, ParentTime: 980}, now)
 		if !hasFinding(evs, EvCritical, FindingBoundary) || !strings.Contains(evs[0].Detail, "does not straddle") {
 			t.Fatalf("want a shape critical, got %+v", evs)
+		}
+	})
+	t.Run("reorged-in record shape is re-validated", func(t *testing.T) {
+		q := NewBStarQuorum(999)
+		// A reorg replaces node a's provisional record with a new hash;
+		// the latch must key on record identity, not node, or a bad
+		// replacement's shape is never checked.
+		if evs := q.Observe("a", good(100, "0xa"), now); len(evs) != 0 {
+			t.Fatalf("valid initial record must not fire, got %+v", evs)
+		}
+		evs := q.Observe("a", BStar{Number: 101, Hash: "0xb", Time: 990, ParentTime: 980}, now)
+		if !hasFinding(evs, EvCritical, FindingBoundary) || !strings.Contains(evs[0].Detail, "does not straddle") {
+			t.Fatalf("reorged-in bad-shape record must fire, got %+v", evs)
 		}
 	})
 }
