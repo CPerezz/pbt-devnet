@@ -257,7 +257,23 @@ def run(plan, args={}):
     if hammer["enabled"]:
         _launch_hammer(plan, hammer, els, net.pre_funded_accounts)
     if migration["enabled"]:
-        t, genesis_time = _launch_migration(plan, migration, args, els)
+        # Client-onboarding guard: migration mode's evidence contract
+        # (bootstrap shim, digest line, introspection RPCs) exists only for
+        # the clients in the tooling's registry. A participant outside it
+        # would come up merkle-forever and read as a silently thinner run.
+        # A participant without an execution client would also shift every
+        # index-based victim/stake mapping by one.
+        for p in net.all_participants:
+            if p.el_context == None:
+                fail("pbt_migration needs every participant to run an execution client: " +
+                     "victim selection and stake weighting map participant indices to ELs 1:1")
+        for el in els:
+            if el.client_name not in MIGRATION_READY_CLIENTS:
+                fail(("pbt_migration supports {0} for now; participant runs {1}. " +
+                      "Onboarding a client needs its bootstrap + a registry entry " +
+                      "(see README, 'Adding a client to the migration devnet').").format(
+                    MIGRATION_READY_CLIENTS, el.client_name))
+        t, genesis_time = _launch_migration(plan, migration, args, els, net)
         if chaos["enabled"] and chaos["gate"]:
             _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer["senders"], t, genesis_time)
         elif chaos["enabled"]:
@@ -434,7 +450,15 @@ def _genesis_field(plan, name, jq_filter, fmt):
     return result.output
 
 
-MIGRATION_PROFILES = ["none", "smoke", "full", "composite", "composite-smoke", "straddle-smoke"]
+MIGRATION_PROFILES = ["none", "smoke", "full", "composite", "composite-smoke", "straddle-smoke", "straddle-pair-smoke"]
+
+# Execution clients the migration tooling has an evidence contract for:
+# bootstrap shim, digest line, introspection RPCs, and a registry entry in
+# internal/migmon. Erigon parses binaryTrieTime but rejects any activation
+# later than genesis (its commitment variant is a whole-datadir property
+# fixed at init), so it stays an at-genesis participant until in-place
+# migration exists upstream.
+MIGRATION_READY_CLIENTS = ["geth"]
 
 
 def _weight_participants(participants, cfg):
@@ -474,7 +498,7 @@ def _heavy_share(cfg, els):
     return float(heavy) / float(total)
 
 
-def _launch_migration(plan, cfg, args, els):
+def _launch_migration(plan, cfg, args, els, net):
     profile = cfg["chaos_profile"]
     if profile not in MIGRATION_PROFILES:
         fail("pbt_migration.chaos_profile must be one of {0}, got {1}".format(
@@ -501,7 +525,7 @@ def _launch_migration(plan, cfg, args, els):
     if heavy < 1 or heavy > len(els):
         fail("pbt_migration.heavy_node is {0}, outside the {1} execution clients".format(
             heavy, len(els)))
-    _launch_migration_chaos(plan, cfg, args, els, t, genesis_time)
+    _launch_migration_chaos(plan, cfg, args, els, t, genesis_time, net)
     return t, genesis_time
 
 
@@ -528,7 +552,7 @@ def _launch_migration_monitor(plan, cfg, els, t):
     plan.print("started migration-monitor: {0} execution clients, JSONL on stdout".format(len(els)))
 
 
-def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time):
+def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time, net):
     # Same refusal as _launch_chaos: without disruptoor a chaos driver that starts
     # cleanly and disrupts nothing is the failure that looks like success.
     if DISRUPTOOR_SERVICE not in args.get("additional_services", []):
@@ -541,6 +565,16 @@ def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time):
         cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
     for n in cfg["protect_nodes"]:
         cmd += ["--protect-node", str(n)]
+    # Two dedicated senders for the straddle state injector, one per island.
+    # Accounts 10 and 11 sit in the hole between assertoor's hardcoded 9 and
+    # spamoor's hardcoded 13, which no other service's slice reaches: the
+    # hammer takes from the top of the list and the gated reorg service takes
+    # the run just below it.
+    prefunded = net.pre_funded_accounts
+    if len(prefunded) > 11:
+        cmd += ["--key", prefunded[10].private_key, "--key", prefunded[11].private_key]
+    else:
+        plan.print("straddle injector disabled: fewer than 12 prefunded accounts")
     cmd += [
         "--genesis-time", genesis_time,
         "--binary-trie-time", t,

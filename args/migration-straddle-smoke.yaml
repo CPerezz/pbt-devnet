@@ -171,10 +171,9 @@ pbt_hammer:
   enabled: false
 
 pbt_monitor:
-  # In migration mode this is the MERKLE-PATRICIA genesis root (the chain
-  # starts on the merkle trie). Obtain it from the first run's
-  # eth_getBlockByNumber(0x0).stateRoot, then pin it here; acceptance
-  # requires it set, and verify/pins.yaml carries the same value.
+  # Left empty on purpose in migration mode: verify/pins.yaml is the single
+  # arming point for the genesis state-root pin (checked by C7), and a second
+  # copy here would only drift from it.
   # The migration-aware oracles (shadow roots, the boundary) live in
   # migration-monitor. This one keeps doing its same-height cross-client
   # comparison, which is format-agnostic and stays valid either side of the
