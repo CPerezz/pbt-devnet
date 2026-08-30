@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"sort"
@@ -11,13 +12,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CPerezz/pbt-devnet/internal/migmon"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
 // el is one execution client, addressed by the name ethereum-package gave it.
+// The raw URL is kept alongside the dialled client for the re-peer path,
+// which speaks admin_* through migmon's client rather than ethclient.
 type el struct {
 	name string
+	url  string
 	c    *ethclient.Client
 }
 
@@ -32,9 +38,33 @@ func dialELs(ctx context.Context, specs []string) ([]*el, error) {
 		if err != nil {
 			return nil, fmt.Errorf("dial %s: %w", name, err)
 		}
-		out = append(out, &el{name: name, c: c})
+		out = append(out, &el{name: name, url: url, c: c})
 	}
 	return out, nil
+}
+
+// repeerELs rebuilds the execution layer's peer mesh after a heal. On this
+// CL-fed topology the EL mesh carries almost no traffic, so a node that
+// missed blocks during a partition can sit with zero useful peers and
+// nothing to backfill from - measured live as a scenario "wedged after
+// heal" finding that resolved the moment a peer was added. The migration
+// services already re-peer after every heal; the at-genesis suite needs it
+// for the same physics once the mesh is small.
+func repeerELs(ctx context.Context, els []*el, log *slog.Logger) {
+	if len(els) < 2 {
+		return
+	}
+	clients := make([]migmon.Client, 0, len(els))
+	for _, e := range els {
+		clients = append(clients, migmon.NewClient(e.name, e.url))
+	}
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := migmon.Repeer(rctx, clients); err != nil {
+		log.Warn("re-peering after the heal", "err", err)
+		return
+	}
+	log.Info("execution clients re-peered")
 }
 
 // elCallTimeout bounds every RPC to an execution client.

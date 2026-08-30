@@ -144,13 +144,16 @@ fi
 # reachable only inside the enclave: the gate declares no ports, because
 # kurtosis would wait for one to open and nothing listens there until the
 # handover. So ask from inside the container.
+# kurtosis exec prints its own "command executed" banner on stderr and the
+# payload on stdout - but the payload is ONE json line, so any line-trimming
+# here deletes it. Keep only lines that look like json instead.
 gate_api() {
   kurtosis service exec "$ENCLAVE" migration-gate \
-    "wget -qO- --timeout=5 $1 2>/dev/null" 2>/dev/null | tail -n +2
+    "wget -qO- --timeout=5 $1 2>/dev/null" 2>/dev/null | grep -E '^\s*[\[{]' || true
 }
 gate_api_post() {
   kurtosis service exec "$ENCLAVE" migration-gate \
-    "wget -qO- --timeout=10 --post-data= $1 2>/dev/null" 2>/dev/null | tail -n +2
+    "wget -qO- --timeout=10 --post-data= $1 2>/dev/null" 2>/dev/null | grep -E '^\s*[\[{]' || true
 }
 handed_over=0
 scenario_results="[]"
@@ -163,21 +166,20 @@ if kurtosis service inspect "$ENCLAVE" migration-gate >/dev/null 2>&1; then
     sleep 15
   done
   if [ "$handed_over" = 1 ]; then
-    done_scenarios=""
     for s in $SCENARIOS; do
       say "scenario $s at depth $SCENARIO_DEPTH"
       kurtosis service exec "$ENCLAVE" migration-gate \
         "wget -qO- --timeout=10 --post-data= 'http://127.0.0.1:$CHAOS_PORT/scenario/$s?depth=$SCENARIO_DEPTH'" >/dev/null 2>&1 || true
-      # Wait for THIS scenario to finish rather than sleeping a guess:
-      # pbtchaos serialises its jobs, so the next POST would queue anyway,
-      # and the verifier judges recorded outcomes, not fire-and-forget.
+      # Wait for THIS scenario to record an outcome rather than sleeping a
+      # guess: pbtchaos serialises its jobs and publishes each run in its
+      # /status history, and the verifier judges recorded outcomes, not
+      # fire-and-forget.
       for _ in $(seq 1 40); do
         sleep 10
-        n=$(gate_api "http://127.0.0.1:$CHAOS_PORT/status" 2>/dev/null \
-          | python3 -c "import json,sys;d=json.load(sys.stdin);print(len(d.get('results',[])))" 2>/dev/null || echo 0)
-        if [ "${n:-0}" -ge "$(( $(echo "$done_scenarios" | wc -w) + 1 ))" ]; then break; fi
+        seen=$(gate_api "http://127.0.0.1:$CHAOS_PORT/status" 2>/dev/null \
+          | python3 -c "import json,sys;d=json.load(sys.stdin);print(sum(1 for r in d.get('history',[]) if r.get('name')=='$s'))" 2>/dev/null || echo 0)
+        if [ "${seen:-0}" -ge 1 ]; then break; fi
       done
-      done_scenarios="${done_scenarios:-} $s"
     done
     # Quiesce the cadence before judging: an end state sampled under live
     # partitions measures the chaos driver, not the clients.
@@ -186,15 +188,21 @@ if kurtosis service inspect "$ENCLAVE" migration-gate >/dev/null 2>&1; then
     say "reorg service quiesced; letting the network settle"
     sleep 45
     gate_api "http://127.0.0.1:$CHAOS_PORT/status" > "$OUT/chaos-status.json" 2>/dev/null || true
-    scenario_results=$(python3 - "$OUT/chaos-status.json" <<'PYEOF'
+    scenario_results=$(python3 - "$OUT/chaos-status.json" "$SCENARIOS" <<'PYEOF'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
     print("[]"); raise SystemExit
-out = [{"name": r.get("scenario") or r.get("name") or "", "outcome": r.get("outcome", "")}
-       for r in d.get("results", [])]
-print(json.dumps(out))
+# pbtchaos publishes every job in "history", including its own cadence ops;
+# only the scenarios this lap asked for are the lap's to account for. Last
+# occurrence wins per name (a retried scenario is judged by its final run).
+wanted = sys.argv[2].split()
+last = {}
+for r in d.get("history", []):
+    if r.get("name") in wanted:
+        last[r["name"]] = {"name": r["name"], "outcome": r.get("outcome", "")}
+print(json.dumps([last[n] for n in wanted if n in last]))
 PYEOF
 )
   else
