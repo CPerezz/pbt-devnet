@@ -68,6 +68,7 @@ func main() {
 	skipChaos := flag.Bool("skip-chaos", false, "chaos was not run: C3 is skipped, C6 drops its window math")
 	smoke := flag.Bool("smoke", false, "single-node smoke run: relaxed C4/C6/C7 thresholds")
 	summaryPath := flag.String("summary", "", "write a one-page markdown record of the run to this path")
+	manifestPath := flag.String("manifest", "", "lap manifest JSON: what the driver did (restart, scenarios, quiesce)")
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprint(out, "usage: verify-migration [flags]\n\n"+
@@ -111,15 +112,16 @@ func main() {
 	}
 
 	v := &verifier{
-		els:         els,
-		T:           *binaryTrieTime,
-		monitor:     monitor,
-		chaos:       chaos,
-		logsDir:     *logsDir,
-		skipChaos:   *skipChaos,
-		smoke:       *smoke,
-		summaryPath: *summaryPath,
-		fetch:       httpFetcher(&http.Client{Timeout: 15 * time.Second}),
+		els:          els,
+		T:            *binaryTrieTime,
+		monitor:      monitor,
+		chaos:        chaos,
+		logsDir:      *logsDir,
+		skipChaos:    *skipChaos,
+		smoke:        *smoke,
+		summaryPath:  *summaryPath,
+		manifestPath: *manifestPath,
+		fetch:        httpFetcher(&http.Client{Timeout: 15 * time.Second}),
 	}
 	if *pinsPath == "" {
 		v.pinsErr = fmt.Errorf("no --pins file given")
@@ -127,6 +129,9 @@ func main() {
 		v.pinsErr = err
 	} else {
 		v.pins = parsePins(raw)
+	}
+	if *manifestPath != "" {
+		v.manifest, v.manifestErr = loadManifest(*manifestPath)
 	}
 
 	os.Exit(v.Run(context.Background(), os.Stdout))
@@ -197,6 +202,12 @@ func (v *verifier) Run(ctx context.Context, w io.Writer) int {
 		{"C10", v.checkC10},
 		{"C11", v.checkC11},
 		{"C12", v.checkC12},
+		{"C13", v.checkC13},
+		{"C14", v.checkC14},
+		{"C15", v.checkC15},
+		{"C16", v.checkC16},
+		{"C17", v.checkC17},
+		{"C18", v.checkC18},
 	}
 	var results []checkResult
 	for _, c := range checks {
@@ -207,6 +218,15 @@ func (v *verifier) Run(ctx context.Context, w io.Writer) int {
 	failed, inconclusiveIDs := summarizeVerdicts(results)
 	if len(inconclusiveIDs) > 0 {
 		fmt.Fprintf(w, "inconclusive: %s\n", strings.Join(inconclusiveIDs, ","))
+	}
+	// A run in which not one check PASSed proved nothing at all; exiting 0
+	// on it would let a completely dead evidence pipeline read as green.
+	if failed == 0 && !anyPassed(results) {
+		fmt.Fprintln(w, "FAIL floor: no check passed; a run that proves nothing is not a green run")
+		failed = 1
+	}
+	if only, ok := v.singleImplementation(); ok {
+		fmt.Fprintf(w, "NOTE: single-implementation run (%s only): cross-node checks prove determinism, not spec agreement\n", only)
 	}
 	if v.summaryPath != "" {
 		if err := os.WriteFile(v.summaryPath, []byte(v.renderSummary(results)), 0o644); err != nil {
@@ -228,6 +248,37 @@ func summarizeVerdicts(results []checkResult) (failed int, inconclusiveIDs []str
 		}
 	}
 	return failed, inconclusiveIDs
+}
+
+// anyPassed reports whether at least one check PASSed.
+func anyPassed(results []checkResult) bool {
+	for _, r := range results {
+		if r.verdict == verdictPass {
+			return true
+		}
+	}
+	return false
+}
+
+// singleImplementation reports whether every configured EL runs the same
+// client implementation - in which case the differential checks compare a
+// binary against itself and the summary must say so.
+func (v *verifier) singleImplementation() (string, bool) {
+	first := ""
+	for _, e := range v.els {
+		c := clientOf(e.name)
+		if c == "" {
+			return "", false
+		}
+		if first == "" {
+			first = c
+			continue
+		}
+		if c != first {
+			return "", false
+		}
+	}
+	return first, first != ""
 }
 
 // fetcher performs one JSON-RPC call against url and decodes result into out.
@@ -303,10 +354,11 @@ func httpFetcher(client *http.Client) fetcher {
 // rpcBlock is the subset of eth_getBlockByNumber the checks compare on,
 // mirroring cmd/pbtmonitor's shape.
 type rpcBlock struct {
-	Number    hexutil.Uint64 `json:"number"`
-	Hash      common.Hash    `json:"hash"`
-	StateRoot common.Hash    `json:"stateRoot"`
-	Timestamp hexutil.Uint64 `json:"timestamp"`
+	Number     hexutil.Uint64 `json:"number"`
+	Hash       common.Hash    `json:"hash"`
+	ParentHash common.Hash    `json:"parentHash"`
+	StateRoot  common.Hash    `json:"stateRoot"`
+	Timestamp  hexutil.Uint64 `json:"timestamp"`
 }
 
 func (v *verifier) getBlock(ctx context.Context, e el, numberOrTag string) (*rpcBlock, error) {
