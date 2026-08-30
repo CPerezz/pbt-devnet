@@ -15,13 +15,14 @@ import (
 // Publishing it beats both sides re-deriving a schedule they could get
 // wrong differently.
 type Dump struct {
-	Profile   string   `json:"profile"`
-	Genesis   int64    `json:"genesis"`
-	Fork      int64    `json:"fork"`
-	Heavy     int      `json:"heavy"`
-	Ops       []DumpOp `json:"ops"`
-	Failsafes []int64  `json:"failsafes"`
-	Quiet     int64    `json:"quiet"`
+	Profile     string   `json:"profile"`
+	Genesis     int64    `json:"genesis"`
+	Fork        int64    `json:"fork"`
+	Heavy       int      `json:"heavy"`
+	SlotSeconds int64    `json:"slot_seconds"`
+	Ops         []DumpOp `json:"ops"`
+	Failsafes   []int64  `json:"failsafes"`
+	Quiet       int64    `json:"quiet"`
 }
 
 // DumpOp is one op in the dump. Times are unix seconds: the JSONL already
@@ -39,11 +40,12 @@ type DumpOp struct {
 // NewDump renders the schedule for publication.
 func (s Schedule) NewDump(genesis, fork time.Time, heavy int) Dump {
 	d := Dump{
-		Profile: s.Profile,
-		Genesis: genesis.Unix(),
-		Fork:    fork.Unix(),
-		Heavy:   heavy,
-		Quiet:   s.Quiet.Unix(),
+		Profile:     s.Profile,
+		Genesis:     genesis.Unix(),
+		Fork:        fork.Unix(),
+		Heavy:       heavy,
+		SlotSeconds: s.SlotSeconds,
+		Quiet:       s.Quiet.Unix(),
 	}
 	for _, o := range s.Ops {
 		d.Ops = append(d.Ops, DumpOp{
@@ -86,9 +88,10 @@ func (d Dump) Admitted() []DumpOp {
 
 // HealDeadline returns the instant by which op must have been healed, per
 // its class: a pre-fork op by the time the network has to be whole again for
-// the approach to the fork, the straddle by its own end plus the convergence
-// allowance. A verifier applying one global deadline would fail every
-// straddle for healing after the fork, which is what a straddle does.
+// the approach to the fork, a post-fork op (straddle or window) by its own
+// end plus the convergence allowance. A verifier applying one global
+// deadline would fail every straddle for healing after the fork, which is
+// what a straddle does.
 //
 // A pre-fork op's deadline is deliberately NOT its own scheduled end. The
 // heal is applied after sleeping to that end, so its recorded time is always
@@ -96,8 +99,8 @@ func (d Dump) Admitted() []DumpOp {
 // never pass. The requirement is that the network is whole before the fork
 // approach, so the last sweep at or before the fork is the deadline.
 func (d Dump) HealDeadline(o DumpOp) time.Time {
-	if Class(o.Class) == ClassStraddle {
-		return time.Unix(o.End, 0).Add(straddleExclusiveAfter * time.Second)
+	if c := Class(o.Class); c == ClassStraddle || c == ClassWindow {
+		return time.Unix(o.End, 0).Add(healConvergeAllowance * time.Second)
 	}
 	fork := time.Unix(d.Fork, 0)
 	deadline := fork

@@ -98,9 +98,10 @@ func TestPreForkAdmission(t *testing.T) {
 	}
 }
 
-// The composite profile carries the straddle anchored to the fork, leaves
-// the restart gap alone, and sweeps four times: the last pre-fork end, the
-// pre-fork deadline, the straddle's heal, and once more a minute later.
+// The composite profile carries the straddle anchored to the fork, adds the
+// post-fork window op, leaves the restart gap alone, and sweeps five times:
+// the last pre-fork end, the pre-fork deadline, the straddle's heal, its
+// repeat a minute later, and the window op's repeat.
 func TestResolveComposite(t *testing.T) {
 	genesis := time.Unix(2_000_000, 0)
 	fork := at(genesis, 1800)
@@ -108,8 +109,8 @@ func TestResolveComposite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(s.Ops) != 4 {
-		t.Fatalf("ops = %d, want 4", len(s.Ops))
+	if len(s.Ops) != 5 {
+		t.Fatalf("ops = %d, want 5", len(s.Ops))
 	}
 	for _, o := range s.Ops {
 		if !o.Admitted() {
@@ -126,6 +127,24 @@ func TestResolveComposite(t *testing.T) {
 	if str.Victims[0] != 2 {
 		t.Fatalf("straddle victim = %v, want the heavy participant", str.Victims)
 	}
+	// The window op lives inside the open migration window, on a light
+	// victim that is NOT the straddle's: the mid-migration disruption and
+	// the boundary rewind must land on different nodes to be separable.
+	var win *Op
+	for i := range s.Ops {
+		if s.Ops[i].Class == ClassWindow {
+			win = &s.Ops[i]
+		}
+	}
+	if win == nil {
+		t.Fatal("composite resolved without a window op")
+	}
+	if !win.Start.Equal(at(fork, 240)) || !win.End.Equal(at(fork, 390)) {
+		t.Fatalf("window op = [%s,%s], want fork+240..fork+390", win.Start, win.End)
+	}
+	if len(win.Victims) != 1 || win.Victims[0] == str.Victims[0] {
+		t.Fatalf("window victims = %v, want one light distinct from the straddle victim %v", win.Victims, str.Victims)
+	}
 	// The restart gap: no partition may be open while a node is being
 	// restarted there.
 	holeFrom, holeTo := at(genesis, 1000), at(genesis, 1300)
@@ -135,10 +154,10 @@ func TestResolveComposite(t *testing.T) {
 		}
 	}
 	sweepsEqual(t, s.Failsafes, []time.Time{
-		at(genesis, 940), at(genesis, 1410), at(fork, 90), at(fork, 150),
+		at(genesis, 940), at(genesis, 1410), at(fork, 90), at(fork, 150), at(fork, 450),
 	})
-	if !s.Quiet.Equal(at(fork, 210)) {
-		t.Fatalf("quiet = %s, want fork+210", s.Quiet)
+	if !s.Quiet.Equal(at(fork, 510)) {
+		t.Fatalf("quiet = %s, want fork+510 (window op end + quiet tail)", s.Quiet)
 	}
 }
 
@@ -153,15 +172,19 @@ func TestStraddleDivergenceIsLegal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, probe := range []int{-89, -30, 0, 30, 89, 90, 150, 209} {
+	for _, probe := range []int{-89, -30, 0, 30, 89, 90, 150, 209, 250, 380, 500} {
 		if !s.Covers(at(fork, probe)) {
-			t.Fatalf("fork%+ds reads as illegal divergence; a watchdog would cut the straddle short", probe)
+			t.Fatalf("fork%+ds reads as illegal divergence; a watchdog would cut the op short", probe)
 		}
 	}
-	// Past the heal allowance it must stop being legal, or a genuinely
-	// wedged node would never be noticed.
-	if s.Covers(at(fork, 400)) {
-		t.Fatal("fork+400s still reads as legal chaos; a wedge would go unhealed")
+	// Past the window op's heal allowance it must stop being legal, or a
+	// genuinely wedged node would never be noticed. The straddle's own
+	// tail ends at fork+210; fork+230 sits in the gap before the window
+	// op opens at fork+240.
+	for _, probe := range []int{230, 540} {
+		if s.Covers(at(fork, probe)) {
+			t.Fatalf("fork+%ds still reads as legal chaos; a wedge would go unhealed", probe)
+		}
 	}
 	// The restart gap is quiet: the last pre-fork op ended at +940 and its
 	// allowance runs to +1060.
