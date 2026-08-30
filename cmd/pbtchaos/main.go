@@ -372,6 +372,7 @@ func (c *chaos) work(ctx context.Context) {
 			if err := c.d.Clear(); err != nil {
 				c.log.Error("could not clear disruptoor state", "err", err)
 			}
+			repeerELs(context.Background(), c.els, c.log)
 		}
 	}
 }

@@ -384,6 +384,10 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 		res.Detail = "heal: " + err.Error()
 		return res
 	}
+	// Re-link the EL mesh before judging reconvergence: a minority node that
+	// missed blocks has nobody to backfill from on this CL-fed topology, and
+	// that reads as "wedged after heal" when it is only peerless.
+	repeerELs(ctx, c.els, c.log)
 	c.log.Info("healed", "name", sc.name, "expect_height", wantHeight, "expect_hash", short(wantHash))
 
 	height, ok, frozen := c.waitAgreement(ctx, 4*time.Minute)
