@@ -169,8 +169,10 @@ several runs, not theorised, and the reason a 12-minute partition never healed w
 
 ## Adding another execution client
 
-The migration profiles are geth-only today, and everything above is written so that a second
-client is an addition rather than a rewrite. It needs four things:
+The migration profiles are geth-only today — `main.star` refuses a migration run with any
+other client, so a half-onboarded participant fails at plan time instead of coming up
+merkle-forever and quietly thinning the evidence. Everything above is written so that a
+second client is an addition rather than a rewrite. It needs five things:
 
 1. **A migration bootstrap** — convert the merkle genesis, import the artifacts, mark the
    datadir so restarts skip the work. For geth this is `scripts/geth-shim.sh`, wrapped into
@@ -178,9 +180,16 @@ client is an addition rather than a rewrite. It needs four things:
 2. **An introspection adapter** — migration progress and the shadow root of a block, behind
    `migmon.Client`. Without one the client is still watched over standard RPC and its events
    say the surface is unavailable; the monitor never reads silence as agreement.
-3. **A reorg log pattern**, so a heal can be corroborated from the client's own log when the
+3. **A registry entry** (`internal/migmon/registry.go`) — the client's evidence contract in
+   one place: whether it introspects, whether its bootstrap logs artifact digests, its reorg
+   log pattern, whether it serves orphaned blocks by hash, and the log phrase that would
+   betray a configured migration window. The monitor and the acceptance checks scope
+   themselves from this entry, so a client that cannot produce some evidence degrades to a
+   named INCONCLUSIVE instead of a false FAIL — and `MIGRATION_READY_CLIENTS` in `main.star`
+   is the plan-time face of the same list.
+4. **A reorg log pattern**, so a heal can be corroborated from the client's own log when the
    monitor did not sample the reorged height itself.
-4. **An args participant block**, and optionally `pbt_migration.heavy_node` pointed at it to
+5. **An args participant block**, and optionally `pbt_migration.heavy_node` pointed at it to
    put that client in the victim seat.
 
 **Erigon is not ready for this yet**, and the gap is in the client, not here: it parses
