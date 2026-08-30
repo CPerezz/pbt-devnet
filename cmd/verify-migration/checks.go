@@ -34,6 +34,12 @@ type verifier struct {
 	summaryPath string
 	fetch       fetcher
 
+	// manifest is the lap driver's record of its own actions, reconciled
+	// by C15; nil when the run was driven by hand.
+	manifestPath string
+	manifest     *lapManifest
+	manifestErr  error
+
 	bstar    bstarResult
 	bstarErr error
 
@@ -50,6 +56,17 @@ func (v *verifier) elNames() []string {
 		names[i] = e.name
 	}
 	return names
+}
+
+// elByIndex resolves a participant index to its configured EL, via the
+// el-N-... naming convention.
+func (v *verifier) elByIndex(idx int) (el, bool) {
+	for _, e := range v.els {
+		if i, ok := nodeIndex(e.name); ok && i == idx {
+			return e, true
+		}
+	}
+	return el{}, false
 }
 
 // readEvents parses one JSONL stream of migmon.Event lines, sorted by time.
@@ -608,13 +625,22 @@ func fileContainsMatch(path string, re *regexp.Regexp) bool {
 	return false
 }
 
-// checkC1 requires at least 100 canonical blocks strictly before b*.
+// checkC1 requires a meaningful pre-fork chain: at least 100 canonical
+// blocks strictly before b* on full profiles, scaled down for short-offset
+// smoke profiles from the published schedule's own geometry (3/4 of the
+// slots the offset had room for - the chain misses slots under chaos).
 func (v *verifier) checkC1(ctx context.Context) (verdict, string) {
 	if v.bstarErr != nil {
 		return verdictFail, fmt.Sprintf("b* unresolved: %v", v.bstarErr)
 	}
-	if v.bstar.number < 101 {
-		return verdictFail, fmt.Sprintf("b*=%d, need >= 101 for 100 canonical blocks before it", v.bstar.number)
+	min := uint64(101)
+	if dump, err := v.scheduleDump(); err == nil && dump.SlotSeconds > 0 && dump.Fork > dump.Genesis {
+		if derived := uint64((dump.Fork - dump.Genesis) / dump.SlotSeconds * 3 / 4); derived < min {
+			min = derived
+		}
+	}
+	if v.bstar.number < min {
+		return verdictFail, fmt.Sprintf("b*=%d, need >= %d canonical blocks before the fork for this profile", v.bstar.number, min)
 	}
 	return verdictPass, v.bstar.evidence
 }
@@ -912,9 +938,22 @@ func (v *verifier) checkC5(ctx context.Context) (verdict, string) {
 		// Only the execution clients' logs matter: this is about how the
 		// clients were configured, and our own event streams describe
 		// windows in prose ("post-migration window closed"), which is not
-		// evidence of a configured one.
-		if found, file := v.grepELLogs(regexp.MustCompile(`(?i)migration window`)); found {
-			problems = append(problems, fmt.Sprintf("found 'migration window' mention in %s", file))
+		// evidence of a configured one. The forbidden pattern is per-client
+		// (registry): what betrays a configured window in one client's log
+		// vocabulary is meaningless noise in another's.
+		for _, node := range v.elNames() {
+			spec, known := migmon.SpecFor(node)
+			if !known || spec.ForbiddenWindowLog == "" {
+				notes = append(notes, fmt.Sprintf("%s: no registered window-log contract", node))
+				continue
+			}
+			re := regexp.MustCompile(`(?i)` + spec.ForbiddenWindowLog)
+			for _, f := range v.victimLogFiles(node) {
+				if fileContainsMatch(f, re) {
+					problems = append(problems, fmt.Sprintf("found %q mention in %s", spec.ForbiddenWindowLog, f))
+					break
+				}
+			}
 		}
 		if found, _ := v.grepLighthouseLogs(regexp.MustCompile(`(?i)finaliz`)); found {
 			notes = append(notes, "INFO: lighthouse logs show finalized checkpoints")
@@ -949,6 +988,11 @@ func (v *verifier) checkC6(ctx context.Context) (verdict, string) {
 	names := v.elNames()
 
 	samples, good, outsideGood, anyNonNullSamples := 0, 0, 0, 0
+	// goodNearBoundary counts agreeing samples in the boundary band
+	// [b*-40, b*+10]: the region a straddle rewrites and re-replays, and
+	// exactly where random sampling is least likely to land often enough
+	// on its own for the re-replay to be called cross-checked.
+	goodNearBoundary := 0
 	for _, ev := range v.monitor {
 		if ev.Kind != migmon.EvSample {
 			continue
@@ -975,6 +1019,9 @@ func (v *verifier) checkC6(ctx context.Context) (verdict, string) {
 		// from a divergence.
 		if responded == len(names) && len(nonNull) == 1 {
 			good++
+			if v.bstarErr == nil && ev.Number+40 >= v.bstar.number && ev.Number <= v.bstar.number+10 {
+				goodNearBoundary++
+			}
 			outside := true
 			for _, w := range windows {
 				if w.covers("", ev.Time, slop) {
@@ -1003,6 +1050,10 @@ func (v *verifier) checkC6(ctx context.Context) (verdict, string) {
 	if !v.skipChaos && outsideGood < 10 {
 		problems = append(problems, fmt.Sprintf("only %d all-non-null-equal sample(s) strictly outside chaos windows, need >= 10", outsideGood))
 	}
+	boundaryThin := ""
+	if !v.smoke && v.bstarErr == nil && goodNearBoundary < 4 {
+		boundaryThin = fmt.Sprintf("only %d agreeing sample(s) in the boundary band [b*-40, b*+10], want >= 4", goodNearBoundary)
+	}
 
 	for _, ev := range v.monitor {
 		if ev.Kind != migmon.EvCritical {
@@ -1028,11 +1079,12 @@ func (v *verifier) checkC6(ctx context.Context) (verdict, string) {
 	if len(problems) > 0 {
 		return verdictFail, strings.Join(problems, "; ")
 	}
-	if thin != "" {
-		return verdictInconclusive, fmt.Sprintf("%s (%d samples, %d outside chaos windows, 0 mismatches, 0 unwaived criticals)",
-			thin, samples, outsideGood)
+	if thin != "" || boundaryThin != "" {
+		reasons := strings.TrimSuffix(strings.TrimPrefix(thin+"; "+boundaryThin, "; "), "; ")
+		return verdictInconclusive, fmt.Sprintf("%s (%d samples, %d good, %d outside chaos windows, %d near boundary, 0 unwaived criticals)",
+			reasons, samples, good, outsideGood, goodNearBoundary)
 	}
-	return verdictPass, fmt.Sprintf("%d samples, %d good, %d outside chaos windows, 0 unwaived criticals", samples, good, outsideGood)
+	return verdictPass, fmt.Sprintf("%d samples, %d good, %d outside chaos windows, %d near boundary, 0 unwaived criticals", samples, good, outsideGood, goodNearBoundary)
 }
 
 // checkC7 compares the pins file against every node's real genesis block.
@@ -1085,15 +1137,30 @@ var digestLineRe = regexp.MustCompile(`PBT_ARTIFACT_DIGESTS\s+\S*snapshot=([0-9a
 
 type artifactDigests struct{ snapshot, preimages string }
 
-// checkC8 requires exactly one PBT_ARTIFACT_DIGESTS line per EL log file,
-// with identical snapshot/preimages digests across every node.
+// checkC8 requires exactly one PBT_ARTIFACT_DIGESTS line per EL log file
+// for every client whose registry entry carries the digest contract, with
+// identical snapshot/preimages digests within each implementation. Digest
+// bytes are an artifact of one implementation's bootstrap, so equality is
+// only meaningful within a client type: a second implementation proves its
+// bootstrap through its own registry entry, not by matching geth's bytes.
+// (The one-line rule holds across the lap's stop/start restart because the
+// shim's marker file skips re-prep on a persisted datadir - measured, not
+// assumed. A kill-style restart that loses the marker would re-emit, and
+// that variant must adjust the expected count when it lands.)
 func (v *verifier) checkC8(ctx context.Context) (verdict, string) {
 	if v.logsDir == "" {
 		return verdictFail, "no --logs-dir given"
 	}
 	perNode := map[string]artifactDigests{}
-	var problems []string
+	var problems, notes []string
+	contracted := 0
 	for _, node := range v.elNames() {
+		spec, known := migmon.SpecFor(node)
+		if !known || !spec.DigestLineRequired {
+			notes = append(notes, fmt.Sprintf("%s: no digest contract registered", node))
+			continue
+		}
+		contracted++
 		files, err := v.nodeLogFiles(node)
 		if err != nil || len(files) == 0 {
 			problems = append(problems, fmt.Sprintf("%s: no log file found", node))
@@ -1115,26 +1182,42 @@ func (v *verifier) checkC8(ctx context.Context) (verdict, string) {
 		}
 		perNode[node] = matches[0]
 	}
+	if contracted == 0 {
+		return verdictFail, "no configured EL has a registered digest contract; the bootstrap left no checkable evidence"
+	}
 	if len(problems) > 0 {
 		return verdictFail, strings.Join(problems, "; ")
 	}
 
-	var first artifactDigests
-	firstNode := ""
+	// Equality within each implementation: N nodes of one client convert
+	// the same genesis with the same binary, so their artifact bytes must
+	// be identical - a determinism check per implementation, never across.
+	firstOf := map[string]artifactDigests{}
+	firstNode := map[string]string{}
+	groups := map[string]bool{}
 	for _, node := range v.elNames() {
-		d := perNode[node]
-		if firstNode == "" {
-			first, firstNode = d, node
+		d, ok := perNode[node]
+		if !ok {
 			continue
 		}
-		if d != first {
-			problems = append(problems, fmt.Sprintf("%s digests differ from %s", node, firstNode))
+		impl := clientOf(node)
+		groups[impl] = true
+		if _, seen := firstOf[impl]; !seen {
+			firstOf[impl], firstNode[impl] = d, node
+			continue
+		}
+		if d != firstOf[impl] {
+			problems = append(problems, fmt.Sprintf("%s digests differ from %s within the %s group", node, firstNode[impl], impl))
 		}
 	}
 	if len(problems) > 0 {
 		return verdictFail, strings.Join(problems, "; ")
 	}
-	return verdictPass, fmt.Sprintf("snapshot=%s preimages=%s identical across %d node(s)", first.snapshot, first.preimages, len(perNode))
+	evidence := fmt.Sprintf("digests identical within %d implementation group(s) across %d node(s)", len(groups), len(perNode))
+	if len(notes) > 0 {
+		evidence += " (" + strings.Join(notes, "; ") + ")"
+	}
+	return verdictPass, evidence
 }
 
 // checkC9 asks whether any healed isolation's corroborated reorg
@@ -1154,8 +1237,17 @@ func (v *verifier) checkC9(ctx context.Context) (verdict, string) {
 		return verdictFail, fmt.Sprintf("schedule: %v", err)
 	}
 	matched, _ := v.attributeWindows(dump, v.chaosWindows())
+	fork := time.Unix(dump.Fork, 0)
 	best, bestOp := 0, ""
 	for _, ow := range matched {
+		// Only ops that lived entirely before the fork count: the straddle
+		// (and any post-fork window op) produces its own, deeper reorg by
+		// design, and C10 judges that. Without this scope the straddle's
+		// depth satisfies C9 and the pre-fork deep windows are never
+		// actually asserted to have reorged anything.
+		if !time.Unix(ow.op.End, 0).Before(fork) {
+			continue
+		}
 		if !ow.window.healed {
 			continue
 		}
@@ -1226,6 +1318,22 @@ func (v *verifier) checkC10(ctx context.Context) (verdict, string) {
 		healed: true,
 	}
 	reorg := v.matchReorg(w)
+	// The walk is the primary depth source: it measures the dropped branch
+	// on the victim's own chain data (orphaned fork block -> parent links ->
+	// canonical join), immune to any log line's semantics. The log/monitor
+	// evidence in matchReorg stays as corroboration and fallback for
+	// clients that do not serve orphaned blocks by hash.
+	if orphans := v.orphanedForkBlocks(); len(orphans) > 0 {
+		if victim, ok := v.elByIndex(straddle.Victims[0]); ok {
+			if spec, known := migmon.SpecFor(victim.name); known && spec.ServesOrphans {
+				tip := v.victimTip(victimNode, w.from, w.to)
+				if depth, ancestor, err := v.walkOrphanBranch(ctx, victim, orphans[0].hash, tip); err == nil {
+					reorg = reorgEvidence{depth: depth, matched: true, ancestor: ancestor,
+						source: fmt.Sprintf("parent walk (corroboration: %s)", reorg.String())}
+				}
+			}
+		}
+	}
 	if !reorg.matched {
 		return verdictInconclusive, fmt.Sprintf("straddle op %s: victim's fork block was orphaned but no matchable reorg depth evidence (%s)", straddle.Name, reorg.String())
 	}

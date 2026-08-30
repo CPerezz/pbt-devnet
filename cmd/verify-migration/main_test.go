@@ -787,11 +787,16 @@ func TestCheckC8(t *testing.T) {
 		return fmt.Sprintf("PBT_ARTIFACT_DIGESTS /data/execution/pbt-artifacts/snapshot=%s /data/execution/pbt-artifacts/preimages=%s\n", snap, pre)
 	}
 
+	// Node names carry the client type: the digest contract is looked up in
+	// the migmon registry by that substring, and a node without a contract
+	// is skipped, not judged.
+	geth1, geth2 := "el-1-geth-lighthouse", "el-2-geth-lighthouse"
+
 	t.Run("identical digests across nodes pass", func(t *testing.T) {
 		dir := t.TempDir()
-		writeFile(t, filepath.Join(dir, "el1.log"), "startup\n"+digestLine(snapshot, preimages))
-		writeFile(t, filepath.Join(dir, "el2.log"), "startup\n"+digestLine(snapshot, preimages))
-		v := &verifier{els: []el{{name: "el1"}, {name: "el2"}}, logsDir: dir}
+		writeFile(t, filepath.Join(dir, geth1+".log"), "startup\n"+digestLine(snapshot, preimages))
+		writeFile(t, filepath.Join(dir, geth2+".log"), "startup\n"+digestLine(snapshot, preimages))
+		v := &verifier{els: []el{{name: geth1}, {name: geth2}}, logsDir: dir}
 		pass, evidence := v.checkC8(context.Background())
 		if pass != verdictPass {
 			t.Fatalf("want pass, got fail: %s", evidence)
@@ -800,9 +805,9 @@ func TestCheckC8(t *testing.T) {
 
 	t.Run("differing preimages digest fails", func(t *testing.T) {
 		dir := t.TempDir()
-		writeFile(t, filepath.Join(dir, "el1.log"), digestLine(snapshot, preimages))
-		writeFile(t, filepath.Join(dir, "el2.log"), digestLine(snapshot, strings.Repeat("c", 64)))
-		v := &verifier{els: []el{{name: "el1"}, {name: "el2"}}, logsDir: dir}
+		writeFile(t, filepath.Join(dir, geth1+".log"), digestLine(snapshot, preimages))
+		writeFile(t, filepath.Join(dir, geth2+".log"), digestLine(snapshot, strings.Repeat("c", 64)))
+		v := &verifier{els: []el{{name: geth1}, {name: geth2}}, logsDir: dir}
 		pass, evidence := v.checkC8(context.Background())
 		if pass == verdictPass || !strings.Contains(evidence, "differ") {
 			t.Fatalf("want digest-differ failure, got pass=%v evidence=%q", pass, evidence)
@@ -811,8 +816,8 @@ func TestCheckC8(t *testing.T) {
 
 	t.Run("zero digest lines fails", func(t *testing.T) {
 		dir := t.TempDir()
-		writeFile(t, filepath.Join(dir, "el1.log"), "no digest here\n")
-		v := &verifier{els: []el{{name: "el1"}}, logsDir: dir}
+		writeFile(t, filepath.Join(dir, geth1+".log"), "no digest here\n")
+		v := &verifier{els: []el{{name: geth1}}, logsDir: dir}
 		pass, evidence := v.checkC8(context.Background())
 		if pass == verdictPass || !strings.Contains(evidence, "found 0") {
 			t.Fatalf("want zero-line failure, got pass=%v evidence=%q", pass, evidence)
@@ -821,11 +826,22 @@ func TestCheckC8(t *testing.T) {
 
 	t.Run("two digest lines in one file fails", func(t *testing.T) {
 		dir := t.TempDir()
-		writeFile(t, filepath.Join(dir, "el1.log"), digestLine(snapshot, preimages)+digestLine(snapshot, preimages))
-		v := &verifier{els: []el{{name: "el1"}}, logsDir: dir}
+		writeFile(t, filepath.Join(dir, geth1+".log"), digestLine(snapshot, preimages)+digestLine(snapshot, preimages))
+		v := &verifier{els: []el{{name: geth1}}, logsDir: dir}
 		pass, evidence := v.checkC8(context.Background())
 		if pass == verdictPass || !strings.Contains(evidence, "found 2") {
 			t.Fatalf("want two-line failure, got pass=%v evidence=%q", pass, evidence)
+		}
+	})
+
+	t.Run("a client with no digest contract is skipped, not judged", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, geth1+".log"), digestLine(snapshot, preimages))
+		writeFile(t, filepath.Join(dir, "el-2-unknownclient-lighthouse.log"), "no digest, and none required\n")
+		v := &verifier{els: []el{{name: geth1}, {name: "el-2-unknownclient-lighthouse"}}, logsDir: dir}
+		pass, evidence := v.checkC8(context.Background())
+		if pass != verdictPass || !strings.Contains(evidence, "no digest contract") {
+			t.Fatalf("want pass with a skip note, got pass=%v evidence=%q", pass, evidence)
 		}
 	})
 }
