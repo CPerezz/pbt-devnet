@@ -25,12 +25,34 @@ func sweepsEqual(t *testing.T, got, want []time.Time) {
 	}
 }
 
-// The pre-fork acceptance profile: deeps pin the heavy victim, shorts
-// rotate over the lights, everything is admitted with room to spare.
-func TestResolveFull(t *testing.T) {
+// preForkFixture is a pre-fork-only profile for exercising rotation,
+// refusal and sweep placement: three deeps on the heavy victim, then two
+// shorts rotating over the lights. Injected because no shipped profile is
+// pre-fork-only anymore, and these behaviors must not depend on which
+// profiles happen to ship.
+func preForkFixture(t *testing.T) string {
+	t.Helper()
+	const name = "test-prefork"
+	profiles[name] = profile{
+		windows: []window{
+			{start: 240, end: 430, anchor: FromGenesis, class: ClassDeep},
+			{start: 540, end: 730, anchor: FromGenesis, class: ClassDeep},
+			{start: 840, end: 1030, anchor: FromGenesis, class: ClassDeep},
+			{start: 1090, end: 1240, anchor: FromGenesis, class: ClassShort},
+			{start: 1300, end: 1450, anchor: FromGenesis, class: ClassShort},
+		},
+		preForkMargin: 300,
+	}
+	t.Cleanup(func() { delete(profiles, name) })
+	return name
+}
+
+// The pre-fork shape: deeps pin the heavy victim, shorts rotate over the
+// lights, everything is admitted with room to spare.
+func TestResolvePreFork(t *testing.T) {
 	genesis := time.Unix(1_000_000, 0)
 	fork := at(genesis, 1800)
-	s, err := Resolve("full", genesis, fork, topo())
+	s, err := Resolve(preForkFixture(t), genesis, fork, topo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +98,7 @@ func TestResolveFull(t *testing.T) {
 func TestPreForkAdmission(t *testing.T) {
 	genesis := time.Unix(1_000_000, 0)
 	fork := at(genesis, 1200) // deadline +900
-	s, err := Resolve("full", genesis, fork, topo())
+	s, err := Resolve(preForkFixture(t), genesis, fork, topo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +245,12 @@ func TestStraddleGeometryErrors(t *testing.T) {
 	// A share so heavy the expected dropped branch exceeds the bound.
 	heavy := topo()
 	heavy.HeavyShare = 0.95
-	if _, err := Resolve("straddle-smoke", genesis, fork, heavy); err == nil {
+	profiles["test-straddle"] = profile{
+		windows:       []window{{start: -90, end: 90, anchor: FromFork, class: ClassStraddle}},
+		preForkMargin: 390,
+	}
+	t.Cleanup(func() { delete(profiles, "test-straddle") })
+	if _, err := Resolve("test-straddle", genesis, fork, heavy); err == nil {
 		t.Fatal("a 95% victim share resolved; the heal rewind would be unbounded")
 	}
 	// The victim rule is defensive - Resolve pins the heavy node itself -

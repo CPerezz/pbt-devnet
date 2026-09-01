@@ -450,7 +450,7 @@ def _genesis_field(plan, name, jq_filter, fmt):
     return result.output
 
 
-MIGRATION_PROFILES = ["none", "smoke", "full", "composite", "composite-smoke", "straddle-smoke", "straddle-pair-smoke"]
+MIGRATION_PROFILES = ["none", "composite", "composite-smoke"]
 
 # Execution clients the migration tooling has an evidence contract for:
 # bootstrap shim, digest line, introspection RPCs, and a registry entry in

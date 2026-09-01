@@ -127,21 +127,16 @@ root swaps — after which a reverse direction shadows the merkle side until fin
 window and the node reports the migration done.
 
 ```
-kurtosis run . --enclave pbt --args-file args/migration.yaml --privileged
+kurtosis run . --enclave pbt --args-file args/migration-composite.yaml --privileged
 kurtosis service logs pbt migration-monitor -f     # phases, roots, findings as JSONL
 make verify-migration ENCLAVE=pbt LOGS_DIR=... BINARY_TRIE_TIME=...
 ```
 
 | profile | shape | takes |
 |---|---|---|
-| `migration-smoke-fast` | 1 node, fork at ~block 40 | ~14 min |
-| `migration-smoke` | 1 node, fork at ~block 100 | ~20 min |
-| `migration-chaos-smoke` | 4 nodes, one 3-minute isolation, fork far away | ~15 min |
-| `migration-straddle-smoke` | 4 nodes, one partition spanning the fork | ~30 min |
+| `migration-smoke-fast` | 1 node, no chaos, fork at ~block 40 | ~14 min |
 | `migration-composite-smoke` | 4 nodes, all three phases: before, across, after | ~35 min |
-| `migration-quiet` | 4 nodes, no chaos, full acceptance timeline | ~40 min |
-| `migration` | 4 nodes, full pre-fork chaos schedule | ~50 min |
-| `migration-composite` | 4 nodes, the whole lifecycle incl. the at-genesis suite after the switchover | ~65 min |
+| `migration-composite` | 4 nodes, the whole lifecycle: pre-fork deeps and shorts, the fork-spanning partition, a partition inside the open window, then the at-genesis suite after the switchover | ~90 min |
 
 `make lap` runs one profile end to end: it starts the devnet, prints one line per change from
 the monitor's live view, restarts a node in the gap the schedule leaves for it, asks for reorg

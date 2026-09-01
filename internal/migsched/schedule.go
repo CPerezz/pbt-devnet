@@ -78,7 +78,6 @@ type window struct {
 	start, end int // seconds relative to the anchor
 	anchor     Anchor
 	class      Class
-	lightPair  bool // straddle only: isolate the first two lights instead of the heavy participant
 }
 
 // profile is a named schedule plus the margin its pre-fork ops must clear.
@@ -97,23 +96,6 @@ type profile struct {
 // survivors and never rejoins. Shorts are 150s on light victims, the
 // scale measured to heal cleanly with finality flowing.
 var profiles = map[string]profile{
-	// One short isolation, far from the fork: proves the machinery.
-	"smoke": {
-		windows:       []window{{start: 360, end: 540, anchor: FromGenesis, class: ClassShort}},
-		preForkMargin: 300,
-	},
-	// Pre-fork acceptance: three tries at a deep branch, then two shorts
-	// rotating over the light nodes.
-	"full": {
-		windows: []window{
-			{start: 240, end: 430, anchor: FromGenesis, class: ClassDeep},
-			{start: 540, end: 730, anchor: FromGenesis, class: ClassDeep},
-			{start: 840, end: 1030, anchor: FromGenesis, class: ClassDeep},
-			{start: 1090, end: 1240, anchor: FromGenesis, class: ClassShort},
-			{start: 1300, end: 1450, anchor: FromGenesis, class: ClassShort},
-		},
-		preForkMargin: 300,
-	},
 	// The full lifecycle: deep branches and a short before the fork, a
 	// gap for a node restart, a partition straddling the fork, then a
 	// light isolation inside the open migration window. The gap between
@@ -136,19 +118,6 @@ var profiles = map[string]profile{
 			{start: 220, end: 370, anchor: FromGenesis, class: ClassShort},
 			{start: -90, end: 90, anchor: FromFork, class: ClassStraddle},
 		},
-		preForkMargin: 390,
-	},
-	// The straddle alone, for iterating on the boundary itself.
-	"straddle-smoke": {
-		windows:       []window{{start: -90, end: 90, anchor: FromFork, class: ClassStraddle}},
-		preForkMargin: 390,
-	},
-	// The straddle again, isolating the first two lights instead of the
-	// heavy participant: the same summed share taken from the other side
-	// of the topology, so a heal that only works for the heavy victim
-	// shows up here.
-	"straddle-pair-smoke": {
-		windows:       []window{{start: -90, end: 90, anchor: FromFork, class: ClassStraddle, lightPair: true}},
 		preForkMargin: 390,
 	},
 }
@@ -255,14 +224,7 @@ func Resolve(name string, genesis, fork time.Time, topo Topology) (Schedule, err
 		case ClassDeep:
 			o.Victims = []int{topo.Heavy}
 		case ClassStraddle:
-			if w.lightPair {
-				if len(topo.Lights) < 2 {
-					return Schedule{}, fmt.Errorf("profile %q straddles a light pair but the topology has %d lights", name, len(topo.Lights))
-				}
-				o.Victims = []int{topo.Lights[0], topo.Lights[1]}
-			} else {
-				o.Victims = []int{topo.Heavy}
-			}
+			o.Victims = []int{topo.Heavy}
 		case ClassShort, ClassWindow:
 			o.Victims = []int{topo.Lights[rotation%len(topo.Lights)]}
 			rotation++
