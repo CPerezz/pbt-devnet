@@ -154,7 +154,7 @@ number of failed checks, listing separately any check whose precondition never o
 **The reorg that matters most** is the one spanning the activation: each side of a partition
 crosses the fork on its own block, and when it heals the losing side has to rewind *across the
 header-root format swap* and re-cross. Nothing else exercises that path. Finding it wedged a
-node for 30 seconds and failed the import, which is fixed in the geth revision this pins.
+node for 30 seconds and failed the import, which is fixed in the fork's `pbt` branch.
 
 Validator stake is deliberately uneven — the deep victim holds 40%, so isolating it stalls
 finality below the two-thirds threshold for the window. With uniform stake the majority
