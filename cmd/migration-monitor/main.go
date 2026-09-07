@@ -1,14 +1,7 @@
 // Command migration-monitor watches N execution clients through the EIP-8347
-// binary-trie migration and reports findings as it observes them.
-//
-// It polls debug_migrationProgress and eth_blockNumber every --poll tick,
-// tracks each node's phase timeline against the binary-trie activation time
-// (--binary-trie-time) for stall (F2) and boundary (F3) findings, and every
-// --sample-interval draws a random-depth cross-node shadow-root sample for
-// root-mismatch (F1), persistent-null, and reorg findings.
-//
-// It never moves forkchoice, never persists a block, and a CRITICAL finding
-// never stops the process: this daemon observes, verify-migration judges.
+// binary-trie migration and reports findings as it observes them. It never
+// moves forkchoice or persists a block; a CRITICAL finding never stops the
+// process, it only observes.
 package main
 
 import (
@@ -65,16 +58,14 @@ func main() {
 		w = f
 	}
 	snap := newSnapshot(binaryTrieT)
-	// snap.Write decodes the same JSONL lines going to w, so the live view
-	// stays in lockstep with the on-disk record without a second emit call
-	// at every finding site.
+	// snap.Write decodes the same JSONL lines as w, keeping the live view
+	// in lockstep without a second emit call per finding.
 	jsonl := migmon.NewLog(io.MultiWriter(w, snap))
-	quorum := migmon.NewBStarQuorum(binaryTrieT)
+	quorum := migmon.NewIStarQuorum(binaryTrieT)
 	split := &splitWatch{}
 	resample := newResampleQueue()
 	if singleImplementation(states) {
-		// Say it once, at the top of the stream: every cross-node check on
-		// this run compares one binary against itself.
+		// Single implementation: cross-node checks prove determinism only.
 		jsonl.Emit(migmon.Event{Kind: migmon.EvWarn, Node: "monitor",
 			Detail: "single-implementation run: cross-node checks prove determinism, not spec agreement"})
 	}
@@ -96,13 +87,12 @@ func main() {
 			snap.setNode(ns)
 		}
 	}
-	doPoll() // first poll immediately rather than waiting a full --poll interval
+	doPoll() // first poll immediately, not after a full --poll interval
 
 	for {
 		select {
 		case <-ctx.Done():
-			// Nothing to flush explicitly: jsonl writes unbuffered, and the
-			// deferred file Close (if --jsonl is a file) runs on return.
+			// jsonl writes unbuffered; nothing to flush.
 			return
 		case <-pollTick.C:
 			doPoll()

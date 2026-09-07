@@ -5,22 +5,11 @@ import (
 	"fmt"
 )
 
-// Repeer reconnects every execution client to every other one.
-//
-// It exists because of how this devnet moves blocks: each consensus client
-// feeds its own execution client through the engine API, so the execution
-// layer's peer-to-peer mesh carries almost no traffic and ends up with one
-// peer or none. That is invisible until a node misses blocks. Then its
-// consensus client, far enough behind, stops replaying payloads and simply
-// points the execution client at the current head - which the execution
-// client has to fetch itself, from peers it does not have. The node then
-// sits at its old head forever, falling further behind, looking exactly
-// like a migration that failed to converge.
-//
-// Measured: a node stranded that way at block 147 while the chain ran on to
-// 387 caught up completely within ninety seconds of being given one peer.
-// So every heal ends with this, and a partition that spans the fork becomes
-// survivable rather than terminal.
+// Repeer reconnects every execution client to every other one. Each
+// consensus client feeds its execution client through the engine API, so
+// the execution p2p mesh carries little traffic and can end up with one
+// peer or none, stranding a node at its old head. 90s: a node stranded at
+// block 147 while the chain ran to 387 caught up fully within 90s of one peer.
 func Repeer(ctx context.Context, clients []Client) error {
 	enodes := make([]string, len(clients))
 	for i, c := range clients {

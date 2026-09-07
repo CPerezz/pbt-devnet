@@ -1,7 +1,6 @@
-// Package migmon holds the migration monitor's pure logic: decoding the
-// node's progress reports, holding per-node phase timelines to the fork
-// schedule, comparing shadow roots across nodes, and walking reorgs. All
-// I/O lives in cmd/migration-monitor; everything here is table-testable.
+// Package migmon holds the migration monitor's pure logic: decoding
+// progress reports, per-node phase timelines, shadow-root comparison, reorg tracking.
+// All I/O lives in cmd/migration-monitor.
 package migmon
 
 import (
@@ -11,11 +10,7 @@ import (
 	"strings"
 )
 
-// FlexUint64 decodes a JSON number or a 0x-prefixed hex string. geth
-// marshals core.MigrationProgress with encoding/json defaults today, which
-// makes Cursor a plain number — but hexutil wrappers are one refactor away
-// on the fork, and a monitor that dies on "0x2a" would blame the wrong
-// side. Tolerance here is one function; a wrong CRITICAL costs a run.
+// FlexUint64 decodes a JSON number or a 0x-prefixed hex string.
 type FlexUint64 uint64
 
 func (f *FlexUint64) UnmarshalJSON(b []byte) error {
@@ -40,10 +35,7 @@ func (f *FlexUint64) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// DirectionProgress mirrors core.DirectionProgress (bintrie_follower.go:834-841
-// at the pinned tip). Go's unmarshaler matches names case-insensitively, so
-// both encoding/json defaults ("Phase") and a future tagged form ("phase")
-// decode identically.
+// DirectionProgress mirrors core.DirectionProgress; field names unmarshal case-insensitively.
 type DirectionProgress struct {
 	Phase      string     `json:"phase"`
 	Cursor     FlexUint64 `json:"cursor"`
@@ -52,7 +44,7 @@ type DirectionProgress struct {
 	Error      string     `json:"error"`
 }
 
-// MigrationProgress mirrors core.MigrationProgress (bintrie_follower.go:827-832).
+// MigrationProgress mirrors core.MigrationProgress.
 type MigrationProgress struct {
 	Phase  string             `json:"phase"`
 	Binary *DirectionProgress `json:"binary"`
@@ -71,9 +63,7 @@ func DecodeProgress(raw []byte) (MigrationProgress, error) {
 	return p, nil
 }
 
-// Direction phase names, per the follower's own comment: idle, following,
-// synced, parked or stalled. The monitor treats unknown names as findings
-// rather than guessing.
+// Direction phase names: idle, following, synced, parked, stalled.
 const (
 	DirIdle      = "idle"
 	DirFollowing = "following"
@@ -89,8 +79,7 @@ const (
 	PhaseDone     = "done"
 )
 
-// Active reports whether a direction is live and healthy (following or
-// synced). Nil directions are not active.
+// Active reports whether a direction is live and healthy (following or synced).
 func Active(d *DirectionProgress) bool {
 	return d != nil && (d.Phase == DirFollowing || d.Phase == DirSynced)
 }

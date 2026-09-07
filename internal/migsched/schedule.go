@@ -1,14 +1,7 @@
 // Package migsched resolves the partition schedule a migrating devnet runs
-// against. It is shared: the chaos driver executes the schedule, and the
-// post-migration gate needs the same instants to know when a cross-node
-// divergence is legal chaos and when it is a wedge worth healing. Both
-// import this package rather than passing the numbers between services,
-// so the two can never drift apart.
-//
-// Every schedule is resolved once, at startup, from the genesis time, the
-// fork time and the topology. Nothing observed at runtime changes it. The
-// only dynamic rule is refusal: an op that would still be open when the
-// network has to be whole again is skipped loudly, never compressed.
+// against, shared by the chaos driver and the post-migration gate. A schedule
+// is resolved once at startup from genesis, fork time and topology; an op that
+// would still be open when the network must be whole is refused, never compressed.
 package migsched
 
 import (
@@ -17,26 +10,18 @@ import (
 	"time"
 )
 
-// Class names what an op is for. It travels in the JSONL so the acceptance
-// verifier can apply the right heal deadline to each op instead of one
-// global rule.
+// Class names what an op is for; it travels in the JSONL so each op gets its
+// own heal deadline.
 type Class string
 
 const (
-	// ClassDeep isolates the stake-heavy victim long enough to build a
-	// deep branch. Its share stalls finality for the window, which is
-	// what keeps the heal reorg survivable.
+	// ClassDeep isolates the stake-heavy victim long enough to build a deep branch.
 	ClassDeep Class = "deep"
-	// ClassShort isolates a light victim: the connected majority keeps
-	// finalizing, and the heal reorg is shallow and quick.
+	// ClassShort isolates a light victim while the majority keeps finalizing.
 	ClassShort Class = "short"
-	// ClassStraddle spans the fork time itself - both sides cross it
-	// independently, on different blocks, and the victim rewinds across
-	// the header-root format swap when the partition heals.
+	// ClassStraddle spans the fork time; the victim rewinds across the format swap on heal.
 	ClassStraddle Class = "straddle"
-	// ClassWindow isolates a light victim inside the open migration
-	// window, after the fork: the format swap must tolerate chaos while
-	// it is live, not just on either side of it.
+	// ClassWindow isolates a light victim inside the open migration window, after the fork.
 	ClassWindow Class = "window"
 )
 
@@ -46,8 +31,7 @@ type Anchor int
 const (
 	// FromGenesis anchors an op to block 0's timestamp.
 	FromGenesis Anchor = iota
-	// FromFork anchors an op to the tree activation time, so a straddle
-	// keeps its geometry whatever offset the profile runs.
+	// FromFork anchors an op to the tree activation time.
 	FromFork
 )
 
@@ -83,25 +67,16 @@ type window struct {
 // profile is a named schedule plus the margin its pre-fork ops must clear.
 type profile struct {
 	windows []window
-	// preForkMargin is how long before the fork every pre-fork partition
-	// must be healed. Profiles that straddle the fork need the wider
-	// margin so the quiet zone starts before the straddle's own window.
+	// preForkMargin: every pre-fork partition must be healed this long before the fork.
 	preForkMargin int
 }
 
-// The shipped profiles. Deep windows are 190s because that is the scale a
-// stake-heavy victim needs to reach depth >= 10 while remaining healable:
-// longer windows let the majority finalize past the victim, and a victim
-// whose branch conflicts with a finalized checkpoint is banned by the
-// survivors and never rejoins. Shorts are 150s on light victims, the
-// scale measured to heal cleanly with finality flowing.
+// Deep windows are 190s: the scale a stake-heavy victim needs to reach depth >= 10
+// while remaining healable (longer lets the majority finalize past it and ban the
+// branch). Shorts are 150s: measured to heal cleanly with finality flowing.
 var profiles = map[string]profile{
-	// The full lifecycle: deep branches and a short before the fork, a
-	// gap for a node restart, a partition straddling the fork, then a
-	// light isolation inside the open migration window. The gap between
-	// the short and the quiet zone is deliberate - the lap driver
-	// restarts a light node there, and that must not overlap any
-	// partition.
+	// The gap between the short and the quiet zone is where the driver restarts
+	// a light node; it must not overlap any partition.
 	"composite": {
 		windows: []window{
 			{start: 240, end: 430, anchor: FromGenesis, class: ClassDeep},
@@ -132,40 +107,26 @@ func Names() []string {
 }
 
 const (
-	// straddleMinSide is how much of the straddle must fall on each side
-	// of the fork: both islands need time to mint their own first block
-	// past it, or there is no format swap to rewind across.
+	// straddleMinSide: each side of the fork needs this long for both islands to mint a block past it.
 	straddleMinSide = 60
-	// straddleMaxAfter bounds how long the network may stay split past
-	// the fork.
+	// straddleMaxAfter bounds how long the network may stay split past the fork.
 	straddleMaxAfter = 120
-	// healConvergeAllowance is how long a post-fork op's heal reorg may
-	// take to converge before the verifier calls the network wedged.
+	// healConvergeAllowance: a post-fork heal reorg may take this long before the network counts as wedged.
 	healConvergeAllowance = 120
-	// legalDivergenceTail extends each op's legal-divergence window past
-	// its end: the heal reorg is still propagating through the survivors,
-	// so divergence there is expected, not a fault.
+	// legalDivergenceTail extends each op's legal-divergence window past its end for heal propagation.
 	legalDivergenceTail = 120
-	// quietTail keeps the driver's Clear authority this long past the
-	// last post-fork op, so the repeat sweep lands before permanent quiet.
+	// quietTail keeps Clear authority this long past the last post-fork op so the repeat sweep lands.
 	quietTail = 120
-	// straddleMaxDrop bounds the victims' expected dropped-branch length,
-	// keeping the heal rewind far inside the state a node retains.
+	// straddleMaxDrop bounds the victim's expected dropped-branch length.
 	straddleMaxDrop = 24
-	// failsafeRepeat is the gap before a post-fork op's idempotent second
-	// heal: the first one failing must not leave the network split.
+	// failsafeRepeat is the gap before a post-fork op's idempotent second heal.
 	failsafeRepeat = 60
 
-	// windowOpenAfter is the earliest a window op may start. The straddle
-	// may stay split until fork+120s and its heal is allowed 120s more to
-	// converge, so the migration window is only provably calm from here.
+	// windowOpenAfter: earliest window-op start; straddleMaxAfter + healConvergeAllowance.
 	windowOpenAfter = 240
-	// windowCloseBy is the latest a window op may end, keeping the whole
-	// disruption inside the span the migration window is guaranteed open.
+	// windowCloseBy: latest window-op end, inside the span the migration window is guaranteed open.
 	windowCloseBy = 420
-	// windowMinLen and windowMaxLen bound a window op: shorter builds no
-	// observable divergence, longer approaches the deep-op scale a light
-	// victim cannot heal from once the majority finalizes past it.
+	// windowMinLen/windowMaxLen bound a window op: shorter shows no divergence, longer nears deep scale.
 	windowMinLen = 60
 	windowMaxLen = 180
 )
@@ -178,9 +139,8 @@ type Topology struct {
 	SecondsPerSlot int
 }
 
-// share returns a participant's stake share. Topology records only the
-// heavy participant's share; the remainder is assumed to split evenly
-// across the lights plus the bootnode, which holds one light-sized slice.
+// share returns a participant's stake share; the non-heavy remainder splits
+// evenly across the lights plus the bootnode.
 func (t Topology) share(participant int) float64 {
 	if participant == t.Heavy {
 		return t.HeavyShare
@@ -254,12 +214,6 @@ func Resolve(name string, genesis, fork time.Time, topo Topology) (Schedule, err
 		s.Ops = append(s.Ops, o)
 	}
 
-	// Exclusivity around the straddle needs no separate check: every
-	// pre-fork op is refused unless it ends by the deadline, which sits
-	// before the straddle opens, and a window op may not start before the
-	// straddle's heal allowance has fully run out.
-	// TestProfilesRespectStraddleWindow holds that invariant over the
-	// shipped profiles.
 	s.Failsafes, s.Quiet = failsafes(s.Ops, deadline)
 	if err := checkFailsafes(s.Ops, s.Failsafes); err != nil {
 		return Schedule{}, err
@@ -267,10 +221,7 @@ func Resolve(name string, genesis, fork time.Time, topo Topology) (Schedule, err
 	return s, nil
 }
 
-// admitStraddle enforces the straddle's own rules. They are resolve-time
-// errors, not refusals: a straddle profile whose fork geometry does not fit
-// is a misconfiguration, and running it minus its only interesting op would
-// look like a pass.
+// admitStraddle enforces the straddle's rules as resolve-time errors, not refusals.
 func admitStraddle(o Op, fork time.Time, topo Topology) error {
 	var share float64
 	for _, v := range o.Victims {
@@ -296,10 +247,7 @@ func admitStraddle(o Op, fork time.Time, topo Topology) error {
 	return nil
 }
 
-// admitWindow enforces the window op's rules. Like the straddle's, they
-// are resolve-time errors, not refusals: a profile that cannot place its
-// window op inside the open migration window is a misconfiguration, and
-// running it without the op would look like a pass.
+// admitWindow enforces the window op's rules as resolve-time errors, not refusals.
 func admitWindow(o Op, fork time.Time, topo Topology) error {
 	if len(o.Victims) != 1 || o.Victims[0] == topo.Heavy {
 		return fmt.Errorf("window victim is %v, must be a single light participant: isolating the heavy share mid-migration stalls finality while the format swap is live", o.Victims)
@@ -319,11 +267,8 @@ func admitWindow(o Op, fork time.Time, topo Topology) error {
 	return nil
 }
 
-// checkFailsafes rejects a schedule whose sweep instants fall inside an
-// admitted op's window: an unconditional Clear there tears the partition
-// down mid-op and silently destroys the evidence the op exists to produce.
-// A sweep exactly at an op's end is legal - the heal runs first (Actions
-// orders op-end before a same-instant sweep) and the sweep backstops it.
+// checkFailsafes rejects a schedule whose sweep instants fall inside an admitted
+// op's window. A sweep exactly at an op's end is legal: the heal runs first.
 func checkFailsafes(ops []Op, sweeps []time.Time) error {
 	for _, f := range sweeps {
 		for _, o := range ops {
@@ -340,18 +285,10 @@ func checkFailsafes(ops []Op, sweeps []time.Time) error {
 	return nil
 }
 
-// failsafes returns the unconditional Clear instants and the moment the
-// driver goes quiet for good. Bookkeeping is not a safety mechanism: every
-// instant here fires a Clear whatever the driver thinks it has already
-// healed, so a crashed or confused run cannot leave the network split.
-//
-// The pre-fork deadline always gets a sweep, and the last admitted pre-fork
-// op gets an earlier one when it ends before that: the early sweep closes
-// partitions promptly, the deadline sweep is the one that guarantees the
-// network is whole for the approach to the fork even if everything between
-// them failed. The straddle gets a sweep at its end plus a repeat a minute
-// later; a window op's heal fires at its own end, so it gets the repeat
-// alone.
+// failsafes returns the unconditional Clear instants and the moment the driver
+// goes quiet for good. The pre-fork deadline always gets a sweep, and the last
+// admitted pre-fork op gets an earlier one when it ends before that. The
+// straddle gets a sweep at its end plus a repeat; a window op gets the repeat alone.
 func failsafes(ops []Op, deadline time.Time) ([]time.Time, time.Time) {
 	var (
 		out     []time.Time
@@ -382,11 +319,8 @@ func failsafes(ops []Op, deadline time.Time) ([]time.Time, time.Time) {
 	return out, quiet
 }
 
-// LegalWindows returns the intervals during which cross-node head
-// divergence is expected chaos rather than a fault: each admitted op's
-// window, extended to cover the heal and the convergence that follows it.
-// The gate's watchdog uses these to avoid healing a partition the schedule
-// is deliberately holding.
+// LegalWindows returns the intervals during which cross-node head divergence
+// is expected chaos: each admitted op's window extended by legalDivergenceTail.
 func (s Schedule) LegalWindows() [][2]time.Time {
 	var out [][2]time.Time
 	for _, o := range s.Ops {
@@ -421,36 +355,27 @@ func (s Schedule) Straddle() (Op, bool) {
 // ActionKind tags one entry in the serial action list.
 type ActionKind int
 
-// Kinds sort by value when two actions share an instant: the heal must
-// land before the sweep that backstops it, and both before any new
-// isolation.
+// Kinds sort by value when two actions share an instant: heal, then sweep, then isolation.
 const (
 	ActOpEnd ActionKind = iota
 	ActSweep
 	ActOpStart
 )
 
-// Action is one instant of driver work. The driver executes the action
-// list as a single serial loop; running ops and sweeps as separate passes
-// fires the sweeps bundled after the last op instead of at their scheduled
-// instants.
+// Action is one instant of driver work; the driver executes the list as a single serial loop.
 type Action struct {
 	Kind ActionKind
 	At   time.Time
 	Op   Op // the op being started or ended; zero for sweeps
 }
 
-// StaleAt reports whether executing the action at now is pointless: an op
-// whose window has already closed must be skipped, never run as a
-// zero-length isolate/heal. Op ends and sweeps are never stale - a Clear
-// is idempotent, and firing one late is strictly safer than not firing it.
+// StaleAt reports whether the action is pointless at now: an op whose window has
+// already closed must be skipped. Op ends and sweeps are never stale.
 func (a Action) StaleAt(now time.Time) bool {
 	return a.Kind == ActOpStart && !a.Op.End.After(now)
 }
 
-// Actions flattens the schedule into one chronologically sorted list.
-// Refused ops do not appear: they never run, and the driver announces
-// them from Ops before the loop starts.
+// Actions flattens the schedule into one chronologically sorted list; refused ops do not appear.
 func (s Schedule) Actions() []Action {
 	out := make([]Action, 0, 2*len(s.Ops)+len(s.Failsafes))
 	for _, o := range s.Ops {

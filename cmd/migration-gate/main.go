@@ -1,19 +1,7 @@
 // Command migration-gate holds a service back until every execution
-// client has finished migrating, then runs one partition of its own and
-// execs the command it wraps.
-//
-// It exists because the reorg service written for a chain that runs the
-// binary tree from genesis knows nothing about an activation boundary: its
-// cadence would happily partition the network while the migration is still
-// converging. Gating it on completion keeps disruptoor under exactly one
-// owner at a time, provable from the timeline alone.
-//
-// The partition it runs itself is not decoration. Before the fork, a reorg
-// exercises merkle-canonical execution with a binary shadow being built
-// behind it; after the migration completes, the same reorg exercises
-// binary-canonical execution with the shadow retired. Those are different
-// code paths, and only this side of the handoff can reach the second one
-// while the stake layout still makes a deep reorg survivable.
+// client finishes migrating, then runs one partition of its own and
+// execs the wrapped command. Gating keeps disruptoor under exactly one
+// owner at a time; the reorg service otherwise has no activation boundary.
 package main
 
 import (
@@ -34,25 +22,17 @@ import (
 )
 
 const (
-	// donePoll is how often every client is asked whether it has finished.
-	donePoll = 10 * time.Second
-	// settle gives the network a moment after the last client reports done
-	// before anything disturbs it again.
-	settle = 60 * time.Second
-	// watchPoll is how often the watchdog compares canonical chains.
-	watchPoll = 30 * time.Second
-	// deepWindow and shortWindow are the post-migration partition lengths,
-	// matched to the pre-fork schedule so the two sides of the handoff are
-	// comparable: a heavy victim reaches a deep branch in the first, a
-	// light victim heals quickly in the second.
+	donePoll  = 10 * time.Second // how often clients are polled for done
+	settle    = 60 * time.Second // pause after done before disturbing the network
+	watchPoll = 30 * time.Second // watchdog canonical-chain comparison interval
+	// deepWindow/shortWindow match the pre-fork schedule so both sides of
+	// the handoff are comparable.
 	deepWindow  = 190 * time.Second
 	shortWindow = 150 * time.Second
 )
 
-// held marks a partition this process is holding itself, so the watchdog
-// does not treat its own window as a stuck one and heal it mid-flight. The
-// scheduled windows come from the shared schedule; this covers the one the
-// gate applies after the migration, which is not in it.
+// held marks a partition this process holds itself, so the watchdog does
+// not treat it as stuck.
 type held struct {
 	mu    sync.Mutex
 	until time.Time
@@ -153,9 +133,7 @@ func main() {
 		SecondsPerSlot: *slotSecs,
 	})
 	if err != nil {
-		// Without the schedule the watchdog cannot tell a held partition
-		// from a wedged node, and healing the wrong one either destroys
-		// the evidence or leaves the network split.
+		// A held partition and a wedged node need different treatment.
 		fmt.Fprintf(os.Stderr, "schedule: %v\n", err)
 		os.Exit(2)
 	}
@@ -173,9 +151,7 @@ func main() {
 		d = disruptoor.New(*api, 15*time.Second)
 	}
 
-	// The watchdog runs for the whole of this process's life, including
-	// while it waits for the migration to finish: a partition left applied
-	// by a crashed driver would otherwise sit there unnoticed.
+	// Watchdog runs for this process's whole life, including before done.
 	mine := &held{}
 	if d != nil {
 		go watchdog(ctx, log, d, clients, sched, mine)
@@ -183,11 +159,7 @@ func main() {
 
 	if !waitForDone(ctx, log, clients) {
 		if ctx.Err() == nil {
-			// waitForDone only returns false with no live context error when
-			// it never entered its poll loop at all: no client had a
-			// migration surface to watch. A devnet where nothing can report
-			// done is a misconfiguration, not a quiet success, and must not
-			// exit clean.
+			// A devnet where nothing can report done must not exit clean.
 			os.Exit(1)
 		}
 		return // signalled; nothing has been disturbed
@@ -198,11 +170,8 @@ func main() {
 		if !sleep(ctx, settle) {
 			return
 		}
-		// migration-chaos may still be issuing its own scheduled disruptions until the
-		// schedule's Quiet instant. The gate already resolved this schedule to run its
-		// watchdog, so waiting on sched.Quiet is the cheap, exact option here -- no need
-		// to infer quiet from an absence of chaos events when the deadline is already
-		// known outright.
+		// migration-chaos runs until sched.Quiet; wait for that exactly
+		// rather than inferring quiet from an absence of chaos events.
 		if wait := time.Until(sched.Quiet); wait > 0 {
 			log.Emit(migmon.Event{Kind: migmon.EvPause, Detail: fmt.Sprintf("waiting %.0fs for the schedule to go quiet before the post-op partition", wait.Seconds())})
 			if !sleep(ctx, wait) {
@@ -219,9 +188,7 @@ func main() {
 	if len(wrapped) == 0 {
 		return
 	}
-	// Exec rather than spawn: the wrapped service becomes this container's
-	// process, so ownership of disruptoor passes with no overlap and no
-	// second process to reap.
+	// Exec, not spawn: disruptoor ownership passes with no second process.
 	bin, err := exec.LookPath(wrapped[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "wrapped command %q: %v\n", wrapped[0], err)
@@ -249,10 +216,8 @@ func lightNodes(count, heavy int, protect []int) []int {
 	return out
 }
 
-// waitForDone blocks until every client that can report migration progress
-// says it is done. A client with no introspection surface cannot answer, so
-// it is not counted - and that omission is logged once, because a run whose
-// completion is inferred from a subset of nodes proved less than it looks.
+// waitForDone blocks until every introspectable client reports done. A
+// client with no introspection surface is excluded and logged once.
 func waitForDone(ctx context.Context, log *migmon.Log, clients []migmon.Client) bool {
 	var watched []migmon.Client
 	for _, c := range clients {
@@ -288,8 +253,7 @@ func waitForDone(ctx context.Context, log *migmon.Log, clients []migmon.Client) 
 					continue
 				}
 			}
-			// Completion cannot be confirmed without this client, so keep
-			// waiting - but say so once, or the run looks merely slow.
+			// Can't confirm completion without this client; keep waiting.
 			if !stalled[c.Name()] {
 				stalled[c.Name()] = true
 				log.Emit(migmon.Event{
@@ -307,8 +271,8 @@ func waitForDone(ctx context.Context, log *migmon.Log, clients []migmon.Client) 
 	}
 }
 
-// runPostOp applies one partition after the migration has completed, heals
-// it, and waits for the network to agree again.
+// runPostOp applies one partition after migration, heals it, and waits
+// for the network to reconverge.
 func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clients []migmon.Client, kind string, heavy int, lights []int, participants int, mine *held) error {
 	victim, window := heavy, deepWindow
 	if kind == "short-light" {
@@ -323,8 +287,7 @@ func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clien
 
 	name := fmt.Sprintf("post-migration-%s", kind)
 	// Claim the window before applying it: the watchdog runs concurrently
-	// and would otherwise see this divergence as a partition nobody is
-	// holding and heal it a couple of minutes in.
+	// and would otherwise heal this as an unclaimed divergence.
 	mine.hold(window)
 	if err := d.Partition(name, others(participants, victim), []int{victim}); err != nil {
 		mine.release()
@@ -344,9 +307,8 @@ func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clien
 	}
 	log.Emit(migmon.Event{Kind: migmon.EvHeal, Node: nodeName(victim), Detail: "post-migration window closed"})
 
-	// Rebuild the peer mesh before waiting: a victim that missed blocks
-	// needs peers to fetch them, and this devnet's execution layer runs
-	// with almost none because the consensus clients carry the traffic.
+	// Rebuild the peer mesh: this devnet's execution layer runs with
+	// almost no peers of its own.
 	rctx, rcancel := context.WithTimeout(ctx, 30*time.Second)
 	defer rcancel()
 	if err := migmon.Repeer(rctx, clients); err != nil {
@@ -361,15 +323,9 @@ func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clien
 }
 
 // awaitConvergence waits for every client to agree on the canonical chain
-// again. A post-migration reorg that never converges is normally the
-// failure this whole run is looking for, and an error. But a genuinely
-// converging deep recovery must not be amputated just because it needed
-// longer than the deadline sized for an ordinary heal: on deadline expiry
-// this samples the head spread across ~3 more polls, and only if it is
-// actually shrinking does it extend the wait once, by the same deadline.
-// Static or growing spread means the split is not resolving on its own, and
-// exec-ing the wrapped service onto it would produce evidence nobody could
-// interpret, so that case still fails immediately.
+// again. On deadline expiry, if the head spread is still shrinking the
+// wait is extended once by the same deadline; a static or growing spread
+// fails immediately.
 func awaitConvergence(ctx context.Context, log *migmon.Log, clients []migmon.Client) error {
 	deadline := time.Now().Add(migmon.ConvergenceGrace * time.Second)
 	extended := false
@@ -409,12 +365,8 @@ func awaitConvergence(ctx context.Context, log *migmon.Log, clients []migmon.Cli
 	}
 }
 
-// spreadShrinking samples the spread between clients' head numbers three
-// times, 5s apart, and reports whether it is strictly narrowing. A hard
-// split advances both branches at close to the same rate, so its spread
-// stays flat or grows; a laggard genuinely catching up after a heal narrows
-// it every sample. Three samples is the least that shows a trend rather
-// than noise from one poll racing a block.
+// spreadShrinking samples the head spread three times, 5s apart, and
+// reports whether it is strictly narrowing.
 func spreadShrinking(ctx context.Context, clients []migmon.Client) (bool, string, error) {
 	samples := make([]uint64, 0, 3)
 	for i := range 3 {
@@ -431,16 +383,12 @@ func spreadShrinking(ctx context.Context, clients []migmon.Client) (bool, string
 	return trendShrinking(samples), trend, nil
 }
 
-// trendShrinking reports whether three spread samples are strictly
-// narrowing, sample over sample -- the shape a laggard catching up
-// produces, distinct from the flat or growing shape of a hard split.
+// trendShrinking reports whether three spread samples strictly narrow.
 func trendShrinking(samples []uint64) bool {
 	return samples[2] < samples[1] && samples[1] < samples[0]
 }
 
-// headSpread returns the difference between the highest and lowest head
-// number reported by any client, as a cheap proxy for how far apart two
-// branches have grown.
+// headSpread returns the gap between the highest and lowest reported head.
 func headSpread(ctx context.Context, clients []migmon.Client) (uint64, error) {
 	var min, max uint64
 	first := true
@@ -498,10 +446,9 @@ func converged(ctx context.Context, clients []migmon.Client) (bool, string, erro
 	return false, fmt.Sprintf("block %d: %s", min, strings.Join(parts, " vs ")), nil
 }
 
-// watchdog heals a partition nobody is holding. Divergence inside a
-// scheduled window is the schedule doing its job; divergence outside every
-// window, persisting past the convergence allowance, means a driver died
-// with a partition applied - and the run is lost unless someone clears it.
+// watchdog heals a partition nobody is holding. Inside a scheduled window
+// divergence is expected; outside one, past the grace period, it means a
+// driver died holding the partition open.
 func watchdog(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clients []migmon.Client, sched migsched.Schedule, mine *held) {
 	var since time.Time
 	fired := false
@@ -519,8 +466,7 @@ func watchdog(ctx context.Context, log *migmon.Log, d *disruptoor.Client, client
 			continue
 		}
 		if sched.Covers(now) || mine.holding(now) {
-			// A window the schedule is holding: expected, and healing it
-			// here would destroy the evidence it exists to produce.
+			// A window the schedule holds: expected, don't heal it.
 			since = time.Time{}
 			continue
 		}
@@ -532,13 +478,8 @@ func watchdog(ctx context.Context, log *migmon.Log, d *disruptoor.Client, client
 			continue
 		}
 		fired = true
-		// disruptoor only exposes Clear(), not which partition it held, but State()
-		// still says whether one was actually applied right before the clear: if so,
-		// some driver claimed a window and died holding it open (dead-driver); if none
-		// was applied, the divergence was mesh-level and re-peering is what actually
-		// fixed it, not the clear (mesh-repeer). That distinction is what the verifier
-		// needs to tell "a driver got killed mid-partition" apart from "peers just
-		// dropped off".
+		// State() before Clear() says whether a partition was actually
+		// applied: distinguishes a dead driver from a mesh-level re-peer fix.
 		partsBefore, _, stateErr := d.State()
 		if err := d.Clear(); err != nil {
 			log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "watchdog heal failed: " + err.Error()})
@@ -556,12 +497,8 @@ func watchdog(ctx context.Context, log *migmon.Log, d *disruptoor.Client, client
 	}
 }
 
-// healKind names a watchdog heal by the evidence available: disruptoor
-// exposes no memory of which partition it held, but State() taken right
-// before Clear() still says whether one was applied. If so, some driver
-// claimed a window and died holding it open; if none was applied (or the
-// state read itself failed, leaving nothing to claim otherwise), the
-// divergence was mesh-level and re-peering is what actually fixed it.
+// healKind: State() read right before Clear() says whether a partition was
+// applied. If so a driver died holding it; otherwise re-peering fixed it.
 func healKind(partsBefore int, stateErr error) string {
 	if stateErr == nil && partsBefore > 0 {
 		return "dead-driver: "

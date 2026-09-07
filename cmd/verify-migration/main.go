@@ -1,19 +1,10 @@
-// Command verify-migration is the one-shot judge for a migration devnet run.
-//
-// It reads the migration-monitor's JSONL stream, the chaos driver's JSONL
-// stream, a kurtosis service-log dump directory, and a pins file, and asks
-// the live execution clients the few questions only the chain can answer.
-// It prints one PASS/FAIL/INCONCLUSIVE line per check (C1..C12) with
-// evidence and exits with the number of FAILED checks, so 0 means no
-// check failed. An inconclusive check does not fail the run: it reports
-// that a genuinely stochastic precondition never occurred, so the run
-// proved less than a clean pass. Those ids are repeated in a trailing
-// "inconclusive:" line.
-//
-// b* is the first canonical block whose header timestamp is >= T
-// (--binary-trie-time). It is taken from the monitor's bstar events and
-// cross-checked against an RPC backwalk; a disagreement fails every check
-// that needs it.
+// Command verify-migration judges a migration devnet run: reads the monitor
+// and chaos JSONL streams, a kurtosis log dump, and a pins file; questions
+// the live execution clients over RPC; prints one PASS/FAIL/INCONCLUSIVE
+// line per check plus a trailing "inconclusive:" line; exits with the
+// number of FAILED checks. I* is the first canonical block whose header
+// timestamp is >= T (--binary-trie-time), from monitor istar events
+// cross-checked against an RPC backwalk.
 package main
 
 import (
@@ -65,8 +56,8 @@ func main() {
 	logsDir := flag.String("logs-dir", "", "kurtosis service-log dump directory")
 	pinsPath := flag.String("pins", "", "pins file: simple 'key: value' lines")
 	binaryTrieTime := flag.Uint64("binary-trie-time", 0, "unix time T of the binary-trie fork (required)")
-	skipChaos := flag.Bool("skip-chaos", false, "chaos was not run: C3 is skipped, C6 drops its window math")
-	smoke := flag.Bool("smoke", false, "single-node smoke run: relaxed C4/C6/C7 thresholds")
+	skipChaos := flag.Bool("skip-chaos", false, "chaos was not run: partitions-healed is skipped, shadow-samples drops its window math")
+	smoke := flag.Bool("smoke", false, "single-node smoke run: relaxed boundary-agreement/shadow-samples/genesis-pins thresholds")
 	summaryPath := flag.String("summary", "", "write a one-page markdown record of the run to this path")
 	manifestPath := flag.String("manifest", "", "lap manifest JSON: what the driver did (restart, scenarios, quiesce)")
 	flag.Usage = func() {
@@ -137,12 +128,7 @@ func main() {
 	os.Exit(v.Run(context.Background(), os.Stdout))
 }
 
-// verdict is a check's outcome. Only verdictFail counts against the
-// process exit code: verdictInconclusive means a precondition the chain
-// had to supply by chance never occurred (no reorg reached depth >= 10,
-// no post-fork block came from the straddle victim, a healed isolation
-// left no observable reorg), so the check neither passed nor failed and
-// the run proved less than a clean pass.
+// verdict is a check's outcome; only verdictFail counts against the exit code.
 type verdict int
 
 const (
@@ -162,8 +148,7 @@ func (r verdict) String() string {
 	}
 }
 
-// boolVerdict lifts a plain pass/fail check into a verdict, for checks
-// that have no stochastic precondition of their own.
+// boolVerdict lifts a plain pass/fail check into a verdict.
 func boolVerdict(ok bool) verdict {
 	if ok {
 		return verdictPass
@@ -171,43 +156,39 @@ func boolVerdict(ok bool) verdict {
 	return verdictFail
 }
 
-// checkResult is one check's outcome, kept after Run so --summary can
-// render it alongside the run's other evidence.
+// checkResult is one check's outcome, kept for the --summary artifact.
 type checkResult struct {
 	id       string
 	verdict  verdict
 	evidence string
 }
 
-// Run executes every check in order, prints one verdict line each,
-// prints a trailing "inconclusive:" line naming any INCONCLUSIVE checks,
-// optionally writes the --summary artifact, and returns the number of
-// FAILED checks (the process exit code; inconclusive checks do not
-// count).
+// Run executes every check in order, prints one verdict line each plus a
+// trailing "inconclusive:" line, optionally writes --summary, and returns
+// the number of FAILED checks.
 func (v *verifier) Run(ctx context.Context, w io.Writer) int {
-	v.resolveBStar(ctx)
+	v.resolveIStar(ctx)
 	checks := []struct {
 		id string
 		fn func(context.Context) (verdict, string)
 	}{
-		{"C1", v.checkC1},
-		{"C2", v.checkC2},
-		{"C3", v.checkC3},
-		{"C4", v.checkC4},
-		{"C5", v.checkC5},
-		{"C6", v.checkC6},
-		{"C7", v.checkC7},
-		{"C8", v.checkC8},
-		{"C9", v.checkC9},
-		{"C10", v.checkC10},
-		{"C11", v.checkC11},
-		{"C12", v.checkC12},
-		{"C13", v.checkC13},
-		{"C14", v.checkC14},
-		{"C15", v.checkC15},
-		{"C16", v.checkC16},
-		{"C17", v.checkC17},
-		{"C18", v.checkC18},
+		{"chain-before-fork", v.checkChainBeforeFork},
+		{"traffic-coverage", v.checkTrafficCoverage},
+		{"partitions-healed", v.checkPartitionsHealed},
+		{"boundary-agreement", v.checkBoundaryAgreement},
+		{"no-configured-window", v.checkNoConfiguredWindow},
+		{"shadow-samples", v.checkShadowSamples},
+		{"genesis-pins", v.checkGenesisPins},
+		{"bootstrap-digests", v.checkBootstrapDigests},
+		{"prefork-deep-reorg", v.checkPreForkDeepReorg},
+		{"straddle-rewind", v.checkStraddleRewind},
+		{"forkblock-convergence", v.checkForkBlockConvergence},
+		{"orphan-gone", v.checkOrphanGone},
+		{"completion", v.checkCompletion},
+		{"lap-manifest", v.checkLapManifest},
+		{"finalized-end-state", v.checkFinalizedEndState},
+		{"postfork-samples", v.checkPostForkSamples},
+		{"injected-state", v.checkInjectedState},
 	}
 	var results []checkResult
 	for _, c := range checks {
@@ -219,8 +200,7 @@ func (v *verifier) Run(ctx context.Context, w io.Writer) int {
 	if len(inconclusiveIDs) > 0 {
 		fmt.Fprintf(w, "inconclusive: %s\n", strings.Join(inconclusiveIDs, ","))
 	}
-	// A run in which not one check PASSed proved nothing at all; exiting 0
-	// on it would let a completely dead evidence pipeline read as green.
+	// A run in which no check passed proves nothing; exit 1 rather than a clean 0.
 	if failed == 0 && !anyPassed(results) {
 		fmt.Fprintln(w, "FAIL floor: no check passed; a run that proves nothing is not a green run")
 		failed = 1
@@ -236,8 +216,7 @@ func (v *verifier) Run(ctx context.Context, w io.Writer) int {
 	return failed
 }
 
-// summarizeVerdicts counts FAILED checks (the exit code) and collects
-// the ids of every INCONCLUSIVE check, in order.
+// summarizeVerdicts counts FAILED checks and collects INCONCLUSIVE ids.
 func summarizeVerdicts(results []checkResult) (failed int, inconclusiveIDs []string) {
 	for _, r := range results {
 		switch r.verdict {
@@ -260,9 +239,7 @@ func anyPassed(results []checkResult) bool {
 	return false
 }
 
-// singleImplementation reports whether every configured EL runs the same
-// client implementation - in which case the differential checks compare a
-// binary against itself and the summary must say so.
+// singleImplementation reports whether every configured EL runs the same client.
 func (v *verifier) singleImplementation() (string, bool) {
 	first := ""
 	for _, e := range v.els {
@@ -304,8 +281,7 @@ type rpcResponse struct {
 	Error  *rpcError       `json:"error"`
 }
 
-// httpFetcher is the live implementation: the same plain JSON-RPC-over-HTTP
-// shape cmd/pbtmonitor uses, without its engine-API half.
+// httpFetcher is the live JSON-RPC-over-HTTP implementation.
 func httpFetcher(client *http.Client) fetcher {
 	var id uint64
 	return func(ctx context.Context, url, method string, out any, params ...any) error {
@@ -351,8 +327,7 @@ func httpFetcher(client *http.Client) fetcher {
 	}
 }
 
-// rpcBlock is the subset of eth_getBlockByNumber the checks compare on,
-// mirroring cmd/pbtmonitor's shape.
+// rpcBlock is the subset of eth_getBlockByNumber the checks compare on.
 type rpcBlock struct {
 	Number     hexutil.Uint64 `json:"number"`
 	Hash       common.Hash    `json:"hash"`
@@ -372,10 +347,7 @@ func (v *verifier) getBlock(ctx context.Context, e el, numberOrTag string) (*rpc
 	return blk, nil
 }
 
-// getBlockByHash fetches by hash, tolerating a null result: unlike
-// getBlock (used for canonical-tag/number lookups where an absent block
-// is always wrong), a null answer to eth_getBlockByHash on an orphaned
-// hash is exactly the expected, healthy outcome.
+// getBlockByHash tolerates a null result: an absent orphaned hash is expected.
 func (v *verifier) getBlockByHash(ctx context.Context, e el, hash string) (*rpcBlock, error) {
 	var blk *rpcBlock
 	if err := v.fetch(ctx, e.url, "eth_getBlockByHash", &blk, hash, false); err != nil {

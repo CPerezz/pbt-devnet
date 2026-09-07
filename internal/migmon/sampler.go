@@ -7,25 +7,18 @@ import (
 	"time"
 )
 
-// NodeSample is one node's answer at a sampled height: the canonical block
-// hash it reports there, and the shadow state root for that hash ("" for a
-// legal null — the shadow record has not been written yet).
+// NodeSample is one node's answer at a sampled height: canonical block hash
+// and shadow state root ("" = legal null, not yet written).
 type NodeSample struct {
 	Node string
 	Hash string
 	Root string
 }
 
-// EvaluateSample runs F1 and the hash-split check over one height's answers
-// across nodes. Roots are only ever compared within a hash group: nodes that
-// disagree on the canonical hash at a height are not lying about state, they
-// are looking at different chains (legal under a chaos partition), so that
-// case is reported as hash-split instead of touched for F1.
-//
-// postBStar downgrades an F1 finding to a warning: post-b* sample semantics
-// are not yet pinned down (confirmed at S2), so a mismatch there is worth
-// eyes, not a failed run.
-func EvaluateSample(samples []NodeSample, postBStar bool) []Event {
+// EvaluateSample runs root-mismatch and hash-split checks over one height's
+// answers across nodes. Nodes disagreeing on canonical hash are reported as
+// hash-split, not root-mismatch. postIStar downgrades root-mismatch to a warning.
+func EvaluateSample(samples []NodeSample, postIStar bool) []Event {
 	groups := make(map[string][]NodeSample)
 	for _, s := range samples {
 		if s.Hash == "" {
@@ -80,7 +73,7 @@ func EvaluateSample(samples []NodeSample, postBStar bool) []Event {
 			parts = append(parts, fmt.Sprintf("%s=%s", strings.Join(roots[r], ","), r))
 		}
 		kind := EvCritical
-		if postBStar {
+		if postIStar {
 			kind = EvWarn
 		}
 		evs = append(evs, Event{Kind: kind, Finding: FindingRootMismatch, Hash: hash, Detail: strings.Join(parts, " vs ")})
@@ -88,10 +81,8 @@ func EvaluateSample(samples []NodeSample, postBStar bool) []Event {
 	return evs
 }
 
-// NullTracker watches one node's shadow-root nulls while it claims to be
-// actively migrating (binary or merkle following|synced). A node that is not
-// active yet is not expected to answer anything, so the streak only runs
-// while active, and starts fresh each time the node becomes active.
+// NullTracker watches one node's shadow-root nulls while it reports active
+// (binary or merkle following|synced); the streak resets when the node goes inactive.
 type NullTracker struct {
 	node        string
 	active      bool
@@ -102,8 +93,7 @@ type NullTracker struct {
 
 func NewNullTracker(node string) *NullTracker { return &NullTracker{node: node} }
 
-// Observe records one sample's null/non-null outcome at time now, for a node
-// whose progress currently reports active (Binary or Merkle following|synced).
+// Observe records one sample's null/non-null outcome at time now.
 func (n *NullTracker) Observe(now time.Time, active bool, null bool) []Event {
 	if !active {
 		n.active = false
@@ -138,15 +128,11 @@ func (n *NullTracker) Observe(now time.Time, active bool, null bool) []Event {
 	return nil
 }
 
-// reorgMemoryCap bounds how many sampled heights a node's ReorgMemory keeps.
-// The monitor only ever re-checks shallow, recently sampled heights, so a
-// deep unbounded history buys nothing and would grow all run long.
+// reorgMemoryCap bounds how many sampled heights ReorgMemory keeps.
 const reorgMemoryCap = 512
 
-// ReorgMemory remembers the canonical hash this monitor last sampled at each
-// height, per node, so a later re-check that finds a different hash at a
-// remembered height is a reorg the monitor actually witnessed - not merely
-// inferred from a phase change.
+// ReorgMemory remembers the canonical hash last sampled at each height, per
+// node, so a later mismatch there is an observed reorg.
 type ReorgMemory struct {
 	node  string
 	hash  map[uint64]string
@@ -157,9 +143,8 @@ func NewReorgMemory(node string) *ReorgMemory {
 	return &ReorgMemory{node: node, hash: make(map[uint64]string)}
 }
 
-// Observe records height's canonical hash as this node reports it now (head
-// is the node's current head, used to report reorg depth). A change from a
-// previously remembered hash at the same height is a reorg.
+// Observe records height's canonical hash as reported now; head is the
+// current head, used for reorg depth. A changed hash at a remembered height is a reorg.
 func (m *ReorgMemory) Observe(height uint64, hash string, head uint64) []Event {
 	if prev, ok := m.hash[height]; ok {
 		if prev == hash {
@@ -184,9 +169,7 @@ func (m *ReorgMemory) Observe(height uint64, hash string, head uint64) []Event {
 	return nil
 }
 
-// Recent returns up to n of the most recently remembered heights, most
-// recent first, so the caller can re-check a shallow window for reorgs
-// without re-fetching the whole memory every tick.
+// Recent returns up to n of the most recently remembered heights, most recent first.
 func (m *ReorgMemory) Recent(n int) []uint64 {
 	if n > len(m.order) {
 		n = len(m.order)

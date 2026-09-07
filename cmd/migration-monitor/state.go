@@ -9,15 +9,11 @@ import (
 	"github.com/CPerezz/pbt-devnet/internal/migmon"
 )
 
-// maxRows bounds the sampled-height and event rings the live view keeps.
-// Twenty rows is what fits on a screen an operator reads from across a
-// desk; the JSONL stream is the full record, this is only the window.
+// maxRows bounds the sampled-height and event rings the live view keeps
+// (20: fits one screen; JSONL is the full record).
 const maxRows = 20
 
-// Root-matrix verdicts. A row's verdict is what an operator reads first, so
-// the vocabulary separates the two harmless cases - no record written yet,
-// and a canonical-chain split during a partition - from a real
-// disagreement, which is the only one that means the run is broken.
+// Root-matrix verdicts.
 const (
 	verdictEqual       = "all-equal"
 	verdictDiffer      = "differ"
@@ -26,9 +22,8 @@ const (
 	verdictSplit       = "canonical-split"
 )
 
-// Shadow-root cell states. A bare empty string collapses four different
-// facts into one blank cell, which is how an operator comes to read a
-// healthy run as broken; each case names itself instead.
+// Shadow-root cell states; each case names itself rather than collapsing
+// into a blank cell.
 const (
 	rootValue       = "value"            // a root was recorded, Root holds it
 	rootNull        = "not-recorded"     // introspection answered: no record written yet, which is legal
@@ -36,12 +31,9 @@ const (
 	rootUnavailable = "unavailable"      // the fetch for this node failed on this tick
 )
 
-// snapshot is the live view's state: what the poll and sample paths have
-// most recently observed, in the shape the page and /api/state render.
-//
-// One mutex guards it, held only for the field copies. Every caller is a
-// short critical section and the HTTP handlers work on a copy, so a slow
-// client can never stall the poll loop.
+// snapshot is the live view's state, in the shape the page and /api/state
+// render. One mutex guards it; handlers work on a copy so a slow client
+// never stalls the poll loop.
 type snapshot struct {
 	mu       sync.Mutex
 	forkTime uint64
@@ -54,13 +46,11 @@ type snapshot struct {
 	pending []byte // partial JSONL line carried between Write calls
 }
 
-// apiState is the /api/state document and the page's template input. Field
-// names are the machine surface a lap driver tails, so they are stable and
-// say what they hold.
+// apiState is the /api/state document and the page's template input.
 type apiState struct {
 	Now           string      `json:"now"`
 	ForkTime      uint64      `json:"fork_time"`
-	SecondsToFork int64       `json:"seconds_to_fork"` // negative once the fork time has passed
+	SecondsToFork int64       `json:"seconds_to_fork"` // negative after fork
 	Nodes         []nodeView  `json:"nodes"`
 	Samples       []sampleRow `json:"samples"`
 	Events        []eventRow  `json:"events"`
@@ -69,17 +59,16 @@ type apiState struct {
 type nodeView struct {
 	Name          string `json:"name"`
 	Client        string `json:"client"`
-	Introspection bool   `json:"introspection"` // false: watched over standard RPC only
+	Introspection bool   `json:"introspection"`
 	Down          bool   `json:"down"`
 	HaveHead      bool   `json:"have_head"`
 	Head          uint64 `json:"head"`
 	HaveProgress  bool   `json:"have_progress"`
 	Phase         string `json:"phase"`
-	// Binary and Merkle are nil when the node's progress report carried no
-	// such direction, which is not the same as a direction sitting idle.
+	// Binary/Merkle nil means no direction report, not an idle direction.
 	Binary    *directionView `json:"binary"`
 	Merkle    *directionView `json:"merkle"`
-	ForkBlock *forkBlockView `json:"fork_block"` // nil until the fork block is observed
+	ForkBlock *forkBlockView `json:"fork_block"`
 }
 
 type directionView struct {
@@ -93,7 +82,7 @@ type directionView struct {
 type forkBlockView struct {
 	Number uint64 `json:"number"`
 	Hash   string `json:"hash"`
-	Final  bool   `json:"final"` // false: provisional, a reorg can still orphan it
+	Final  bool   `json:"final"`
 }
 
 type sampleRow struct {
@@ -122,9 +111,7 @@ func newSnapshot(forkTime uint64) *snapshot {
 	return &snapshot{forkTime: forkTime, nodes: map[string]nodeView{}}
 }
 
-// setNode records one node's poll result. The poll loop calls it after
-// every tick, including a tick that failed, so an unreachable node shows as
-// down rather than freezing at its last good reading.
+// setNode records one node's poll result, including a failed tick.
 func (s *snapshot) setNode(ns *nodeState) {
 	v := nodeView{
 		Name:          ns.name,
@@ -140,8 +127,8 @@ func (s *snapshot) setNode(ns *nodeState) {
 		v.Binary = newDirectionView(ns.lastProgress.Binary)
 		v.Merkle = newDirectionView(ns.lastProgress.Merkle)
 	}
-	if b := ns.timeline.BStarRecord(); b != nil {
-		v.ForkBlock = &forkBlockView{Number: b.Number, Hash: b.Hash, Final: ns.timeline.BStarIsFinal()}
+	if b := ns.timeline.IStarRecord(); b != nil {
+		v.ForkBlock = &forkBlockView{Number: b.Number, Hash: b.Hash, Final: ns.timeline.IStarIsFinal()}
 	}
 
 	s.mu.Lock()
@@ -165,10 +152,8 @@ func newDirectionView(d *migmon.DirectionProgress) *directionView {
 	}
 }
 
-// addSample records one cross-node shadow-root sample as a matrix row. It
-// takes every node, not only the ones that answered, so the matrix keeps a
-// fixed column per node and a missing answer reads as a failed fetch
-// instead of vanishing.
+// addSample records one cross-node shadow-root sample as a matrix row,
+// keeping a fixed column per node.
 func (s *snapshot) addSample(now time.Time, height uint64, states []*nodeState, samples []migmon.NodeSample, split bool) {
 	answered := make(map[string]migmon.NodeSample, len(samples))
 	for _, sm := range samples {
@@ -202,12 +187,10 @@ func (s *snapshot) addSample(now time.Time, height uint64, states []*nodeState, 
 	s.samples = appendRing(s.samples, row)
 }
 
-// verdict judges one matrix row. Cells with no shadow-root surface and
-// cells whose fetch failed carry no opinion either way: counting them as
-// disagreement would report a fault the chain does not have.
+// verdict judges one matrix row; cells with no surface or a failed fetch
+// carry no opinion.
 func verdict(cells []rootCell, split bool) string {
-	// A canonical-chain split explains differing roots by itself - the
-	// nodes are reading different blocks - so it outranks the comparison.
+	// A canonical-chain split outranks the comparison.
 	if split {
 		return verdictSplit
 	}
@@ -237,26 +220,18 @@ func verdict(cells []rootCell, split bool) string {
 	}
 }
 
-// notableEvent reports whether an event kind belongs in the view's event
-// list. Progress, head and sample events arrive every tick and would bury
-// the ones an operator is watching for.
+// notableEvent excludes progress/head/sample events, which arrive every tick.
 func notableEvent(kind string) bool {
 	switch kind {
-	case migmon.EvReorg, migmon.EvBStar, migmon.EvBStarReorged, migmon.EvBStarFinal,
+	case migmon.EvReorg, migmon.EvIStar, migmon.EvIStarReorged, migmon.EvIStarFinal,
 		migmon.EvCritical, migmon.EvWarn:
 		return true
 	}
 	return false
 }
 
-// Write feeds the event list from the JSONL stream the monitor already
-// writes: every finding in this process routes through one encoder, so
-// tee-ing that writer catches all of them - including the batches
-// internal/migmon returns from its Observe calls - instead of asking each
-// emit site to remember the page too.
-//
-// It never reports an error: this is a view, and the JSONL stream remains
-// the record of anything the display drops.
+// Write feeds the event list from the JSONL stream, so every finding
+// routes through one encoder. Never reports an error: this is a view.
 func (s *snapshot) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -292,9 +267,8 @@ func appendRing[T any](rows []T, row T) []T {
 	return rows
 }
 
-// view copies the state for one reader. Everything a handler needs is
-// copied here so the lock is released before any JSON encoding or template
-// execution, which is what keeps a slow HTTP client off the poll loop.
+// view copies the state for one reader, releasing the lock before any
+// JSON encoding or template execution.
 func (s *snapshot) view(now time.Time) apiState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -309,7 +283,6 @@ func (s *snapshot) view(now time.Time) apiState {
 	for _, name := range s.order {
 		st.Nodes = append(st.Nodes, s.nodes[name])
 	}
-	// The direction and fork-block pointers are built fresh by setNode and
-	// never mutated afterwards, so sharing them with a reader is safe.
+	// Direction/fork-block pointers are immutable after setNode builds them.
 	return st
 }
