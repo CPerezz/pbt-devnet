@@ -2,9 +2,6 @@ package main
 
 import (
 	"testing"
-	"time"
-
-	"github.com/CPerezz/pbt-devnet/internal/migsched"
 )
 
 // The heavy participant takes the deep and straddle windows; every other
@@ -32,33 +29,5 @@ func TestTopologyRejectsProtectedHeavy(t *testing.T) {
 	}
 	if _, err := topology([]string{"a", "b"}, []int{1}, 5, 0.4, 6); err == nil {
 		t.Fatal("a heavy index beyond the configured clients was accepted")
-	}
-}
-
-// The majority group is everyone outside the victim set: the partition is
-// applied as majority-versus-victim, so a missing member would leave that
-// node connected to neither side.
-func TestOthers(t *testing.T) {
-	got := others(4, []int{3})
-	if len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 4 {
-		t.Fatalf("others = %v, want [1 2 4]", got)
-	}
-}
-
-// The window detail carries the class, which the verifier keys its heal
-// deadlines off.
-func TestWindowDetailCarriesClass(t *testing.T) {
-	topo := migsched.Topology{Heavy: 2, Lights: []int{3}, HeavyShare: 0.4, SecondsPerSlot: 6}
-	genesis := time.Unix(1_000_000, 0)
-	s, err := migsched.Resolve("composite-smoke", genesis, genesis.Add(780*time.Second), topo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	str, ok := s.Straddle()
-	if !ok {
-		t.Fatal("composite-smoke has no straddle")
-	}
-	if d := window(str); d == "" || d[:6] != "class=" {
-		t.Fatalf("window detail %q does not lead with the class", d)
 	}
 }

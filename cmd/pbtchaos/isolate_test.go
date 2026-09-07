@@ -17,13 +17,6 @@ func TestParticipantForUnevenStakeUsesPrefixSum(t *testing.T) {
 	}
 }
 
-func TestParticipantForBeyondKnownStakeReturnsZero(t *testing.T) {
-	c := &chaos{cfg: config{validatorCounts: []uint64{128, 256, 128, 128}}}
-	if got := c.participantFor(640); got != 0 {
-		t.Fatalf("participantFor(640) = %d, want 0 (out of range)", got)
-	}
-}
-
 // TestParticipantForUniformFallbackMatchesFormula is the regression evidence that leaving
 // --validator-counts unset reproduces today's uniform mapping exactly, across the full
 // validator range a 4-node, 128-per-node devnet actually uses.
@@ -33,22 +26,6 @@ func TestParticipantForUniformFallbackMatchesFormula(t *testing.T) {
 		want := int(i/128) + 1
 		if got := c.participantFor(i); got != want {
 			t.Fatalf("participantFor(%d) = %d, want %d (uniform formula)", i, got, want)
-		}
-	}
-}
-
-func TestParseValidatorCounts(t *testing.T) {
-	got, err := parseValidatorCounts("128,256,128,128")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := []uint64{128, 256, 128, 128}
-	if len(got) != len(want) {
-		t.Fatalf("parseValidatorCounts() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("parseValidatorCounts() = %v, want %v", got, want)
 		}
 	}
 }

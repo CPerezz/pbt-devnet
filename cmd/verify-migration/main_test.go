@@ -46,7 +46,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-// --- schedule-driven fixtures shared by C3/C9/C10 -----------------------
+// --- schedule-driven fixtures shared by partitions-healed/prefork-deep-reorg/straddle-rewind -----------------------
 
 const testFork = int64(100000)
 
@@ -80,7 +80,7 @@ func reorgEv(node string, tm int64, depth int) migmon.Event {
 
 // baselineChaosAndMonitor isolates and heals all four straddleTestOps
 // victims on time, each corroborated by a reorg - the fixture every
-// C3/C9 variant below tweaks from. Indices: 0/1 = pre1 isolate/heal,
+// partitions-healed/prefork-deep-reorg variant below tweaks from. Indices: 0/1 = pre1 isolate/heal,
 // 2/3 = pre2, 4/5 = pre3, 6/7 = straddle1; monitor 0-3 are their reorgs.
 func baselineChaosAndMonitor() (chaos, monitor []migmon.Event) {
 	chaos = []migmon.Event{
@@ -103,9 +103,9 @@ func withSchedule(t *testing.T, dump migsched.Dump, chaos []migmon.Event) []migm
 	return append([]migmon.Event{scheduleEvent(t, dump)}, chaos...)
 }
 
-// --- C3: schedule-derived expectations and per-class deadlines ----------
+// --- partitions-healed: schedule-derived expectations and per-class deadlines ----------
 
-func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
+func TestCheckPartitionsHealedScheduleDrivenDeadlines(t *testing.T) {
 	// Quiet is what tells a post-migration isolation from a stray one, and
 	// the driver always publishes it.
 	dump := migsched.Dump{Profile: "straddle-fixture", Fork: testFork, Heavy: 4, Ops: straddleTestOps(), Quiet: testFork + 210}
@@ -113,7 +113,7 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 	t.Run("baseline: all four heal on time, fully corroborated, passes", func(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
-		r, evidence := v.checkC3(context.Background())
+		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s: %s", r, evidence)
 		}
@@ -126,7 +126,7 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 		chaos[7].Time = time.Unix(testFork+60, 0).UTC() // straddle heal, well after the fork
 		monitor[3] = reorgEv("node-4", testFork+65, 8)
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
-		r, evidence := v.checkC3(context.Background())
+		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass (straddle's deadline is End+120s, not the fork), got %s: %s", r, evidence)
 		}
@@ -136,7 +136,7 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
 		chaos[1].Time = time.Unix(testFork+10, 0).UTC() // pre1 heal, past the fork
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
-		r, evidence := v.checkC3(context.Background())
+		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictFail {
 			t.Fatalf("want fail (pre-fork op healed past its deadline), got %s: %s", r, evidence)
 		}
@@ -149,7 +149,7 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
 		monitor = append(monitor[:2], monitor[3]) // drop pre3's reorg only: 3/4 corroborated
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
-		r, evidence := v.checkC3(context.Background())
+		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictInconclusive {
 			t.Fatalf("want inconclusive (4 healed, 3 corroborated), got %s: %s", r, evidence)
 		}
@@ -164,7 +164,7 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 		// nobody scheduled - not the gate's post-migration window.
 		chaos = append(chaos, ev(migmon.EvIsolate, "node-9", testFork-1000), ev(migmon.EvHeal, "node-9", testFork-950))
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
-		r, evidence := v.checkC3(context.Background())
+		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictFail {
 			t.Fatalf("want fail (unscheduled isolation), got %s: %s", r, evidence)
 		}
@@ -182,7 +182,7 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 			ev(migmon.EvIsolate, "node-3", testFork+400),
 			ev(migmon.EvHeal, "node-3", testFork+560))
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
-		r, evidence := v.checkC3(context.Background())
+		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s: %s", r, evidence)
 		}
@@ -195,7 +195,7 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
 		chaos = chaos[:len(chaos)-1] // drop node-4's heal
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
-		r, evidence := v.checkC3(context.Background())
+		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictFail {
 			t.Fatalf("want fail (never healed), got %s: %s", r, evidence)
 		}
@@ -212,7 +212,7 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
 		chaos = chaos[:6] // only the three ops this schedule admits
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, three, chaos), monitor: monitor}
-		r, evidence := v.checkC3(context.Background())
+		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictInconclusive {
 			t.Fatalf("want inconclusive (thin coverage), got %s: %s", r, evidence)
 		}
@@ -221,7 +221,7 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 	t.Run("missing schedule record fails: the run's own schedule is mandatory input", func(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
 		v := &verifier{T: uint64(testFork), chaos: chaos, monitor: monitor} // no schedule event
-		r, evidence := v.checkC3(context.Background())
+		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictFail {
 			t.Fatalf("want fail (no schedule record), got %s: %s", r, evidence)
 		}
@@ -232,22 +232,22 @@ func TestCheckC3ScheduleDrivenDeadlines(t *testing.T) {
 
 	t.Run("skip-chaos short-circuits to pass even with no schedule", func(t *testing.T) {
 		v := &verifier{T: uint64(testFork), skipChaos: true}
-		r, evidence := v.checkC3(context.Background())
+		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictPass || !strings.Contains(evidence, "skipped") {
 			t.Fatalf("want skipped pass, got %s evidence=%q", r, evidence)
 		}
 	})
 }
 
-// --- C9: deep reorg, split out of C3's pass/fail -------------------------
+// --- prefork-deep-reorg: deep reorg, split out of partitions-healed's pass/fail -------------------------
 
-func TestCheckC9DeepReorg(t *testing.T) {
+func TestCheckPreForkDeepReorgDeepReorg(t *testing.T) {
 	dump := migsched.Dump{Profile: "p", Fork: testFork, Ops: straddleTestOps()}
 
 	t.Run("no isolation reaches depth 10: inconclusive, not fail", func(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor() // max depth 8
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
-		r, evidence := v.checkC9(context.Background())
+		r, evidence := v.checkPreForkDeepReorg(context.Background())
 		if r != verdictInconclusive {
 			t.Fatalf("want inconclusive, got %s: %s", r, evidence)
 		}
@@ -257,7 +257,7 @@ func TestCheckC9DeepReorg(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
 		monitor[2] = reorgEv("node-3", 3060, 12)
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
-		r, evidence := v.checkC9(context.Background())
+		r, evidence := v.checkPreForkDeepReorg(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s: %s", r, evidence)
 		}
@@ -268,14 +268,14 @@ func TestCheckC9DeepReorg(t *testing.T) {
 
 	t.Run("skip-chaos short-circuits to pass", func(t *testing.T) {
 		v := &verifier{skipChaos: true}
-		r, _ := v.checkC9(context.Background())
+		r, _ := v.checkPreForkDeepReorg(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s", r)
 		}
 	})
 }
 
-// --- C10: the straddle actually happened ---------------------------------
+// --- straddle-rewind: the straddle actually happened ---------------------------------
 
 var (
 	testOldHash = "0x" + strings.Repeat("a", 64)
@@ -283,22 +283,22 @@ var (
 	zeroRoot    = "0x" + strings.Repeat("0", 64)
 )
 
-func bstarReorgedEv(node string, height uint64, oldHash, newHash string, tm int64) migmon.Event {
-	e := ev(migmon.EvBStarReorged, node, tm)
+func istarReorgedEv(node string, height uint64, oldHash, newHash string, tm int64) migmon.Event {
+	e := ev(migmon.EvIStarReorged, node, tm)
 	e.Number = height
 	e.Hash = newHash
 	e.Detail = fmt.Sprintf("fork block %d %s was orphaned; height %d now holds %s", height, oldHash, height, newHash)
 	return e
 }
 
-func TestCheckC10Straddle(t *testing.T) {
+func TestCheckStraddleRewindStraddle(t *testing.T) {
 	straddleOp := migsched.DumpOp{Name: "straddle1", Class: "straddle", Start: testFork - 50, End: testFork + 50, Victims: []int{4}}
 	nonStraddleOnly := migsched.Dump{Profile: "p", Fork: testFork, Ops: straddleTestOps()[:1]}
 	withStraddle := migsched.Dump{Profile: "p", Fork: testFork, Ops: []migsched.DumpOp{straddleOp}}
 
 	t.Run("no straddle admitted: inconclusive", func(t *testing.T) {
 		v := &verifier{chaos: []migmon.Event{scheduleEvent(t, nonStraddleOnly)}}
-		r, evidence := v.checkC10(context.Background())
+		r, evidence := v.checkStraddleRewind(context.Background())
 		if r != verdictInconclusive {
 			t.Fatalf("want inconclusive, got %s: %s", r, evidence)
 		}
@@ -306,7 +306,7 @@ func TestCheckC10Straddle(t *testing.T) {
 
 	t.Run("straddle admitted but victim never orphaned: inconclusive", func(t *testing.T) {
 		v := &verifier{chaos: []migmon.Event{scheduleEvent(t, withStraddle)}}
-		r, evidence := v.checkC10(context.Background())
+		r, evidence := v.checkStraddleRewind(context.Background())
 		if r != verdictInconclusive {
 			t.Fatalf("want inconclusive, got %s: %s", r, evidence)
 		}
@@ -314,11 +314,11 @@ func TestCheckC10Straddle(t *testing.T) {
 
 	t.Run("straddle admitted, victim orphaned, dropped branch >= 6: passes", func(t *testing.T) {
 		monitor := []migmon.Event{
-			bstarReorgedEv("node-4", 500, testOldHash, testNewHash, testFork+10),
+			istarReorgedEv("node-4", 500, testOldHash, testNewHash, testFork+10),
 			reorgEv("node-4", testFork+15, 8),
 		}
 		v := &verifier{chaos: []migmon.Event{scheduleEvent(t, withStraddle)}, monitor: monitor}
-		r, evidence := v.checkC10(context.Background())
+		r, evidence := v.checkStraddleRewind(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s: %s", r, evidence)
 		}
@@ -326,11 +326,11 @@ func TestCheckC10Straddle(t *testing.T) {
 
 	t.Run("straddle admitted, victim orphaned, dropped branch < 6: fails", func(t *testing.T) {
 		monitor := []migmon.Event{
-			bstarReorgedEv("node-4", 500, testOldHash, testNewHash, testFork+10),
+			istarReorgedEv("node-4", 500, testOldHash, testNewHash, testFork+10),
 			reorgEv("node-4", testFork+15, 3),
 		}
 		v := &verifier{chaos: []migmon.Event{scheduleEvent(t, withStraddle)}, monitor: monitor}
-		r, evidence := v.checkC10(context.Background())
+		r, evidence := v.checkStraddleRewind(context.Background())
 		if r != verdictFail {
 			t.Fatalf("want fail, got %s: %s", r, evidence)
 		}
@@ -338,38 +338,38 @@ func TestCheckC10Straddle(t *testing.T) {
 
 	t.Run("skip-chaos short-circuits to pass", func(t *testing.T) {
 		v := &verifier{skipChaos: true}
-		r, _ := v.checkC10(context.Background())
+		r, _ := v.checkStraddleRewind(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s", r)
 		}
 	})
 }
 
-// --- C11: boundary convergence -------------------------------------------
+// --- forkblock-convergence: boundary convergence -------------------------------------------
 
-func TestCheckC11BoundaryConvergence(t *testing.T) {
+func TestCheckForkBlockConvergenceBoundaryConvergence(t *testing.T) {
 	hashA := "0x" + strings.Repeat("a", 64)
 	hashB := "0x" + strings.Repeat("b", 64)
 	hashC := "0x" + strings.Repeat("c", 64)
 	els := []el{{name: "el1", url: "http://el1"}, {name: "el2", url: "http://el2"}}
 
 	finalRecords := []migmon.Event{
-		{Kind: migmon.EvBStarFinal, Node: "el1", Number: 500, Hash: hashA, Time: time.Unix(1000, 0)},
-		{Kind: migmon.EvBStarFinal, Node: "el2", Number: 500, Hash: hashA, Time: time.Unix(1000, 0)},
+		{Kind: migmon.EvIStarFinal, Node: "el1", Number: 500, Hash: hashA, Time: time.Unix(1000, 0)},
+		{Kind: migmon.EvIStarFinal, Node: "el2", Number: 500, Hash: hashA, Time: time.Unix(1000, 0)},
 	}
 	provisionalDiversity := []migmon.Event{
-		{Kind: migmon.EvBStar, Node: "el1", Hash: hashB, Time: time.Unix(500, 0)},
-		{Kind: migmon.EvBStar, Node: "el2", Hash: hashC, Time: time.Unix(500, 0)},
+		{Kind: migmon.EvIStar, Node: "el1", Hash: hashB, Time: time.Unix(500, 0)},
+		{Kind: migmon.EvIStar, Node: "el2", Hash: hashC, Time: time.Unix(500, 0)},
 	}
 	agreeingFetch := fakeFetcher(t, map[string]json.RawMessage{
 		rpcKey("http://el1", "eth_getBlockByNumber", "0x1f4", false): blockJSON(hashA, zeroRoot),
 		rpcKey("http://el2", "eth_getBlockByNumber", "0x1f4", false): blockJSON(hashA, zeroRoot),
 	})
 
-	t.Run("agreement, no F4, >=2 provisional hashes: passes", func(t *testing.T) {
+	t.Run("agreement, no no-convergence, >=2 provisional hashes: passes", func(t *testing.T) {
 		monitor := append(append([]migmon.Event{}, finalRecords...), provisionalDiversity...)
 		v := &verifier{els: els, monitor: monitor, fetch: agreeingFetch}
-		r, evidence := v.checkC11(context.Background())
+		r, evidence := v.checkForkBlockConvergence(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s: %s", r, evidence)
 		}
@@ -382,67 +382,67 @@ func TestCheckC11BoundaryConvergence(t *testing.T) {
 			rpcKey("http://el2", "eth_getBlockByNumber", "0x1f4", false): blockJSON(hashB, zeroRoot),
 		})
 		v := &verifier{els: els, monitor: monitor, fetch: fetch}
-		r, evidence := v.checkC11(context.Background())
+		r, evidence := v.checkForkBlockConvergence(context.Background())
 		if r != verdictFail {
 			t.Fatalf("want fail, got %s: %s", r, evidence)
 		}
 	})
 
-	t.Run("unwaived F4 critical: fails", func(t *testing.T) {
+	t.Run("unwaived no-convergence critical: fails", func(t *testing.T) {
 		monitor := append(append([]migmon.Event{}, finalRecords...), provisionalDiversity...)
 		crit := ev(migmon.EvCritical, "el1", 99999)
 		crit.Finding = migmon.FindingNoConvergence
 		monitor = append(monitor, crit)
 		v := &verifier{els: els, monitor: monitor, fetch: agreeingFetch}
-		r, evidence := v.checkC11(context.Background())
+		r, evidence := v.checkForkBlockConvergence(context.Background())
 		if r != verdictFail {
 			t.Fatalf("want fail, got %s: %s", r, evidence)
 		}
-		if !strings.Contains(evidence, "F4") {
-			t.Fatalf("evidence %q missing F4 reason", evidence)
+		if !strings.Contains(evidence, "no-convergence") {
+			t.Fatalf("evidence %q missing no-convergence reason", evidence)
 		}
 	})
 
-	t.Run("F4 waived inside a chaos window does not fail on that alone", func(t *testing.T) {
+	t.Run("no-convergence waived inside a chaos window does not fail on that alone", func(t *testing.T) {
 		monitor := append(append([]migmon.Event{}, finalRecords...), provisionalDiversity...)
 		crit := ev(migmon.EvCritical, "el1", 1500)
 		crit.Finding = migmon.FindingNoConvergence
 		monitor = append(monitor, crit)
 		chaos := []migmon.Event{ev(migmon.EvIsolate, "el1", 1400), ev(migmon.EvHeal, "el1", 1600)}
 		v := &verifier{els: els, monitor: monitor, chaos: chaos, fetch: agreeingFetch}
-		r, evidence := v.checkC11(context.Background())
+		r, evidence := v.checkForkBlockConvergence(context.Background())
 		if r != verdictPass {
-			t.Fatalf("want pass (F4 waived by chaos window), got %s: %s", r, evidence)
+			t.Fatalf("want pass (no-convergence waived by chaos window), got %s: %s", r, evidence)
 		}
 	})
 
 	t.Run("fewer than 2 distinct provisional hashes: inconclusive", func(t *testing.T) {
 		v := &verifier{els: els, monitor: finalRecords, fetch: agreeingFetch}
-		r, evidence := v.checkC11(context.Background())
+		r, evidence := v.checkForkBlockConvergence(context.Background())
 		if r != verdictInconclusive {
 			t.Fatalf("want inconclusive, got %s: %s", r, evidence)
 		}
 	})
 
-	t.Run("no bstar record observed at all: fails", func(t *testing.T) {
+	t.Run("no istar record observed at all: fails", func(t *testing.T) {
 		v := &verifier{els: els}
-		r, evidence := v.checkC11(context.Background())
+		r, evidence := v.checkForkBlockConvergence(context.Background())
 		if r != verdictFail {
 			t.Fatalf("want fail, got %s: %s", r, evidence)
 		}
 	})
 }
 
-// --- C12: the orphaned branch is actually gone ---------------------------
+// --- orphan-gone: the orphaned branch is actually gone ---------------------------
 
-func TestCheckC12OrphanedBranchGone(t *testing.T) {
+func TestCheckOrphanGoneOrphanedBranchGone(t *testing.T) {
 	els := []el{{name: "el1", url: "http://el1"}, {name: "el2", url: "http://el2"}}
 	orphanHash := testOldHash
-	monitor := []migmon.Event{bstarReorgedEv("node-4", 500, orphanHash, testNewHash, testFork+10)}
+	monitor := []migmon.Event{istarReorgedEv("node-4", 500, orphanHash, testNewHash, testFork+10)}
 
 	t.Run("no orphaned block identified: inconclusive", func(t *testing.T) {
 		v := &verifier{els: els}
-		r, evidence := v.checkC12(context.Background())
+		r, evidence := v.checkOrphanGone(context.Background())
 		if r != verdictInconclusive {
 			t.Fatalf("want inconclusive, got %s: %s", r, evidence)
 		}
@@ -454,7 +454,7 @@ func TestCheckC12OrphanedBranchGone(t *testing.T) {
 			rpcKey("http://el2", "eth_getBlockByHash", orphanHash, false): json.RawMessage("null"),
 		})
 		v := &verifier{els: els, monitor: monitor, fetch: fetch}
-		r, evidence := v.checkC12(context.Background())
+		r, evidence := v.checkOrphanGone(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s: %s", r, evidence)
 		}
@@ -467,7 +467,7 @@ func TestCheckC12OrphanedBranchGone(t *testing.T) {
 			rpcKey("http://el2", "eth_getBlockByHash", orphanHash, false): json.RawMessage("null"),
 		})
 		v := &verifier{els: els, monitor: monitor, fetch: fetch}
-		r, evidence := v.checkC12(context.Background())
+		r, evidence := v.checkOrphanGone(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass (dangling non-canonical block is fine), got %s: %s", r, evidence)
 		}
@@ -480,7 +480,7 @@ func TestCheckC12OrphanedBranchGone(t *testing.T) {
 			rpcKey("http://el2", "eth_getBlockByHash", orphanHash, false): json.RawMessage("null"),
 		})
 		v := &verifier{els: els, monitor: monitor, fetch: fetch}
-		r, evidence := v.checkC12(context.Background())
+		r, evidence := v.checkOrphanGone(context.Background())
 		if r != verdictFail {
 			t.Fatalf("want fail, got %s: %s", r, evidence)
 		}
@@ -492,33 +492,36 @@ func TestCheckC12OrphanedBranchGone(t *testing.T) {
 
 // --- per-client reorg log registry ---------------------------------------
 
-func TestClientOf(t *testing.T) {
-	cases := map[string]string{
-		"el-5-besu-lighthouse":     "besu",
-		"el-2-geth-lighthouse":     "geth",
-		"node-2":                   "",
-		"el-2-geth-lighthouse.log": "geth",
-	}
-	for in, want := range cases {
-		if got := clientOf(in); got != want {
-			t.Errorf("clientOf(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestLogReorgMatchesExtractsDropAndAncestor(t *testing.T) {
+func TestLogReorgMatchesExtractsDropAncestorAndTime(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "el-7-geth-lighthouse.log")
-	writeFile(t, logPath, "INFO Chain reorg detected number=39 hash=6e845d..6e71d0 drop=11 dropfrom=3dc2e1..8b760b add=12\n")
-	matches := logReorgMatches(logPath, clientLogPatterns["geth"])
+	writeFile(t, logPath, "INFO [09-07|08:56:31.211] Chain reorg detected number=39 hash=6e845d..6e71d0 drop=11 dropfrom=3dc2e1..8b760b add=12\n")
+	ref := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+	matches := logReorgMatches(logPath, clientLogPatterns["geth"], ref)
 	if len(matches) != 1 {
 		t.Fatalf("want 1 match, got %d", len(matches))
 	}
-	// number= is go-ethereum's common-ancestor height (core/blockchain.go
-	// walks both chains back to their shared parent and logs it as
-	// commonBlock), used directly with no arithmetic.
+	// number= is the common-ancestor height geth logs after walking both chains back.
 	if matches[0].drop != 11 || matches[0].ancestor != 39 {
 		t.Fatalf("want drop=11 ancestor=39, got %+v", matches[0])
+	}
+	if want := time.Date(2026, 9, 7, 8, 56, 31, 0, time.UTC); !matches[0].at.Equal(want) {
+		t.Fatalf("want stamp %s, got %s", want, matches[0].at)
+	}
+}
+
+// A reorg line logged outside the window is not evidence for that window: a
+// stale deep-partition line must not vouch for a later straddle.
+func TestMatchReorgIgnoresLogLinesOutsideWindow(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "el-2-geth-lighthouse.log"),
+		"INFO [09-07|08:30:00.000] Chain reorg detected number=78 drop=16 add=1\n"+
+			"INFO [09-07|08:57:00.000] Chain reorg detected number=250 drop=9 add=1\n")
+	from := time.Date(2026, 9, 7, 8, 53, 0, 0, time.UTC)
+	w := chaosWindow{node: "node-2", from: from, to: from.Add(5 * time.Minute), healed: true}
+	got := (&verifier{logsDir: dir}).matchReorg(w)
+	if !got.matched || got.depth != 9 || got.ancestor != 250 {
+		t.Fatalf("want the in-window drop=9 line, got %+v", got)
 	}
 }
 
@@ -555,54 +558,6 @@ func TestMatchReorgRegisteredClientNoMatchIsNotDegraded(t *testing.T) {
 
 // --- Run(): exit-code and inconclusive-trailer semantics ------------------
 
-func TestSummarizeVerdicts(t *testing.T) {
-	results := []checkResult{
-		{id: "C1", verdict: verdictPass},
-		{id: "C2", verdict: verdictFail},
-		{id: "C3", verdict: verdictInconclusive},
-		{id: "C4", verdict: verdictInconclusive},
-	}
-	failed, inconclusiveIDs := summarizeVerdicts(results)
-	if failed != 1 {
-		t.Fatalf("want 1 failed, got %d", failed)
-	}
-	if strings.Join(inconclusiveIDs, ",") != "C3,C4" {
-		t.Fatalf("want inconclusive [C3 C4], got %v", inconclusiveIDs)
-	}
-}
-
-// --- --summary artifact rendering -----------------------------------------
-
-func TestRenderSummary(t *testing.T) {
-	dump := migsched.Dump{Profile: "straddle-fixture", Fork: testFork, Heavy: 4, Ops: straddleTestOps()}
-	chaos, monitor := baselineChaosAndMonitor()
-	monitor = append(monitor,
-		ev(migmon.EvProgress, "node-1", testFork+250),
-		migmon.Event{Kind: migmon.EvBStar, Node: "node-1", Number: 500, Hash: "0x" + strings.Repeat("a", 64), Time: time.Unix(testFork, 0)},
-		migmon.Event{Kind: migmon.EvBStarFinal, Node: "node-1", Number: 500, Hash: "0x" + strings.Repeat("a", 64), Time: time.Unix(testFork+200, 0)},
-	)
-
-	v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
-	results := []checkResult{
-		{id: "C1", verdict: verdictPass, evidence: "b*=500"},
-		{id: "C3", verdict: verdictInconclusive, evidence: "3 corroborated"},
-		{id: "C10", verdict: verdictFail, evidence: "dropped branch too shallow"},
-	}
-	out := v.renderSummary(results)
-
-	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) > 60 {
-		t.Fatalf("summary is %d lines, want <= 60", len(lines))
-	}
-	for _, want := range []string{"# Migration devnet run", "straddle-fixture", "pre1", "node-1", "PASS C1", "INCONCLUSIVE C3", "FAIL C10"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("summary missing %q:\n%s", want, out)
-		}
-	}
-}
-
-// --- C6: mismatch and outside-window counting --------------------------
-
 func sampleEvent(tm int64, roots map[string]string) migmon.Event {
 	e := ev(migmon.EvSample, "", tm)
 	e.Roots = roots
@@ -612,9 +567,9 @@ func sampleEvent(tm int64, roots map[string]string) migmon.Event {
 // Differing non-null roots in one sample are NOT a mismatch by
 // themselves: partitions put nodes on different canonical chains at the
 // sampled height, and the monitor - which groups by canonical hash -
-// emits hash-split warns for those (observed live). The F1 critical is the
-// mismatch authority; a split-shaped sample must not fail C6.
-func TestCheckC6SplitShapedSampleIsNotAMismatch(t *testing.T) {
+// emits hash-split warns for those (observed live). The root-mismatch critical is the
+// mismatch authority; a split-shaped sample must not fail shadow-samples.
+func TestCheckShadowSamplesSplitShapedSampleIsNotAMismatch(t *testing.T) {
 	els := []el{{name: "el1"}, {name: "el2"}}
 	var events []migmon.Event
 	for i := range 55 {
@@ -623,13 +578,13 @@ func TestCheckC6SplitShapedSampleIsNotAMismatch(t *testing.T) {
 	events = append(events, sampleEvent(9999, map[string]string{"el1": "0xaaa", "el2": "0xbbb"}))
 
 	v := &verifier{els: els, monitor: events, skipChaos: true}
-	pass, evidence := v.checkC6(context.Background())
+	pass, evidence := v.checkShadowSamples(context.Background())
 	if pass != verdictPass {
-		t.Fatalf("split-shaped sample failed C6, want pass with F1 as the only mismatch authority: %s", evidence)
+		t.Fatalf("split-shaped sample failed shadow-samples, want pass with root-mismatch as the only mismatch authority: %s", evidence)
 	}
 }
 
-func TestCheckC6CriticalF1NeverWaived(t *testing.T) {
+func TestCheckShadowSamplesRootMismatchNeverWaived(t *testing.T) {
 	els := []el{{name: "el1"}, {name: "el2"}}
 	var events []migmon.Event
 	for i := range 55 {
@@ -641,16 +596,16 @@ func TestCheckC6CriticalF1NeverWaived(t *testing.T) {
 
 	chaos := []migmon.Event{ev(migmon.EvIsolate, "el1", 5), ev(migmon.EvHeal, "el1", 15)} // covers t=10
 	v := &verifier{els: els, monitor: events, chaos: chaos}
-	pass, evidence := v.checkC6(context.Background())
+	pass, evidence := v.checkShadowSamples(context.Background())
 	if pass == verdictPass {
-		t.Fatalf("F1 critical must never be waived, got pass")
+		t.Fatalf("root-mismatch critical must never be waived, got pass")
 	}
-	if !strings.Contains(evidence, "F1") {
-		t.Fatalf("evidence %q missing F1 reason", evidence)
+	if !strings.Contains(evidence, "root-mismatch") {
+		t.Fatalf("evidence %q missing root-mismatch reason", evidence)
 	}
 }
 
-func TestCheckC6OutsideWindowCounting(t *testing.T) {
+func TestCheckShadowSamplesOutsideWindowCounting(t *testing.T) {
 	els := []el{{name: "el1"}, {name: "el2"}}
 	window := []migmon.Event{ev(migmon.EvIsolate, "el1", 1000), ev(migmon.EvHeal, "el1", 2000)}
 	// covered range with 30s slop is [970, 2030].
@@ -668,7 +623,7 @@ func TestCheckC6OutsideWindowCounting(t *testing.T) {
 
 	t.Run("exactly ten outside passes", func(t *testing.T) {
 		v := &verifier{els: els, monitor: buildSamples(40, 10), chaos: window}
-		pass, evidence := v.checkC6(context.Background())
+		pass, evidence := v.checkShadowSamples(context.Background())
 		if pass != verdictPass {
 			t.Fatalf("want pass, got fail: %s", evidence)
 		}
@@ -676,7 +631,7 @@ func TestCheckC6OutsideWindowCounting(t *testing.T) {
 
 	t.Run("nine outside fails though total good meets floor", func(t *testing.T) {
 		v := &verifier{els: els, monitor: buildSamples(41, 9), chaos: window}
-		pass, evidence := v.checkC6(context.Background())
+		pass, evidence := v.checkShadowSamples(context.Background())
 		if pass == verdictPass {
 			t.Fatalf("want fail (only 9 outside), got pass")
 		}
@@ -703,84 +658,13 @@ func TestCheckC6OutsideWindowCounting(t *testing.T) {
 	})
 }
 
-// --- C7: pins pending logic ---------------------------------------------
+// --- genesis-pins: pins pending logic ---------------------------------------------
 
 func blockJSON(hash, root string) json.RawMessage {
 	return json.RawMessage(fmt.Sprintf(`{"number":"0x0","hash":%q,"stateRoot":%q,"timestamp":"0x0"}`, hash, root))
 }
 
-func TestCheckC7(t *testing.T) {
-	hash := "0x" + strings.Repeat("aa", 32)
-	root := "0x" + strings.Repeat("bb", 32)
-	otherHash := "0x" + strings.Repeat("cc", 32)
-
-	t.Run("pending fails without smoke", func(t *testing.T) {
-		v := &verifier{pins: map[string]string{"genesis_hash": "pending", "genesis_state_root": "pending"}}
-		pass, evidence := v.checkC7(context.Background())
-		if pass == verdictPass || !strings.Contains(evidence, "pending") {
-			t.Fatalf("want pending failure, got pass=%v evidence=%q", pass, evidence)
-		}
-	})
-
-	t.Run("pending under smoke is a warning pass", func(t *testing.T) {
-		v := &verifier{pins: map[string]string{"genesis_hash": "pending", "genesis_state_root": "pending"}, smoke: true}
-		pass, evidence := v.checkC7(context.Background())
-		if pass != verdictPass || !strings.Contains(evidence, "WARN") {
-			t.Fatalf("want warn pass, got pass=%v evidence=%q", pass, evidence)
-		}
-	})
-
-	t.Run("missing keys fail", func(t *testing.T) {
-		v := &verifier{pins: map[string]string{"genesis_hash": hash}}
-		pass, _ := v.checkC7(context.Background())
-		if pass == verdictPass {
-			t.Fatal("want fail on missing genesis_state_root key")
-		}
-	})
-
-	t.Run("matching genesis passes", func(t *testing.T) {
-		els := []el{{name: "el1", url: "http://el1"}, {name: "el2", url: "http://el2"}}
-		responses := map[string]json.RawMessage{
-			rpcKey("http://el1", "eth_getBlockByNumber", "0x0", false): blockJSON(hash, root),
-			rpcKey("http://el2", "eth_getBlockByNumber", "0x0", false): blockJSON(hash, root),
-		}
-		v := &verifier{els: els, pins: map[string]string{"genesis_hash": hash, "genesis_state_root": root}, fetch: fakeFetcher(t, responses)}
-		pass, evidence := v.checkC7(context.Background())
-		if pass != verdictPass {
-			t.Fatalf("want pass, got fail: %s", evidence)
-		}
-	})
-
-	t.Run("mismatched genesis hash fails", func(t *testing.T) {
-		els := []el{{name: "el1", url: "http://el1"}}
-		responses := map[string]json.RawMessage{
-			rpcKey("http://el1", "eth_getBlockByNumber", "0x0", false): blockJSON(otherHash, root),
-		}
-		v := &verifier{els: els, pins: map[string]string{"genesis_hash": hash, "genesis_state_root": root}, fetch: fakeFetcher(t, responses)}
-		pass, evidence := v.checkC7(context.Background())
-		if pass == verdictPass || !strings.Contains(evidence, "!=") {
-			t.Fatalf("want mismatch failure, got pass=%v evidence=%q", pass, evidence)
-		}
-	})
-
-	t.Run("state root alone is a sufficient pin", func(t *testing.T) {
-		// kurtosis stamps a fresh genesis timestamp per run, so the hash
-		// is per-run by design; the alloc (state root) is the invariant.
-		els := []el{{name: "el1", url: "http://el1"}}
-		responses := map[string]json.RawMessage{
-			rpcKey("http://el1", "eth_getBlockByNumber", "0x0", false): blockJSON(otherHash, root),
-		}
-		v := &verifier{els: els, pins: map[string]string{"genesis_state_root": root}, fetch: fakeFetcher(t, responses)}
-		pass, evidence := v.checkC7(context.Background())
-		if pass != verdictPass || !strings.Contains(evidence, "stateRoot") {
-			t.Fatalf("want root-only pass, got pass=%v evidence=%q", pass, evidence)
-		}
-	})
-}
-
-// --- C8: digest split ----------------------------------------------------
-
-func TestCheckC8(t *testing.T) {
+func TestCheckBootstrapDigests(t *testing.T) {
 	snapshot := strings.Repeat("a", 64)
 	preimages := strings.Repeat("b", 64)
 	digestLine := func(snap, pre string) string {
@@ -797,7 +681,7 @@ func TestCheckC8(t *testing.T) {
 		writeFile(t, filepath.Join(dir, geth1+".log"), "startup\n"+digestLine(snapshot, preimages))
 		writeFile(t, filepath.Join(dir, geth2+".log"), "startup\n"+digestLine(snapshot, preimages))
 		v := &verifier{els: []el{{name: geth1}, {name: geth2}}, logsDir: dir}
-		pass, evidence := v.checkC8(context.Background())
+		pass, evidence := v.checkBootstrapDigests(context.Background())
 		if pass != verdictPass {
 			t.Fatalf("want pass, got fail: %s", evidence)
 		}
@@ -808,7 +692,7 @@ func TestCheckC8(t *testing.T) {
 		writeFile(t, filepath.Join(dir, geth1+".log"), digestLine(snapshot, preimages))
 		writeFile(t, filepath.Join(dir, geth2+".log"), digestLine(snapshot, strings.Repeat("c", 64)))
 		v := &verifier{els: []el{{name: geth1}, {name: geth2}}, logsDir: dir}
-		pass, evidence := v.checkC8(context.Background())
+		pass, evidence := v.checkBootstrapDigests(context.Background())
 		if pass == verdictPass || !strings.Contains(evidence, "differ") {
 			t.Fatalf("want digest-differ failure, got pass=%v evidence=%q", pass, evidence)
 		}
@@ -818,7 +702,7 @@ func TestCheckC8(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, filepath.Join(dir, geth1+".log"), "no digest here\n")
 		v := &verifier{els: []el{{name: geth1}}, logsDir: dir}
-		pass, evidence := v.checkC8(context.Background())
+		pass, evidence := v.checkBootstrapDigests(context.Background())
 		if pass == verdictPass || !strings.Contains(evidence, "found 0") {
 			t.Fatalf("want zero-line failure, got pass=%v evidence=%q", pass, evidence)
 		}
@@ -828,7 +712,7 @@ func TestCheckC8(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, filepath.Join(dir, geth1+".log"), digestLine(snapshot, preimages)+digestLine(snapshot, preimages))
 		v := &verifier{els: []el{{name: geth1}}, logsDir: dir}
-		pass, evidence := v.checkC8(context.Background())
+		pass, evidence := v.checkBootstrapDigests(context.Background())
 		if pass == verdictPass || !strings.Contains(evidence, "found 2") {
 			t.Fatalf("want two-line failure, got pass=%v evidence=%q", pass, evidence)
 		}
@@ -839,18 +723,18 @@ func TestCheckC8(t *testing.T) {
 		writeFile(t, filepath.Join(dir, geth1+".log"), digestLine(snapshot, preimages))
 		writeFile(t, filepath.Join(dir, "el-2-unknownclient-lighthouse.log"), "no digest, and none required\n")
 		v := &verifier{els: []el{{name: geth1}, {name: "el-2-unknownclient-lighthouse"}}, logsDir: dir}
-		pass, evidence := v.checkC8(context.Background())
+		pass, evidence := v.checkBootstrapDigests(context.Background())
 		if pass != verdictPass || !strings.Contains(evidence, "no digest contract") {
 			t.Fatalf("want pass with a skip note, got pass=%v evidence=%q", pass, evidence)
 		}
 	})
 }
 
-// --- b* backwalk: binary search sanity -----------------------------------
+// --- I* backwalk: binary search sanity -----------------------------------
 
-func TestBackwalkBStar(t *testing.T) {
+func TestBackwalkIStar(t *testing.T) {
 	// A 100-block chain where timestamp == number*10; T=505 falls strictly
-	// between block 50 (500) and block 51 (510), so b*=51.
+	// between block 50 (500) and block 51 (510), so I*=51.
 	responses := map[string]json.RawMessage{
 		rpcKey("http://el1", "eth_getBlockByNumber", "latest", false): json.RawMessage(`{"number":"0x64","hash":"0x0000000000000000000000000000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","timestamp":"0x3e8"}`),
 	}
@@ -868,12 +752,12 @@ func TestBackwalkBStar(t *testing.T) {
 		return json.Unmarshal(raw, out)
 	}
 	v := &verifier{T: 505, fetch: fetch}
-	got, err := v.backwalkBStar(context.Background(), el{name: "el1", url: "http://el1"})
+	got, err := v.backwalkIStar(context.Background(), el{name: "el1", url: "http://el1"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got != 51 {
-		t.Fatalf("b*=%d, want 51", got)
+		t.Fatalf("I*=%d, want 51", got)
 	}
 }
 

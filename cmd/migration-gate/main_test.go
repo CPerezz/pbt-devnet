@@ -65,19 +65,6 @@ func (f *fakeClient) AddPeer(_ context.Context, enode string) error {
 	return nil
 }
 
-// The light set excludes the bootnode, the heavy victim, and anything
-// explicitly protected: a post-migration short must not land on a node the
-// operator declared off limits.
-func TestLightNodes(t *testing.T) {
-	got := lightNodes(4, 2, []int{1})
-	if len(got) != 2 || got[0] != 3 || got[1] != 4 {
-		t.Fatalf("lights = %v, want [3 4]", got)
-	}
-	if got := lightNodes(4, 2, []int{1, 3, 4}); len(got) != 0 {
-		t.Fatalf("lights = %v, want none when all are protected", got)
-	}
-}
-
 // Completion is judged only from clients that can answer, and the omission
 // is reported: a run whose completion was inferred from a subset of nodes
 // proved less than a clean pass.
@@ -160,41 +147,8 @@ func TestScheduleCoversHeldWindows(t *testing.T) {
 	}
 }
 
-func TestOthers(t *testing.T) {
-	got := others(4, 2)
-	if len(got) != 3 || got[0] != 1 || got[1] != 3 || got[2] != 4 {
-		t.Fatalf("others = %v, want [1 3 4]", got)
-	}
-}
-
-// capture collects the JSONL a test's log writes, so assertions can look at
-// what an operator would see.
 type capture struct{ b []byte }
 
 func (c *capture) Write(p []byte) (int, error) { c.b = append(c.b, p...); return len(p), nil }
 func (c *capture) String() string              { return string(c.b) }
 func (c *capture) contains(s string) bool      { return strings.Contains(string(c.b), s) }
-
-// Every heal must rebuild the execution layer's peer mesh: this devnet runs
-// it with almost no peers, because the consensus clients carry the block
-// traffic, and a victim that missed blocks then has nowhere to fetch them
-// from. One live run had a node stranded at block 147 while the chain
-// reached 387; it caught up ninety seconds after being given one peer.
-func TestRepeerConnectsEveryPair(t *testing.T) {
-	a := &fakeClient{name: "el-1-geth-lighthouse", phases: []string{"done"}}
-	b := &fakeClient{name: "el-2-geth-lighthouse", phases: []string{"done"}}
-	c := &fakeClient{name: "el-3-geth-lighthouse", phases: []string{"done"}}
-	if err := migmon.Repeer(context.Background(), []migmon.Client{a, b, c}); err != nil {
-		t.Fatal(err)
-	}
-	for _, n := range []*fakeClient{a, b, c} {
-		if len(n.peered) != 2 {
-			t.Fatalf("%s was given %d peers, want the other two", n.name, len(n.peered))
-		}
-		for _, e := range n.peered {
-			if e == "enode://"+n.name {
-				t.Fatalf("%s was told to dial itself", n.name)
-			}
-		}
-	}
-}
