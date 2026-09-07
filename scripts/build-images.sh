@@ -80,12 +80,19 @@ require_capability "geth (EIP-8347 follower)" "$GETH_SRC" 'newBintrieFollower' "
   "fix: git -C $GETH_SRC checkout pbt (needs the online state-migration merge)"
 require_capability "geth (migration window)" "$GETH_SRC" 'MigrationWindowBlocks' "core/blockchain.go" \
   "fix: git -C $GETH_SRC checkout pbt (needs the online state-migration merge)"
-# Two-stage: fork's Dockerfile builds the binary, then an overlay installs the migration
-# shim under the same name. Must not build FROM pbt-geth:local itself (self-reference).
+# Two stages: the fork's Dockerfile builds the binary, then the migration shim is
+# installed under the launcher's exact command name. FROM the staged tag, never
+# pbt-geth:local itself, or the previous shim becomes geth.real on every rebuild.
 build_from "geth (EIP-8297)" "pbt-geth-binary:local" "$GETH_SRC" \
   "clone CPerezz/go-ethereum at branch pbt, or set PBT_GETH_SRC"
 echo "==> geth migration shim -> pbt-geth:local"
-docker build --platform "$PLATFORM" -t pbt-geth:local -f "$ROOT/scripts/geth-shim.Dockerfile" "$ROOT/scripts"
+docker build --platform "$PLATFORM" -t pbt-geth:local -f - "$ROOT/scripts" <<'EOF'
+FROM pbt-geth-binary:local
+RUN mv /usr/local/bin/geth /usr/local/bin/geth.real
+COPY geth-shim.sh /usr/local/bin/geth
+RUN chmod 0755 /usr/local/bin/geth
+ENTRYPOINT ["geth"]
+EOF
 echo
 fi
 
