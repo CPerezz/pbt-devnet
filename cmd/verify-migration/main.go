@@ -179,7 +179,6 @@ func (v *verifier) Run(ctx context.Context, w io.Writer) int {
 		{"no-configured-window", v.checkNoConfiguredWindow},
 		{"shadow-samples", v.checkShadowSamples},
 		{"genesis-pins", v.checkGenesisPins},
-		{"bootstrap-digests", v.checkBootstrapDigests},
 		{"prefork-deep-reorg", v.checkPreForkDeepReorg},
 		{"straddle-rewind", v.checkStraddleRewind},
 		{"forkblock-convergence", v.checkForkBlockConvergence},

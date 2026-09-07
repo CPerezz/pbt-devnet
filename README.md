@@ -147,12 +147,13 @@ without letting it win.
 The migration profiles are geth-only today — `main.star` refuses any other client at plan
 time. Onboarding a client needs:
 
-1. **A migration bootstrap** to convert the merkle genesis and import artifacts (geth:
-   `scripts/geth-shim.sh`).
+1. **A scheduled-fork build**: the client must run from the merkle trie with `binaryTrieTime`
+   in the future and build the binary tree itself (geth's `pbt` branch does; the image is a
+   plain fork build).
 2. **An introspection adapter** (`migmon.Client`) reporting migration progress and shadow roots.
 3. **A registry entry** (`internal/migmon/registry.go`) describing its evidence contract.
 4. **A reorg log pattern** to corroborate a heal from the client's own log.
 5. **An args participant block**, optionally as `pbt_migration.heavy_node`.
 
 Erigon is not ready: its genesis validation rejects a future `binaryTrieTime`, and it has no
-follower, snapshot import, or migration introspection. It runs only in `args/devnet.yaml`.
+follower or migration introspection. It runs only in `args/devnet.yaml`.

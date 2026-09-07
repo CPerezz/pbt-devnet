@@ -7,7 +7,6 @@ import "strings"
 // verifier scope checks to what that client actually supports.
 type ClientSpec struct {
 	Introspects        bool   // exposes debug_migrationProgress and the shadow-root RPC
-	DigestLineRequired bool   // startup log carries a binary-trie digest line
 	ReorgLogPattern    string // substring a reorg notice logs
 	ServesOrphans      bool   // eth_getBlockByHash still answers for orphaned blocks
 	ForbiddenWindowLog string // substring that must never appear during the forbidden window
@@ -17,7 +16,6 @@ type ClientSpec struct {
 var Registry = map[string]ClientSpec{
 	"geth": {
 		Introspects:        true,
-		DigestLineRequired: true,
 		ReorgLogPattern:    `Chain reorg detected`,
 		ServesOrphans:      true,
 		ForbiddenWindowLog: `migration window`,

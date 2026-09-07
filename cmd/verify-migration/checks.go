@@ -447,33 +447,16 @@ func (e reorgEvidence) String() string {
 	return note
 }
 
-// matchReorg finds reorg evidence for w: monitor reorg events (depth >= 1, ±30s slop)
-// first, then the client's own log line; unregistered clients are marked degraded.
+// matchReorg finds reorg evidence for w. The client's own reorg log line is
+// the authority: its drop is the dropped branch length. Monitor reorg events
+// only prove a reorg happened; their number is how far behind the head a
+// re-checked height sat, not a branch length, so they are the fallback.
 func (v *verifier) matchReorg(w chaosWindow) reorgEvidence {
 	const slop = 30 * time.Second
 	var best reorgEvidence
-	for _, ev := range v.monitor {
-		if ev.Kind != migmon.EvReorg || !sameNode(ev.Node, w.node) {
-			continue
-		}
-		if !w.covers(ev.Node, ev.Time, slop) {
-			continue
-		}
-		d := 0
-		if m := reorgDepthRe.FindStringSubmatch(ev.Detail); m != nil {
-			d, _ = strconv.Atoi(m[1])
-		}
-		if d >= 1 && d > best.depth {
-			best = reorgEvidence{depth: d, matched: true, source: "monitor"}
-		}
-	}
 	client := v.victimClient(w.node)
 	re, registered := clientLogPatterns[client]
-	if !registered {
-		best.degraded = !best.matched
-		return best
-	}
-	if v.logsDir != "" {
+	if registered && v.logsDir != "" {
 		for _, f := range v.victimLogFiles(w.node) {
 			for _, m := range logReorgMatches(f, re, w.from) {
 				// a log line is evidence for THIS window only if it was written inside it
@@ -486,6 +469,22 @@ func (v *verifier) matchReorg(w chaosWindow) reorgEvidence {
 			}
 		}
 	}
+	if best.matched {
+		return best
+	}
+	for _, ev := range v.monitor {
+		if ev.Kind != migmon.EvReorg || !sameNode(ev.Node, w.node) || !w.covers(ev.Node, ev.Time, slop) {
+			continue
+		}
+		d := 0
+		if m := reorgDepthRe.FindStringSubmatch(ev.Detail); m != nil {
+			d, _ = strconv.Atoi(m[1])
+		}
+		if d >= 1 && d > best.depth {
+			best = reorgEvidence{depth: d, matched: true, source: "monitor"}
+		}
+	}
+	best.degraded = !registered && !best.matched
 	return best
 }
 
@@ -1006,84 +1005,6 @@ func (v *verifier) checkGenesisPins(ctx context.Context) (verdict, string) {
 		what = "hash/stateRoot"
 	}
 	return verdictPass, fmt.Sprintf("genesis %s match pins across %d node(s)", what, len(v.els))
-}
-
-var digestLineRe = regexp.MustCompile(`PBT_ARTIFACT_DIGESTS\s+\S*snapshot=([0-9a-fA-F]{64})\s+\S*preimages=([0-9a-fA-F]{64})`)
-
-type artifactDigests struct{ snapshot, preimages string }
-
-// checkBootstrapDigests asserts exactly one PBT_ARTIFACT_DIGESTS line per EL log for
-// clients with the digest contract, identical within each implementation. The lap's
-// stop/start restart re-emits no line: the shim's marker file skips re-prep.
-func (v *verifier) checkBootstrapDigests(ctx context.Context) (verdict, string) {
-	if v.logsDir == "" {
-		return verdictFail, "no --logs-dir given"
-	}
-	perNode := map[string]artifactDigests{}
-	var problems, notes []string
-	contracted := 0
-	for _, node := range v.elNames() {
-		spec, known := migmon.SpecFor(node)
-		if !known || !spec.DigestLineRequired {
-			notes = append(notes, fmt.Sprintf("%s: no digest contract registered", node))
-			continue
-		}
-		contracted++
-		files, err := v.nodeLogFiles(node)
-		if err != nil || len(files) == 0 {
-			problems = append(problems, fmt.Sprintf("%s: no log file found", node))
-			continue
-		}
-		var matches []artifactDigests
-		for _, f := range files {
-			data, err := os.ReadFile(f)
-			if err != nil {
-				continue
-			}
-			for _, m := range digestLineRe.FindAllStringSubmatch(string(data), -1) {
-				matches = append(matches, artifactDigests{snapshot: strings.ToLower(m[1]), preimages: strings.ToLower(m[2])})
-			}
-		}
-		if len(matches) != 1 {
-			problems = append(problems, fmt.Sprintf("%s: found %d PBT_ARTIFACT_DIGESTS line(s), want exactly 1", node, len(matches)))
-			continue
-		}
-		perNode[node] = matches[0]
-	}
-	if contracted == 0 {
-		return verdictFail, "no configured EL has a registered digest contract; the bootstrap left no checkable evidence"
-	}
-	if len(problems) > 0 {
-		return verdictFail, strings.Join(problems, "; ")
-	}
-
-	// Determinism per implementation, never across.
-	firstOf := map[string]artifactDigests{}
-	firstNode := map[string]string{}
-	groups := map[string]bool{}
-	for _, node := range v.elNames() {
-		d, ok := perNode[node]
-		if !ok {
-			continue
-		}
-		impl := clientOf(node)
-		groups[impl] = true
-		if _, seen := firstOf[impl]; !seen {
-			firstOf[impl], firstNode[impl] = d, node
-			continue
-		}
-		if d != firstOf[impl] {
-			problems = append(problems, fmt.Sprintf("%s digests differ from %s within the %s group", node, firstNode[impl], impl))
-		}
-	}
-	if len(problems) > 0 {
-		return verdictFail, strings.Join(problems, "; ")
-	}
-	evidence := fmt.Sprintf("digests identical within %d implementation group(s) across %d node(s)", len(groups), len(perNode))
-	if len(notes) > 0 {
-		evidence += " (" + strings.Join(notes, "; ") + ")"
-	}
-	return verdictPass, evidence
 }
 
 // checkPreForkDeepReorg asserts some admitted op entirely before the fork reorged
