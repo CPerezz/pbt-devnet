@@ -6,6 +6,26 @@ set -euo pipefail
 ENCLAVE="${ENCLAVE:-pbt}"
 ARGS="${ARGS:-args/migration-composite.yaml}"
 OUT="${OUT:-/tmp/$ENCLAVE-lap}"
+# A consensus client the gate reports starved of peers outside any scheduled
+# partition is restarted, once per episode - the same remedy as `make repeer`,
+# but only when the network is supposed to be whole, so a partition victim at
+# zero peers is never mistaken for starvation.
+watch_starved() {
+  local seen=""
+  while :; do
+    sleep 30
+    for svc in $(kurtosis service logs "$ENCLAVE" migration-gate -a 2>/dev/null \
+        | grep '"finding":"cl-starved"' | grep -oE '"node":"[^"]+"' | cut -d'"' -f4 | sort -u); do
+      case " $seen " in *" $svc "*) continue;; esac
+      seen="$seen $svc"
+      cid=$(docker ps --filter "label=kurtosis_service_name=$svc" --filter "label=kurtosis_enclave_name=$ENCLAVE" --format '{{.ID}}' | head -1)
+      [ -n "$cid" ] || continue
+      say "$svc has no peers outside any partition; restarting it"
+      docker restart "$cid" >/dev/null 2>&1 || say "restart of $svc failed"
+    done
+  done
+}
+
 # Host-side node restart in the schedule's gap; 0 skips it. Never the heavy victim.
 RESTART_NODE="${RESTART_NODE:-4}"
 RESTART_AT="${RESTART_AT:-1000}"   # seconds after genesis
@@ -55,6 +75,8 @@ printf 'enclave=%s\nargs=%s\ngenesis=%s\nfork=%s\n' "$ENCLAVE" "$ARGS" "$GENESIS
 if port=$(kurtosis port print "$ENCLAVE" migration-monitor http 2>/dev/null); then
   say "live view: $port"
 fi
+watch_starved & WATCH=$!
+trap 'kill $WATCH 2>/dev/null || true' EXIT
 
 
 # The published RPC port changes across a restart; never cache URLs past this point.
@@ -148,7 +170,7 @@ PYEOF
 fi
 
 say "dumping evidence"
-for svc in $(cd scripts && python3 -c "import pbt; print(' '.join(pbt.services('$ENCLAVE','el-')))"); do
+for svc in $(cd scripts && python3 -c "import pbt; print(' '.join(pbt.services('$ENCLAVE','el-') + pbt.services('$ENCLAVE','cl-')))"); do
   kurtosis service logs "$ENCLAVE" "$svc" -a 2>/dev/null | sed 's/^\[[^]]*\] //' > "$OUT/$svc.log"
 done
 kurtosis service logs "$ENCLAVE" migration-monitor -a 2>/dev/null | sed 's/^\[[^]]*\] //' > "$OUT/migration-monitor.jsonl"
