@@ -11,21 +11,15 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
-// doneDeadlineAfterFork bounds how long after the fork a node may take to
-// report done. The window closes on finality over b*, which live runs put
-// ~9 minutes after the fork (fork at +1800s, done at ~+2690s); the bound
-// leaves room for one full pathological recovery (the monitor's 12-minute
-// split grace) on top before calling the run stuck.
+// doneDeadlineAfterFork bounds how long after the fork a node may take to report done.
 const doneDeadlineAfterFork = 1500 * time.Second
 
-// sameDonePollSlop tolerates the monitor's own polling granularity when
-// ordering "done" against "fork block finalized": both surface through 2s
-// polls, so a strict comparison would flake on the tie.
+// sameDonePollSlop tolerates the monitor's 2s polling granularity when ordering
+// "done" against "fork block finalized".
 const sameDonePollSlop = 3 * time.Second
 
-// introspectingNodes returns the monitored nodes whose client registry
-// entry says they answer the migration introspection RPCs, and the ones
-// that do not (named, so checks degrade loudly instead of silently).
+// introspectingNodes splits monitored nodes by whether their client registry
+// entry answers the migration introspection RPCs.
 func (v *verifier) introspectingNodes() (in []string, out []string) {
 	for _, node := range v.progressNodes() {
 		if spec, ok := migmon.SpecFor(node); ok && spec.Introspects {
@@ -39,12 +33,10 @@ func (v *verifier) introspectingNodes() (in []string, out []string) {
 	return in, out
 }
 
-// checkC13 pins the completion semantics per introspecting node: done must
-// arrive exactly once, never before that node's own fork block finalized
-// (modulo the shared poll tick), and within a bounded time after the fork.
-// "Done before finality" is the defect class where a client closes its
-// migration window while the boundary can still reorg out from under it.
-func (v *verifier) checkC13(ctx context.Context) (verdict, string) {
+// checkCompletion asserts each introspecting node's merkle direction started only
+// at/after T, done arrived after its fork block finalized (± sameDonePollSlop)
+// and within doneDeadlineAfterFork, and nothing reopens after done.
+func (v *verifier) checkCompletion(ctx context.Context) (verdict, string) {
 	nodes, degraded := v.introspectingNodes()
 	if len(nodes) == 0 {
 		return verdictFail, "no introspecting node reported progress: nothing can prove the migration completed"
@@ -54,38 +46,57 @@ func (v *verifier) checkC13(ctx context.Context) (verdict, string) {
 	var problems, notes []string
 	for _, node := range nodes {
 		var firstDone, finalAt time.Time
+		postDone := 0
 		for _, ev := range v.monitor {
 			if ev.Node != node {
 				continue
 			}
-			switch ev.Kind {
-			case migmon.EvProgress:
-				if firstDone.IsZero() && len(ev.Raw) > 0 {
-					if p, err := migmon.DecodeProgress(ev.Raw); err == nil && p.Phase == migmon.PhaseDone {
-						firstDone = ev.Time
-					}
-				}
-			case migmon.EvBStarFinal:
-				if finalAt.IsZero() {
-					finalAt = ev.Time
-				}
+			if ev.Kind == migmon.EvIStarFinal && finalAt.IsZero() {
+				finalAt = ev.Time
 			}
+			if ev.Kind != migmon.EvProgress || len(ev.Raw) == 0 {
+				continue
+			}
+			p, err := migmon.DecodeProgress(ev.Raw)
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("%s: undecodable progress at %s", node, ev.Time.Format(time.RFC3339)))
+				break
+			}
+			if firstDone.IsZero() {
+				if migmon.Active(p.Merkle) && ev.Time.Before(forkT) {
+					problems = append(problems, fmt.Sprintf("%s: merkle direction active at %s, before T", node, ev.Time.Format(time.RFC3339)))
+					break
+				}
+				if p.Phase == migmon.PhaseDone {
+					firstDone = ev.Time
+				}
+				continue
+			}
+			postDone++
+			switch {
+			case p.Phase != migmon.PhaseDone:
+				problems = append(problems, fmt.Sprintf("%s: regressed from done to %q at %s", node, p.Phase, ev.Time.Format(time.RFC3339)))
+			case migmon.Active(p.Binary) || migmon.Active(p.Merkle):
+				problems = append(problems, fmt.Sprintf("%s: a direction is active again at %s, after done", node, ev.Time.Format(time.RFC3339)))
+			case p.Binary != nil && p.Binary.ShadowRoot != "":
+				problems = append(problems, fmt.Sprintf("%s: non-null shadow root at %s, after done", node, ev.Time.Format(time.RFC3339)))
+			default:
+				continue
+			}
+			break
 		}
 		switch {
 		case firstDone.IsZero():
 			problems = append(problems, fmt.Sprintf("%s never reported done", node))
 		case finalAt.IsZero():
-			problems = append(problems, fmt.Sprintf("%s reported done at %s but its fork block never finalized in the observed stream",
-				node, firstDone.Format(time.RFC3339)))
+			problems = append(problems, fmt.Sprintf("%s reported done at %s but its fork block never finalized", node, firstDone.Format(time.RFC3339)))
 		case firstDone.Before(finalAt.Add(-sameDonePollSlop)):
-			problems = append(problems, fmt.Sprintf("%s reported done at %s, %.0fs BEFORE its fork block finalized at %s",
-				node, firstDone.Format(time.RFC3339), finalAt.Sub(firstDone).Seconds(), finalAt.Format(time.RFC3339)))
+			problems = append(problems, fmt.Sprintf("%s reported done %.0fs BEFORE its fork block finalized", node, finalAt.Sub(firstDone).Seconds()))
 		case firstDone.After(forkT.Add(doneDeadlineAfterFork)):
-			problems = append(problems, fmt.Sprintf("%s reported done at %s, more than %s after the fork",
-				node, firstDone.Format(time.RFC3339), doneDeadlineAfterFork))
+			problems = append(problems, fmt.Sprintf("%s reported done more than %s after the fork", node, doneDeadlineAfterFork))
 		default:
-			notes = append(notes, fmt.Sprintf("%s done %.0fs after fork, %.0fs after its fork block finalized",
-				node, firstDone.Sub(forkT).Seconds(), firstDone.Sub(finalAt).Seconds()))
+			notes = append(notes, fmt.Sprintf("%s done %.0fs after fork, %.0fs after its fork block finalized, %d clean post-done polls",
+				node, firstDone.Sub(forkT).Seconds(), firstDone.Sub(finalAt).Seconds(), postDone))
 		}
 	}
 	for _, node := range degraded {
@@ -97,69 +108,15 @@ func (v *verifier) checkC13(ctx context.Context) (verdict, string) {
 	return verdictPass, strings.Join(notes, "; ")
 }
 
-// checkC14 hunts direction resurrection: once a node reports done its
-// migration machinery must stay closed - a Binary or Merkle direction
-// coming back to following/synced, or a non-null shadow root, after done
-// means a post-completion event (the gate's own reorg op, cadence chaos)
-// illegally reopened the closed window.
-func (v *verifier) checkC14(ctx context.Context) (verdict, string) {
-	nodes, _ := v.introspectingNodes()
-	if len(nodes) == 0 {
-		return verdictInconclusive, "no introspecting nodes"
-	}
-	var problems []string
-	scanned := 0
-	for _, node := range nodes {
-		var doneAt time.Time
-		for _, ev := range v.monitor {
-			if ev.Node != node || ev.Kind != migmon.EvProgress || len(ev.Raw) == 0 {
-				continue
-			}
-			p, err := migmon.DecodeProgress(ev.Raw)
-			if err != nil {
-				continue
-			}
-			if doneAt.IsZero() {
-				if p.Phase == migmon.PhaseDone {
-					doneAt = ev.Time
-				}
-				continue
-			}
-			scanned++
-			if migmon.Active(p.Binary) || migmon.Active(p.Merkle) {
-				problems = append(problems, fmt.Sprintf("%s: a migration direction is active again at %s, after done at %s",
-					node, ev.Time.Format(time.RFC3339), doneAt.Format(time.RFC3339)))
-				break
-			}
-			if p.Binary != nil && p.Binary.ShadowRoot != "" {
-				problems = append(problems, fmt.Sprintf("%s: non-null shadow root at %s, after done at %s",
-					node, ev.Time.Format(time.RFC3339), doneAt.Format(time.RFC3339)))
-				break
-			}
-		}
-	}
-	if len(problems) > 0 {
-		return verdictFail, strings.Join(problems, "; ")
-	}
-	if scanned == 0 {
-		return verdictInconclusive, "no post-done progress events observed"
-	}
-	return verdictPass, fmt.Sprintf("%d post-done progress polls across %d node(s), no direction resurrection", scanned, len(nodes))
-}
-
-// checkC16 judges the run's end state after the post-switchover suite, at
-// the strongest anchor the chain itself provides: the lowest finalized
-// height across nodes. Every node must hold the same (hash, stateRoot)
-// there, and finality must have advanced meaningfully past b* - proof the
-// post-fork phase ran ON the binary-canonical chain, not merely near it.
-// Requires the lap to have quiesced chaos first (manifest), because an
-// end state sampled under live partitions measures the chaos driver.
-func (v *verifier) checkC16(ctx context.Context) (verdict, string) {
+// checkFinalizedEndState asserts every node agrees on (hash, stateRoot) at the
+// lowest finalized height, and that height is >= I*+8. INCONCLUSIVE if the
+// manifest never recorded a quiesce.
+func (v *verifier) checkFinalizedEndState(ctx context.Context) (verdict, string) {
 	if v.manifest == nil || v.manifest.QuiescedAt == 0 {
 		return verdictInconclusive, "no quiesce recorded in the manifest; end state was never judged in a quiet network"
 	}
-	if v.bstarErr != nil {
-		return verdictFail, fmt.Sprintf("b* unresolved: %v", v.bstarErr)
+	if v.istarErr != nil {
+		return verdictFail, fmt.Sprintf("I* unresolved: %v", v.istarErr)
 	}
 	minFinal := uint64(0)
 	set := false
@@ -179,9 +136,9 @@ func (v *verifier) checkC16(ctx context.Context) (verdict, string) {
 		return verdictFail, strings.Join(problems, "; ")
 	}
 	const beyond = 8
-	if minFinal < v.bstar.number+beyond {
-		problems = append(problems, fmt.Sprintf("lowest finalized height %d has not advanced %d past b*=%d: the post-fork phase never demonstrably ran on finalized binary-canonical chain",
-			minFinal, beyond, v.bstar.number))
+	if minFinal < v.istar.number+beyond {
+		problems = append(problems, fmt.Sprintf("lowest finalized height %d has not advanced %d past I*=%d: the post-fork phase never demonstrably ran on finalized binary-canonical chain",
+			minFinal, beyond, v.istar.number))
 	}
 	var refHash, refRoot, refNode string
 	for _, e := range v.els {
@@ -201,27 +158,24 @@ func (v *verifier) checkC16(ctx context.Context) (verdict, string) {
 	if len(problems) > 0 {
 		return verdictFail, strings.Join(problems, "; ")
 	}
-	return verdictPass, fmt.Sprintf("all %d node(s) agree at lowest finalized height %d (b*+%d or more), judged after quiesce",
-		len(v.els), minFinal, minFinal-v.bstar.number)
+	return verdictPass, fmt.Sprintf("all %d node(s) agree at lowest finalized height %d (I*+%d or more), judged after quiesce",
+		len(v.els), minFinal, minFinal-v.istar.number)
 }
 
-// checkC17 is the post-boundary sampling hygiene check: cross-node shadow
-// root mismatches at heights >= b* are only WARNs in the monitor (post-b*
-// sample semantics are not spec-pinned yet), which means nothing FAILS on
-// them unless something asks. This asks: any such warning outside a chaos
-// window is a finding a green run must not bury.
-func (v *verifier) checkC17(ctx context.Context) (verdict, string) {
-	if v.bstarErr != nil {
-		return verdictFail, fmt.Sprintf("b* unresolved: %v", v.bstarErr)
+// checkPostForkSamples asserts zero unwaived post-I* root-mismatch warnings
+// (waiver windows, ±30s). INCONCLUSIVE with no post-I* samples.
+func (v *verifier) checkPostForkSamples(ctx context.Context) (verdict, string) {
+	if v.istarErr != nil {
+		return verdictFail, fmt.Sprintf("I* unresolved: %v", v.istarErr)
 	}
 	postSamples := 0
 	for _, ev := range v.monitor {
-		if ev.Kind == migmon.EvSample && ev.Number >= v.bstar.number {
+		if ev.Kind == migmon.EvSample && ev.Number >= v.istar.number {
 			postSamples++
 		}
 	}
 	if postSamples == 0 {
-		return verdictInconclusive, "no cross-node samples at or past b*"
+		return verdictInconclusive, "no cross-node samples at or past I*"
 	}
 	windows := v.waiverWindows()
 	const slop = 30 * time.Second
@@ -238,23 +192,18 @@ func (v *verifier) checkC17(ctx context.Context) (verdict, string) {
 			}
 		}
 		if !waived {
-			problems = append(problems, fmt.Sprintf("post-b* root mismatch at %s outside any chaos window: %s", ev.Time.Format(time.RFC3339), ev.Detail))
+			problems = append(problems, fmt.Sprintf("post-I* root mismatch at %s outside any chaos window: %s", ev.Time.Format(time.RFC3339), ev.Detail))
 		}
 	}
 	if len(problems) > 0 {
 		return verdictFail, strings.Join(problems, "; ")
 	}
-	return verdictPass, fmt.Sprintf("%d post-b* sample(s), zero unwaived root-mismatch warnings", postSamples)
+	return verdictPass, fmt.Sprintf("%d post-I* sample(s), zero unwaived root-mismatch warnings", postSamples)
 }
 
-// walkOrphanBranch measures a dropped branch first-hand instead of trusting
-// any log line's arithmetic: starting from the orphaned fork block's hash
-// (recorded by the monitor's bstar-reorged event), walk parent links on the
-// victim's own RPC until the walked block matches the canonical hash at its
-// height - that join is the common ancestor. The branch tip is the highest
-// head the monitor recorded for the victim inside the window, so
-// depth = tip - ancestor. Only meaningful on clients that keep serving
-// orphaned blocks by hash (registry ServesOrphans).
+// walkOrphanBranch walks parent links from the orphaned fork block's hash until
+// it joins the canonical chain; depth = victim's recorded tip - join height.
+// Only meaningful on clients that keep serving orphaned blocks by hash.
 func (v *verifier) walkOrphanBranch(ctx context.Context, victim el, orphanHash string, tipHint uint64) (depth, ancestor int, err error) {
 	hash := orphanHash
 	for step := 0; step < 128; step++ {
@@ -281,8 +230,7 @@ func (v *verifier) walkOrphanBranch(ctx context.Context, victim el, orphanHash s
 	return 0, 0, fmt.Errorf("no canonical join within 128 parent steps of %s", orphanHash)
 }
 
-// victimTip returns the highest head the monitor recorded for the victim
-// inside [from, to]: the tip of the branch the heal threw away.
+// victimTip returns the highest head the monitor recorded for node inside [from, to].
 func (v *verifier) victimTip(node string, from, to time.Time) uint64 {
 	var tip uint64
 	for _, ev := range v.monitor {

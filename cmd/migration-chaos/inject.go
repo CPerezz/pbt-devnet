@@ -1,9 +1,5 @@
-// Straddle state injection: engineered, conflicting writes on both islands
-// of the fork-spanning partition. Ambient hammer traffic gives the doomed
-// branch arbitrary state; these writes give it KNOWN state - one contract,
-// known slots, a distinct value per island - so the acceptance verifier can
-// assert the rewind's outcome (majority values canonical everywhere, the
-// victim-island block gone) instead of hoping random traffic exercised it.
+// Straddle state injection: known conflicting writes on both sides of the
+// fork-spanning partition, so the verifier can assert the rewind outcome.
 package main
 
 import (
@@ -22,29 +18,25 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
-// injector holds one funded sender per island. Separate keys per island are
-// load-bearing: one key used on both sides would fork its own nonce stream
-// and turn every assertion into a race over which island's tx survives.
+// injector holds one funded sender per side; one key on both sides would
+// fork its own nonce stream.
 type injector struct {
-	victimURL   string // the straddle victim's own RPC: the only door into its island
-	majorityURL string // a never-disrupted node's RPC: always the majority island
+	victimURL   string // the straddle victim's own RPC
+	majorityURL string // a never-disrupted node's RPC
 	victimKey   *ecdsa.PrivateKey
 	majorityKey *ecdsa.PrivateKey
 
 	contract common.Address
 }
 
-// Fee headroom: the two islands' basefees drift apart while split, so the
-// caps are set far above any devnet basefee rather than estimated - an
-// underpriced injection failing to mine would read as a rewind bug.
+// Fee caps sit far above any devnet basefee: side basefees drift while split.
 var (
 	injTip = big.NewInt(3_000_000_000)  // 3 gwei
 	injCap = big.NewInt(60_000_000_000) // 60 gwei
 )
 
-// injectionSlot is the storage slot both islands write conflicting values
-// to; injectionSlotMajority is written by the majority alone, so its value
-// must survive regardless of any victim-side salvage.
+// injectionSlot gets conflicting values from both sides; injectionSlotMajority
+// is written by the majority alone.
 var (
 	injectionSlot         = txkit.SlotKey(1)
 	injectionSlotMajority = txkit.SlotKey(2)
@@ -65,13 +57,8 @@ func newInjector(victimURL, majorityURL string, keys []*ecdsa.PrivateKey) (*inje
 	}, nil
 }
 
-// deploy places the shared target contract on the canonical chain before
-// the straddle opens: WriterRuntime stores calldata word 1 at the slot
-// named by word 0, so every later injection is a plain call with
-// slot||value calldata - state changes that EXECUTE, not bytecode mailed
-// to a contract that ignores its input. A seed prefix leaves two non-zero
-// slots behind for delete-shaped writes. Runs against the majority node:
-// pre-straddle the network is whole, so this is simply the canonical chain.
+// deploy places the WriterRuntime target (stores calldata word 1 at slot word 0)
+// on the canonical chain before the straddle opens. Seed leaves slots 3,4 non-zero.
 func (in *injector) deploy(ctx context.Context, log *migmon.Log) error {
 	c, err := ethclient.DialContext(ctx, in.majorityURL)
 	if err != nil {
@@ -97,11 +84,8 @@ func writeCall(slot, val common.Hash) []byte {
 	return append(slot.Bytes(), val.Bytes()...)
 }
 
-// splitWrites fires the conflicting writes while the partition is open:
-// the same slot set to a different value through each island's own door,
-// plus one majority-only slot. Victim-side inclusion evidence (the island
-// block hash) is captured from inside the island, before the heal makes
-// that block unreachable by number.
+// splitWrites fires the conflicting writes while the partition is open. The
+// victim block hash is captured before the heal makes it unreachable by number.
 func (in *injector) splitWrites(ctx context.Context, log *migmon.Log) {
 	if (in.contract == common.Address{}) {
 		return // deploy failed; already warned
@@ -114,7 +98,7 @@ func (in *injector) splitWrites(ctx context.Context, log *migmon.Log) {
 		log.Emit(migmon.Event{Kind: migmon.EvInject, Node: inj.Side, Detail: fmt.Sprintf("slot %s = %s via %s island", inj.Slot, inj.Value, inj.Side), Raw: raw})
 	}
 
-	// Majority island first: its values are the ones that must win.
+	// Majority first: its values must win.
 	if c, err := ethclient.DialContext(ctx, in.majorityURL); err == nil {
 		for slot, val := range map[common.Hash]common.Hash{
 			injectionSlot:         majorityValue,
@@ -136,7 +120,7 @@ func (in *injector) splitWrites(ctx context.Context, log *migmon.Log) {
 		log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "majority island dial: " + err.Error()})
 	}
 
-	// Victim island: the conflicting write on the doomed branch.
+	// Victim side: the conflicting write.
 	if c, err := ethclient.DialContext(ctx, in.victimURL); err == nil {
 		tx, err := in.send(ctx, c, in.victimKey, &in.contract, writeCall(injectionSlot, victimValue))
 		if err != nil {
@@ -154,8 +138,7 @@ func (in *injector) splitWrites(ctx context.Context, log *migmon.Log) {
 }
 
 // send signs and submits one dynamic-fee tx; to == nil deploys data as init
-// code. Nonce comes fresh from the target island's own view each call - the
-// two islands legitimately diverge on it once txs land on one side only.
+// code. Nonce is read from the target side each call since the sides diverge.
 func (in *injector) send(ctx context.Context, c *ethclient.Client, key *ecdsa.PrivateKey, to *common.Address, data []byte) (*types.Transaction, error) {
 	from := crypto.PubkeyToAddress(key.PublicKey)
 	nonce, err := c.PendingNonceAt(ctx, from)

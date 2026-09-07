@@ -1,14 +1,7 @@
 // Command migration-chaos applies a fixed partition schedule to a
-// migrating devnet: deep windows on the stake-heavy node before the fork,
-// short ones on the light nodes, and - in the profiles that ask for it -
-// one partition spanning the fork itself, so both sides cross it on
-// different blocks and the victim has to rewind across the header-root
-// format swap when the network heals.
-//
-// The schedule is resolved by internal/migsched, which the post-migration
-// gate also imports, so the two services agree on every instant without
-// passing numbers between them. This command owns disruptoor from genesis
-// until the schedule goes quiet; nothing else may touch it in that window.
+// migrating devnet: deep windows on the heavy node before the fork, short
+// ones on light nodes, optionally one spanning the fork. Schedule resolved
+// by internal/migsched, shared with the post-migration gate.
 package main
 
 import (
@@ -30,10 +23,8 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-// elFlag collects repeated --el name=url flags. The URL goes unused here
-// (partitions are applied by participant index, through disruptoor's own
-// selectors), but the FLAG ORDER is load-bearing: position i, 1-based, is
-// the participant index, exactly as the package renders the list.
+// elFlag collects repeated --el name=url flags. The URL is unused here;
+// flag order gives the 1-based participant index disruptoor selects by.
 type elFlag struct {
 	names []string
 	urls  []string
@@ -111,9 +102,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Publish the resolved schedule before doing anything with it: the
-	// acceptance verifier reads it for each op's class and heal deadline,
-	// and the lap driver reads it to place host-side work in a gap.
+	// Published before use: readers need it for op class and heal deadline.
 	publish(log, sched, genesis, fork, *heavy)
 
 	if *dryRun {
@@ -126,27 +115,22 @@ func main() {
 	}
 
 	d := disruptoor.New(*api, 15*time.Second)
-	// A selector matching nothing is accepted, changes no traffic and
-	// leaves a healthy chain behind - the failure indistinguishable from
-	// success. Refuse to start instead.
+	// A selector matching nothing looks like success; refuse to start.
 	n, err := d.Containers()
 	if err != nil || n == 0 {
 		fmt.Fprintf(os.Stderr, "disruptoor sees %d containers (err=%v); refusing to run no-op chaos\n", n, err)
 		os.Exit(1)
 	}
 
-	// The execution clients are needed only to rebuild their peer mesh
-	// after a partition; nothing here reads chain state.
+	// Clients are needed only to rebuild their peer mesh after a partition.
 	clients := make([]migmon.Client, 0, len(els.names))
 	for i, name := range els.names {
 		clients = append(clients, migmon.NewClient(name, els.urls[i]))
 	}
 
-	// The straddle injector needs one door into each island: the victim's
-	// own RPC (participant indices are 1-based flag order) and a protected
-	// node's RPC, which is majority-side by construction. Fewer than two
-	// keys, or no straddle in this profile, leaves it off - the schedule
-	// runs identically, minus the engineered writes.
+	// The straddle injector needs one RPC per side (participant indices are
+	// 1-based flag order). Fewer than two keys, or no straddle in this
+	// profile, leaves it off.
 	var inj *injector
 	if str, ok := sched.Straddle(); ok && len(keys) >= 2 {
 		majority := 1
@@ -174,9 +158,8 @@ func main() {
 	run(log, d, sched, len(els.names), clients, inj)
 }
 
-// topology derives the victim layout from the flags: the heavy participant
-// takes every deep and straddle window, the remaining unprotected nodes
-// rotate through the short ones.
+// topology derives the victim layout: the heavy participant takes every
+// deep and straddle window, unprotected nodes rotate through short ones.
 func topology(names []string, protect []int, heavy int, share float64, slotSecs int) (migsched.Topology, error) {
 	blocked := map[int]bool{}
 	for _, n := range protect {
@@ -207,7 +190,7 @@ func topology(names []string, protect []int, heavy int, share float64, slotSecs 
 func publish(log *migmon.Log, s migsched.Schedule, genesis, fork time.Time, heavy int) {
 	raw, err := json.Marshal(s.NewDump(genesis, fork, heavy))
 	if err != nil {
-		// A schedule that cannot be published cannot be judged either.
+		// Unpublishable schedule cannot be judged either.
 		fmt.Fprintf(os.Stderr, "publishing the schedule: %v\n", err)
 		os.Exit(1)
 	}
@@ -215,8 +198,7 @@ func publish(log *migmon.Log, s migsched.Schedule, genesis, fork time.Time, heav
 }
 
 // emitPlan prints what the schedule would do, without touching disruptoor.
-// Plan records carry plan=true so a reader can never mistake a dry-run's
-// isolate lines for partitions that actually happened.
+// Records carry a dry-run marker so they're never read as real.
 func emitPlan(log *migmon.Log, s migsched.Schedule) {
 	for _, o := range s.Ops {
 		kind, detail := migmon.EvIsolate, window(o)
@@ -233,11 +215,8 @@ func emitPlan(log *migmon.Log, s migsched.Schedule) {
 	log.Emit(migmon.Event{Kind: migmon.EvPause, Detail: "quiet from " + s.Quiet.UTC().Format(time.RFC3339), Plan: true})
 }
 
-// run executes the schedule as ONE serial action list: op starts, op ends
-// and failsafe sweeps interleaved in wall-clock order. Running ops and
-// sweeps as separate passes bundles every sweep after the last op, which
-// live runs proved fires them minutes late - harmless while every heal
-// works, and exactly wrong the day one does not.
+// run executes the schedule as one serial action list: op starts, ends,
+// and failsafe sweeps interleaved in wall-clock order.
 func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participants int, clients []migmon.Client, inj *injector) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -250,16 +229,13 @@ func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participant
 		}
 	}
 
-	// Tracks whether the last op's own heal is known to have worked; a
-	// failsafe sweep that finds it false announces the rescue loudly.
+	// Tracks whether the last op's heal is known to have worked.
 	healed := true
 
 	for _, a := range s.Actions() {
 		switch a.Kind {
 		case migsched.ActOpStart:
-			// The injection contract deploys shortly before the straddle
-			// opens: the network is still whole, so the deploy is plainly
-			// canonical, and close enough that ambient reorgs cannot age it.
+			// Deploy while the network is still whole, so it lands canonical.
 			if inj != nil && a.Op.Class == migsched.ClassStraddle {
 				if !sleepUntil(a.At.Add(-60*time.Second), stop) {
 					d.Clear()
@@ -291,8 +267,7 @@ func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participant
 				log.Emit(migmon.Event{Kind: migmon.EvIsolate, Node: nodeName(v), Detail: window(a.Op)})
 			}
 			if inj != nil && a.Op.Class == migsched.ClassStraddle {
-				// Let the islands mint their first separate blocks, then
-				// write the conflicting state through each island's door.
+				// Let both sides mint a block first, then write conflicting state.
 				if !sleepUntil(a.At.Add(15*time.Second), stop) {
 					d.Clear()
 					return
@@ -382,10 +357,8 @@ func window(o migsched.Op) string {
 	return fmt.Sprintf("class=%s start=%d end=%d", o.Class, o.Start.Unix(), o.End.Unix())
 }
 
-// repeer rebuilds the execution layer's peer mesh after a partition.
-// Without it a victim that missed blocks cannot get them: its consensus
-// client points it at a head it does not have, and the execution client has
-// no peers to fetch the gap from, so it sits at its old head for good.
+// repeer rebuilds the execution layer's peer mesh after a partition: a
+// victim missing blocks otherwise has no peer to fetch the gap from.
 func repeer(log *migmon.Log, clients []migmon.Client) {
 	if len(clients) < 2 {
 		return

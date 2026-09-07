@@ -11,13 +11,8 @@ import (
 	"github.com/CPerezz/pbt-devnet/internal/migmon"
 )
 
-// lapManifest is the lap driver's own record of what it DID: which profile
-// it launched, whether it executed the host-side restart, which scenarios it
-// asked the reorg service for and how each one ended, and when it quiesced
-// the post-switchover chaos before judging. The verifier reconciles this
-// against the evidence streams, so a lap step that silently never ran (a
-// dead endpoint, a typo'd scenario name, a crashed restart) turns into a
-// failed check instead of a thinner-looking green run.
+// lapManifest is the lap driver's own record of what it did: profile launched,
+// restart executed, scenarios run and their outcomes, quiesce time.
 type lapManifest struct {
 	Profile string `json:"profile"`
 	Restart *struct {
@@ -44,10 +39,9 @@ func loadManifest(path string) (*lapManifest, error) {
 	return &m, nil
 }
 
-// checkC15 reconciles the lap manifest against the run's evidence. Every
-// expectation the manifest records is mandatory: INCONCLUSIVE is reserved
-// for dice that never rolled, not for machinery that never showed up.
-func (v *verifier) checkC15(ctx context.Context) (verdict, string) {
+// checkLapManifest reconciles the lap manifest against the run's evidence; every
+// recorded expectation is mandatory.
+func (v *verifier) checkLapManifest(ctx context.Context) (verdict, string) {
 	if v.manifestPath == "" {
 		return verdictInconclusive, "no --manifest given (run driven outside the lap script)"
 	}
@@ -64,9 +58,8 @@ func (v *verifier) checkC15(ctx context.Context) (verdict, string) {
 		if m.Profile != "" && dump.Profile != m.Profile {
 			problems = append(problems, fmt.Sprintf("manifest profile %q != published schedule profile %q", m.Profile, dump.Profile))
 		}
-		// The restart must have landed in schedule-clear time: inside an
-		// admitted op's window the node's outage would contaminate that
-		// op's evidence, and after Quiet the gate owns the network.
+		// The restart must land outside every admitted op's window (±60s) and
+		// outside a partition's contaminated evidence.
 		if m.Restart != nil {
 			at := time.Unix(m.Restart.At, 0)
 			for _, op := range dump.Admitted() {
@@ -125,20 +118,11 @@ func (v *verifier) checkC15(ctx context.Context) (verdict, string) {
 	return verdictPass, strings.Join(notes, "; ")
 }
 
-// checkC18 judges the engineered state injected around the straddle. The
-// chaos driver deploys a contract on the canonical chain before the
-// fork-spanning partition, then writes CONFLICTING values to the same slots
-// from both islands while they are split. After the heal there is exactly
-// one right answer per slot on the canonical chain, and every node must
-// give it: this turns the doomed branch's state from whatever traffic
-// happened to land there into known values whose fate is checkable.
-//
-// Victim-side transactions are judged tolerantly on inclusion: a healed
-// node's txpool may legally re-inject them into later canonical blocks
-// (salvage) or drop them (fee eviction). What is never legal is nodes
-// DISAGREEING about the resulting state, or the victim-island block that
-// first held them staying canonical anywhere.
-func (v *verifier) checkC18(ctx context.Context) (verdict, string) {
+// checkInjectedState asserts every node agrees on the injected slots' final
+// values (majority wins unless overwritten by a later victim-side salvage),
+// and no orphaned injected block stays canonical. INCONCLUSIVE with no
+// injection records.
+func (v *verifier) checkInjectedState(ctx context.Context) (verdict, string) {
 	var injections []migmon.Injection
 	for _, ev := range v.chaos {
 		if ev.Kind != migmon.EvInject || len(ev.Raw) == 0 {
@@ -157,8 +141,7 @@ func (v *verifier) checkC18(ctx context.Context) (verdict, string) {
 	var problems, notes []string
 	salvaged, evicted := 0, 0
 	for _, inj := range injections {
-		// Cross-node agreement on the touched slot is the differential
-		// assertion; the majority-side value winning is the chain-logic one.
+		// Cross-node agreement on the touched slot is the assertion.
 		var first string
 		firstNode := ""
 		agree := true
@@ -183,10 +166,7 @@ func (v *verifier) checkC18(ctx context.Context) (verdict, string) {
 		}
 		switch inj.Side {
 		case "majority":
-			// The majority island's write must be the canonical outcome
-			// unless a salvaged victim tx targeting the same slot landed
-			// LATER and overwrote it - which the victim record for that
-			// slot below will account for.
+			// Overridden only if a salvaged victim tx on the same slot landed later.
 			if !strings.EqualFold(first, inj.Value) && !v.slotOverwrittenBySalvage(ctx, injections, inj) {
 				problems = append(problems, fmt.Sprintf("storage %s[%s] = %s, want majority value %s",
 					inj.Contract, inj.Slot, first, inj.Value))
@@ -199,8 +179,7 @@ func (v *verifier) checkC18(ctx context.Context) (verdict, string) {
 				evicted++
 			}
 		}
-		// The island block that first included a victim-side tx must not
-		// be canonical anywhere: it was minted on the doomed branch.
+		// The block that first carried a victim-side injection must not be canonical anywhere.
 		if inj.IslandBlock != "" {
 			for _, e := range v.els {
 				blk, err := v.getBlockByHash(ctx, e, inj.IslandBlock)
@@ -225,9 +204,8 @@ func (v *verifier) checkC18(ctx context.Context) (verdict, string) {
 	return verdictPass, strings.Join(notes, "; ")
 }
 
-// slotOverwrittenBySalvage reports whether a victim-side injection targeting
-// the same contract+slot was salvaged into the canonical chain, which
-// legally supersedes the majority island's write if it executed later.
+// slotOverwrittenBySalvage reports whether a victim-side injection on the same
+// contract+slot was salvaged into the canonical chain.
 func (v *verifier) slotOverwrittenBySalvage(ctx context.Context, all []migmon.Injection, maj migmon.Injection) bool {
 	for _, inj := range all {
 		if inj.Side != "victim" || inj.Contract != maj.Contract || inj.Slot != maj.Slot {
@@ -248,8 +226,7 @@ func (v *verifier) getStorageAt(ctx context.Context, e el, addr, slot string) (s
 	return out, nil
 }
 
-// rpcReceipt is the one field of a transaction receipt this package needs:
-// whether the tx is included at all (nil receipt = not canonical).
+// rpcReceipt: nil receipt means the tx is not canonical.
 type rpcReceipt struct {
 	BlockHash string `json:"blockHash"`
 }

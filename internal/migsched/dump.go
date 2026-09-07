@@ -8,12 +8,8 @@ import (
 )
 
 // Dump is the resolved schedule as it appears in the chaos driver's JSONL,
-// once, at startup. It is the only place the schedule crosses a process
-// boundary: the acceptance verifier reads it to learn each op's class and
-// therefore which heal deadline applies, and the lap driver reads it to
-// place host-side work (a node restart) in a gap no partition occupies.
-// Publishing it beats both sides re-deriving a schedule they could get
-// wrong differently.
+// once, at startup. Consumers (acceptance verifier, lap driver) read it
+// rather than re-deriving the schedule.
 type Dump struct {
 	Profile     string   `json:"profile"`
 	Genesis     int64    `json:"genesis"`
@@ -25,9 +21,7 @@ type Dump struct {
 	Quiet       int64    `json:"quiet"`
 }
 
-// DumpOp is one op in the dump. Times are unix seconds: the JSONL already
-// carries RFC3339 event times, and integers here keep the arithmetic
-// consumers do (windows, waivers, gaps) free of parsing.
+// DumpOp is one op in the dump. Times are unix seconds.
 type DumpOp struct {
 	Name    string `json:"name"`
 	Class   string `json:"class"`
@@ -86,18 +80,9 @@ func (d Dump) Admitted() []DumpOp {
 	return out
 }
 
-// HealDeadline returns the instant by which op must have been healed, per
-// its class: a pre-fork op by the time the network has to be whole again for
-// the approach to the fork, a post-fork op (straddle or window) by its own
-// end plus the convergence allowance. A verifier applying one global
-// deadline would fail every straddle for healing after the fork, which is
-// what a straddle does.
-//
-// A pre-fork op's deadline is deliberately NOT its own scheduled end. The
-// heal is applied after sleeping to that end, so its recorded time is always
-// a moment later, and an op whose end coincides with a sweep instant could
-// never pass. The requirement is that the network is whole before the fork
-// approach, so the last sweep at or before the fork is the deadline.
+// HealDeadline returns the instant by which op must have been healed: a
+// pre-fork op by the last sweep at or before the fork, a post-fork op
+// (straddle or window) by its own end plus healConvergeAllowance.
 func (d Dump) HealDeadline(o DumpOp) time.Time {
 	if c := Class(o.Class); c == ClassStraddle || c == ClassWindow {
 		return time.Unix(o.End, 0).Add(healConvergeAllowance * time.Second)
@@ -113,9 +98,7 @@ func (d Dump) HealDeadline(o DumpOp) time.Time {
 }
 
 // Gaps returns the intervals inside [from, to] that no admitted partition
-// occupies. The lap driver places its node restart in one of these and
-// refuses to run if its intended window is not contained in a gap: a
-// restart during a partition would confuse a heal with a reboot.
+// occupies.
 func (d Dump) Gaps(from, to time.Time) [][2]time.Time {
 	busy := make([][2]time.Time, 0, len(d.Ops))
 	for _, o := range d.Admitted() {

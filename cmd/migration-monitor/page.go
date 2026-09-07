@@ -15,15 +15,12 @@ import (
 //go:embed page.html
 var pageFS embed.FS
 
-// pageTemplate is parsed once at package init, so a template typo fails the
-// build's test run rather than surfacing only when a handler first fires.
+// pageTemplate is parsed once at init so a typo fails the build, not a handler.
 var pageTemplate = template.Must(template.New("page.html").Funcs(template.FuncMap{
 	"abbrev": abbrevRoot,
 }).ParseFS(pageFS, "page.html"))
 
-// abbrevRoot shortens a shadow root to what fits a matrix cell. Ten
-// characters plus the ellipsis is enough to eyeball a match at a glance and
-// still short enough that twenty rows fit on one screen.
+// abbrevRoot shortens a shadow root to fit a matrix cell.
 func abbrevRoot(root string) string {
 	const n = 10
 	if len(root) <= n {
@@ -32,10 +29,8 @@ func abbrevRoot(root string) string {
 	return root[:n] + "\u2026"
 }
 
-// serveHTTP starts the live status server in the background. It never
-// blocks and never takes the monitor down: a bind failure is a warn event,
-// not a fatal one, because an operator who forgot to check the page should
-// not also lose the JSONL record.
+// serveHTTP starts the live status server in the background; a bind
+// failure is a warn, not fatal.
 func serveHTTP(addr string, s *snapshot, log *migmon.Log) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/state", apiStateHandler(s, log))
@@ -54,10 +49,7 @@ func serveHTTP(addr string, s *snapshot, log *migmon.Log) {
 	}()
 }
 
-// apiStateHandler serves the snapshot as JSON. Field names are the machine
-// surface a lap driver tails, so this is a thin, stable encode - all the
-// judgment (verdicts, cell status) already happened when the snapshot was
-// built.
+// apiStateHandler serves the snapshot as JSON.
 func apiStateHandler(s *snapshot, log *migmon.Log) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

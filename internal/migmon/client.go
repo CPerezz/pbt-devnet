@@ -17,53 +17,37 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
-// ErrNoIntrospection is returned by a client for a node whose execution
-// implementation exposes no migration introspection. It is not a failure of
-// the node: the caller degrades to what standard RPC can answer - heads and
-// canonical hashes - and says so in its evidence.
+// ErrNoIntrospection is returned for a node whose execution implementation
+// exposes no migration introspection; the caller degrades to standard RPC.
 var ErrNoIntrospection = errors.New("this client exposes no migration introspection")
 
-// Header is the part of a block every consumer here needs: identity, and
-// the timestamp the fork is measured against.
+// Header is the block identity and timestamp the fork is measured against.
 type Header struct {
 	Number uint64
 	Hash   string
 	Time   uint64
 }
 
-// Client is one execution client, seen through the two surfaces the
-// migration tooling uses: standard RPC, which every implementation
-// answers, and migration introspection, which only an implementation that
-// migrates in place can answer.
-//
-// The split is the seam for a second client: add an implementation of the
-// introspection half and everything above it - the monitor's findings, the
-// gate's done-detection, the verifier's expectations - works unchanged.
+// Client is one execution client, seen through standard RPC (every
+// implementation answers) and migration introspection (only an
+// implementation that migrates in place can answer).
 type Client interface {
 	Name() string
-	// Introspects reports whether this client can answer migration
-	// progress at all. It is part of the interface rather than inferred
-	// from a concrete type so that every caller - and every test double -
-	// states the capability instead of guessing it.
+	// Introspects reports whether this client can answer migration progress at all.
 	Introspects() bool
-	// Introspection. Returns ErrNoIntrospection when Introspects is false.
+	// Introspection; returns ErrNoIntrospection when Introspects is false.
 	Progress(ctx context.Context) (json.RawMessage, error)
 	ShadowRoot(ctx context.Context, hash string) (string, error)
 	// Standard RPC, answered by every client.
 	HeadNumber(ctx context.Context) (uint64, error)
-	// Peer management, used to rebuild the execution layer's mesh after a
-	// partition. Every implementation exposes these under the same admin
-	// namespace, so they sit with the standard calls rather than behind
-	// the introspection split.
+	// Peer management, used to rebuild the execution layer's mesh after a partition.
 	NodeInfo(ctx context.Context) (string, error)
 	AddPeer(ctx context.Context, enode string) error
 	HeaderByNumber(ctx context.Context, height uint64) (*Header, error)
 	HeaderByTag(ctx context.Context, tag string) (*Header, error)
 }
 
-// ClientType returns the execution implementation named in a service name.
-// The package names services el-<index>-<execution>-<consensus>, which is
-// the only place the wire tells us what we are talking to.
+// ClientType returns the execution implementation named in a service name (el-<index>-<execution>-<consensus>).
 func ClientType(service string) string {
 	parts := strings.Split(service, "-")
 	if len(parts) >= 3 && parts[0] == "el" {
@@ -74,9 +58,7 @@ func ClientType(service string) string {
 
 // NewClient returns a client for a service name and RPC URL. An
 // implementation with no known introspection adapter still gets a working
-// standard-RPC client, with the introspection half reporting
-// ErrNoIntrospection so callers can degrade deliberately instead of
-// mistaking silence for agreement.
+// standard-RPC client, reporting ErrNoIntrospection on the introspection half.
 func NewClient(service, url string) Client {
 	rpc := &rpcClient{name: service, url: url, http: &http.Client{Timeout: 10 * time.Second}}
 	switch ClientType(service) {
@@ -90,8 +72,7 @@ func NewClient(service, url string) Client {
 // HasIntrospection reports whether a client can answer migration progress.
 func HasIntrospection(c Client) bool { return c.Introspects() }
 
-// noIntrospection wraps a standard-RPC client for an implementation whose
-// migration state is not reachable over RPC.
+// noIntrospection wraps a standard-RPC client whose migration state is not reachable over RPC.
 type noIntrospection struct{ Client }
 
 func (n noIntrospection) Introspects() bool { return false }
@@ -104,8 +85,7 @@ func (n noIntrospection) ShadowRoot(context.Context, string) (string, error) {
 	return "", ErrNoIntrospection
 }
 
-// rpcClient speaks plain JSON-RPC. The migration tooling never calls the
-// engine API, so there is no JWT and no second port to track.
+// rpcClient speaks plain JSON-RPC.
 type rpcClient struct {
 	name  string
 	url   string
@@ -179,7 +159,7 @@ func (c *rpcClient) call(ctx context.Context, method string, out any, params ...
 	return nil
 }
 
-// rpcHeader is the wire shape of the header fields we read.
+// rpcHeader is the wire shape of the header fields read.
 type rpcHeader struct {
 	Number    hexutil.Uint64 `json:"number"`
 	Hash      common.Hash    `json:"hash"`
@@ -190,8 +170,7 @@ func (c *rpcClient) HeaderByNumber(ctx context.Context, height uint64) (*Header,
 	return c.header(ctx, hexutil.EncodeUint64(height))
 }
 
-// HeaderByTag reads a named head: "finalized" is how the tooling learns
-// that a fork block has settled, without opening a consensus-layer API.
+// HeaderByTag reads a named head; "finalized" learns settlement without a consensus-layer API.
 func (c *rpcClient) HeaderByTag(ctx context.Context, tag string) (*Header, error) {
 	return c.header(ctx, tag)
 }
@@ -223,9 +202,7 @@ func (c *rpcClient) Progress(ctx context.Context) (json.RawMessage, error) {
 	return raw, nil
 }
 
-// ShadowRoot returns the recorded shadow root for a block, or "" for a
-// legal null: the record has not been written yet, which is never
-// divergence on its own.
+// ShadowRoot returns the recorded shadow root for a block, or "" for a legal null.
 func (c *rpcClient) ShadowRoot(ctx context.Context, hash string) (string, error) {
 	var out *common.Hash
 	if err := c.call(ctx, "debug_shadowStateRoot", &out, hash); err != nil {

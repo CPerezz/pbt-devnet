@@ -27,30 +27,28 @@ func formatTimeOrDash(t time.Time) string {
 	return t.UTC().Format("15:04:05")
 }
 
-// nodeForkHashes is one node's provisional (first observed) and latest
-// known fork-block hash, and whether that latest hash has finalized.
+// nodeForkHashes is one node's provisional and latest fork-block hash, and whether it finalized.
 type nodeForkHashes struct {
 	provisional string
 	latest      string
 	finalized   bool
 }
 
-// forkHashesByNode walks the monitor stream once, tracking each node's
-// first bstar hash (provisional) and its latest known hash, updated by
-// a bstar-reorged and settled by a bstar-final.
+// forkHashesByNode tracks each node's first istar hash (provisional) and
+// latest hash, updated by istar-reorged and settled by istar-final.
 func (v *verifier) forkHashesByNode() map[string]nodeForkHashes {
 	out := map[string]nodeForkHashes{}
 	for _, ev := range v.monitor {
 		h := out[ev.Node]
 		switch ev.Kind {
-		case migmon.EvBStar:
+		case migmon.EvIStar:
 			if h.provisional == "" {
 				h.provisional = ev.Hash
 			}
 			h.latest = ev.Hash
-		case migmon.EvBStarReorged:
+		case migmon.EvIStarReorged:
 			h.latest = ev.Hash
-		case migmon.EvBStarFinal:
+		case migmon.EvIStarFinal:
 			h.finalized = true
 		default:
 			continue
@@ -60,10 +58,7 @@ func (v *verifier) forkHashesByNode() map[string]nodeForkHashes {
 	return out
 }
 
-// nodeStageTimes returns node's first-observed parked+Merkle-active
-// time and done time, zero if never reached - the same stages
-// checkNodeTimeline gates on, read here for reporting rather than
-// pass/fail.
+// nodeStageTimes returns node's first parked+Merkle-active time and done time, zero if never reached.
 func (v *verifier) nodeStageTimes(node string) (stage2, stage3 time.Time) {
 	var events []migmon.Event
 	for _, ev := range v.monitor {
@@ -94,11 +89,7 @@ func (v *verifier) nodeStageTimes(node string) (stage2, stage3 time.Time) {
 	return stage2, stage3
 }
 
-// renderSummary builds the --summary markdown artifact: a one-page,
-// human-facing record of what the schedule admitted, what the chain and
-// monitor showed for it, and how every check judged it - kept short
-// enough to read in one sitting instead of replaying the JSONL streams
-// by hand.
+// renderSummary builds the --summary markdown artifact: schedule, nodes, and check verdicts.
 func (v *verifier) renderSummary(results []checkResult) string {
 	var b strings.Builder
 	dump, schedErr := v.scheduleDump()
@@ -139,7 +130,7 @@ func (v *verifier) renderSummary(results []checkResult) string {
 	}
 
 	b.WriteString("## Nodes\n\n")
-	b.WriteString("| node | parked+active | done | provisional b* | latest b* |\n|---|---|---|---|---|\n")
+	b.WriteString("| node | parked+active | done | provisional I* | latest I* |\n|---|---|---|---|---|\n")
 	hashes := v.forkHashesByNode()
 	for _, node := range v.progressNodes() {
 		stage2, stage3 := v.nodeStageTimes(node)
