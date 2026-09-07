@@ -472,6 +472,9 @@ def _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer_senders, 
     cmd = ["--disruptoor", api]
     for el in els:
         cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
+    for p in net.all_participants:
+        if p.cl_context != None:
+            cmd += ["--cl", "{0}={1}".format(p.cl_context.beacon_service_name, p.cl_context.beacon_http_url)]
     for n in migration["protect_nodes"]:
         cmd += ["--protect-node", str(n)]
     cmd += [

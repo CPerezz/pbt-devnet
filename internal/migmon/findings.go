@@ -16,6 +16,8 @@ const (
 
 	// no-convergence: a partition healed but heads still disagree past ConvergenceGrace.
 	FindingNoConvergence = "no-convergence"
+	// A consensus client with zero peers outside any scheduled partition.
+	FindingPeerStarved = "cl-starved"
 
 	// Persistent-null: a node keeps answering null for sampled shadow roots while claiming following|synced.
 	FindingNullWarn     = "null-warn"     // after NullWarnAfter

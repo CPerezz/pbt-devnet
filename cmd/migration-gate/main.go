@@ -87,6 +87,7 @@ func (f *intsFlag) Set(v string) error {
 func main() {
 	var (
 		els       elFlag
+		cls       elFlag
 		protected intsFlag
 		api       = flag.String("disruptoor", "", "disruptoor native API base URL")
 		genesisTS = flag.Int64("genesis-time", 0, "chain genesis unix time")
@@ -99,6 +100,7 @@ func main() {
 		jsonlPath = flag.String("jsonl", "", "JSONL event path (default stdout)")
 	)
 	flag.Var(&els, "el", "execution client as name=url, repeatable; order is the participant index")
+	flag.Var(&cls, "cl", "consensus client beacon API as name=url, repeatable")
 	flag.Var(&protected, "protect-node", "participant index never isolated, repeatable")
 	flag.Parse()
 
@@ -156,6 +158,7 @@ func main() {
 	if d != nil {
 		go watchdog(ctx, log, d, clients, sched, mine)
 	}
+	go peerWatch(ctx, log, cls, sched, mine)
 
 	if !waitForDone(ctx, log, clients) {
 		if ctx.Err() == nil {
@@ -527,3 +530,54 @@ func others(participants, victim int) []int {
 }
 
 func nodeName(idx int) string { return fmt.Sprintf("node-%d", idx) }
+
+// peerStarvedAfter is how long a consensus client may sit at zero peers
+// outside any scheduled partition before it is reported starved.
+const peerStarvedAfter = 90 * time.Second
+
+// starvation is one consensus client's zero-peer episode.
+type starvation struct {
+	since time.Time // first zero-peer observation of the episode
+	fired bool
+}
+
+// observe updates the episode with one poll and reports whether to emit.
+// Peers, an unreachable API, or a legally held partition all end the
+// episode: a victim at zero peers inside its window is not starved.
+func (s *starvation) observe(now time.Time, peers int, err error, held bool) bool {
+	if err != nil || peers > 0 || held {
+		*s = starvation{}
+		return false
+	}
+	if s.since.IsZero() {
+		s.since = now
+		return false
+	}
+	if s.fired || now.Sub(s.since) < peerStarvedAfter {
+		return false
+	}
+	s.fired = true
+	return true
+}
+
+// peerWatch reports a consensus client left with no peers while the network
+// is supposed to be whole. Partitions cut peers by design; what must not
+// happen is a client failing to get them back after the heal - measured on
+// the bootnode, which has no boot-nodes of its own to redial. Emitted as a
+// warning once per episode; the lap driver restarts the client on it.
+func peerWatch(ctx context.Context, log *migmon.Log, cls elFlag, sched migsched.Schedule, mine *held) {
+	episodes := make([]starvation, len(cls.names))
+	for {
+		if !sleep(ctx, watchPoll) {
+			return
+		}
+		now := time.Now()
+		for i, url := range cls.urls {
+			peers, err := migmon.BeaconPeerCount(ctx, url)
+			if episodes[i].observe(now, peers, err, sched.Covers(now) || mine.holding(now)) {
+				log.Emit(migmon.Event{Kind: migmon.EvWarn, Finding: migmon.FindingPeerStarved, Node: cls.names[i],
+					Detail: fmt.Sprintf("no consensus peers for %.0fs outside any scheduled partition", now.Sub(episodes[i].since).Seconds())})
+			}
+		}
+	}
+}
