@@ -1,18 +1,9 @@
 #!/usr/bin/env bash
-# Build a PBT-capable besu image (besu-pbt:local).
-#
-# Besu cannot go through build-images.sh: it is a two-stage Gradle build, not a docker one.
-# besu-stateless must reach mavenLocal before besu compiles against it, then `installDist`
-# produces build/install/besu. besu's own Dockerfile copies a directory literally named
-# `besu`, so the distribution is staged under that name.
-#
-# Both repos need JDK 25, passed to Gradle explicitly so a keg-only install works without
-# becoming the machine's default java.
-#
+# Build a PBT-capable besu image (besu-pbt:local): two Gradle stages (besu-stateless ->
+# mavenLocal, then besu installDist), then a docker build. Needs JDK 25 (keg-only ok).
 # Usage:
 #   scripts/build-besu.sh                  # both Gradle stages, then the image
 #   scripts/build-besu.sh --skip-gradle    # image only, reusing build/install/besu
-#   PBT_BESU_ROOT=... PBT_BESU_STATELESS=... scripts/build-besu.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -67,9 +58,7 @@ if [[ "$SKIP_GRADLE" -eq 0 ]]; then
       --console=plain -Dorg.gradle.java.installations.paths="$JDK25" )
 fi
 
-# The NPE fix is what lets besu accept a forkchoice update at all. Building the wrong
-# branch produces a besu that computes correct state roots, imports every block, and then
-# sits at block 0 forever — which looks like a devnet problem rather than a stale checkout.
+# Without matkt/besu#31 (NPE fix), besu imports blocks but refuses every forkchoiceUpdated.
 if ! grep -q 'removeTrieNode(location)' \
      "$BESU/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/mainnet/staterootcommitter/BinaryStateRootCommitter.java" 2>/dev/null; then
   echo "!! $BESU does not contain the binary-trie deletion fix (matkt/besu#31)." >&2
@@ -83,8 +72,7 @@ DIST="$BESU/build/install/besu"
 [[ -x "$DIST/bin/besu" ]] || {
   echo "no besu distribution at $DIST (run without --skip-gradle)" >&2; exit 1; }
 
-# The Dockerfile's COPY expects the distribution to be named `besu` in the context, and
-# pyroscope.properties alongside it.
+# Dockerfile's COPY expects the distribution staged as `besu` alongside pyroscope.properties.
 CTX="$BESU/build/docker-ctx"
 rm -rf "$CTX" && mkdir -p "$CTX"
 cp -R "$DIST" "$CTX/besu"

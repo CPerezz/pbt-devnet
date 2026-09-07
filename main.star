@@ -1,49 +1,27 @@
 """
-A mixed-client PBT (EIP-8297) devnet, driven by real consensus clients.
+Mixed-client PBT (EIP-8297) devnet, driven by real consensus clients, on top of
+ethpandaops/ethereum-package. The binary tree is added via pbt-egg:local (a fork of
+ethereum-genesis-generator + eth-beacon-genesis) through the supported
+`ethereum_genesis_generator_params.image` hook -- no patch to the package.
 
-This composes ethpandaops/ethereum-package rather than launching clients itself: that
-package already knows how to run geth, besu and lighthouse together, wire the engine API,
-generate genesis and hand out validator keys. What it does not know is the binary tree, and
-that gap is closed with one fork and one load-bearing config value, with no patch to the package:
+Three services of our own:
+  pbthammer  transaction load shaped at what the tree changed
+  pbtmonitor watches every execution client for state-root divergence; proves its own
+             oracle via a corrupted payload through the engine API (observes only)
+  pbtchaos   forces reorgs by isolating the next proposer; owns disruptoor exclusively
 
-  * pbt-egg:local  — a fork of ethereum-genesis-generator that emits the tree keys AND
-    bundles a fork of eth-beacon-genesis whose go.mod replaces go-ethereum with the
-    EIP-8297 branch. Without it the consensus genesis embeds a merkle-patricia block hash
-    the execution layer will never produce, and the chain never starts. Reached through the
-    supported `ethereum_genesis_generator_params.image` hook.
+In migration mode (pbt_migration.enabled) the chain starts on the merkle-patricia trie and
+forks to the binary tree at T = genesis + fork_offset_seconds:
+  migration-monitor follows debug_migrationProgress and shadow roots, emits JSONL
+  migration-chaos   drives disruptoor on a gated schedule around the fork boundary;
+                     pbtchaos is skipped in migration mode
 
-On top of the network this adds three services of our own:
-
-  pbthammer  transaction load shaped at what the tree changed, not at throughput
-  pbtmonitor watches every execution client for state-root divergence, and proves its own
-             oracle by feeding a corrupted payload through the engine API. It observes
-             only: the consensus clients drive the chain, and a second thing driving
-             forkchoice manufactures the very forks it would then report.
-  pbtchaos   forces reorgs on purpose. It isolates whichever node proposes next, rotating
-             so both client types get reorged, and runs scenarios that strand specific
-             state on a branch that is then abandoned. It owns disruptoor exclusively, so
-             two disruptions never overlap.
-
-In migration mode (pbt_migration.enabled) the chain instead STARTS on the merkle-patricia
-trie and forks to the binary tree at T = genesis + fork_offset_seconds. Two services of our
-own take over there:
-
-  migration-monitor follows every client's debug_migrationProgress and shadow roots,
-             emitting JSONL findings on stdout.
-  migration-chaos   drives disruptoor on an admission-gated schedule around the fork
-             boundary (profiles: smoke, full). The legacy pbtchaos is skipped in migration
-             mode — its reorg cadence knows nothing about the boundary.
-
-All three are independently switchable, so `kurtosis run` with load and chaos disabled is a
-quiet baseline.
-
-Run `make up`.
+All three are independently switchable. Run `make up`.
 """
 
 ethereum_package = import_module("github.com/ethpandaops/ethereum-package/main.star@5ec41d44ae23fb01b036c11b25d98547cc9c3be4")
 
-# Our own args keys. ethereum-package sanity-checks its input and fails on anything it does
-# not recognise, so these are removed before its args are handed over.
+# Our own args keys; stripped before ethereum-package sees args (it rejects unknown keys).
 OURS = [
     "pbt_hammer",
     "pbt_monitor",
@@ -61,30 +39,18 @@ OURS = [
 DEFAULT_MIGRATION = {
     "enabled": False,
     "fork_offset_seconds": 1800,
-    # What drives disruption around the boundary. "none" launches no chaos at
-    # all; the rest are migration-chaos's own admission-gated profiles, and
-    # the ones with "composite" or "straddle" in the name hold a partition
-    # across the activation itself.
+    # "none" disables migration-chaos; other values select its schedule.
     "chaos_profile": "none",
     "monitor_image": "pbt-migration-monitor:local",
     "chaos_image": "pbt-migration-chaos:local",
     "gate_image": "pbt-migration-gate:local",
-    # Same convention as pbt_chaos.protect_nodes: participant 1 is the sole
-    # bootnode and must never be disrupted. 1-based.
+    # Participant 1 is the bootnode and is never disrupted.
     "protect_nodes": [1],
-    # Which participant carries the heavy validator share, and therefore
-    # every deep and fork-straddling partition. Stake and the victim role
-    # travel together: isolating a node with more than a third of the
-    # validators stalls finality for the window instead of finalizing past
-    # it, and a victim whose branch conflicts with a finalized checkpoint is
-    # banned by the survivors and never rejoins. Measured, not theorised.
+    # Heavy node's stake travels with the victim role: isolating >1/3 stalls finality.
     "heavy_node": 2,
     "heavy_validators": 256,
     "light_validators": 128,
-    # What the gate runs once every client reports the migration done:
-    # none, short-light, or deep-heavy. A reorg after the switchover
-    # exercises binary-canonical execution, a different path from the same
-    # reorg before it.
+    # Post-switchover reorg: none, short-light, or deep-heavy.
     "post_op": "deep-heavy",
     # The monitor's live view. Empty disables it.
     "monitor_http_port": 8080,
@@ -93,57 +59,35 @@ DEFAULT_MIGRATION = {
 DEFAULT_HAMMER = {
     "enabled": True,
     "image": "pbt-hammer:local",
-    # Blocks must stay under half the gas limit; above it the base fee compounds with
-    # nothing to stop it. See the comment on pbt_hammer in args/devnet.yaml.
+    # Keep blocks under half the gas limit or the base fee compounds unpayably.
     "interval": "1s",
     "batch": 2,
     "slots_per_tx": 20,
     "code_size": 6000,
-    # How many of the package's prefunded accounts to send from. They come with private
-    # keys, so the hammer needs no premine of its own.
+    # Uses the package's own prefunded accounts; no premine of its own needed.
     "senders": 4,
     "only": "",
 }
 
-# pbtchaos serialises its own disruptions through one queue, so two of ITS jobs never
-# overlap. `make split` / `make heal` write to disruptoor directly and are deliberately
-# outside that queue -- which also means pbtchaos can clear a hand-applied split when its
-# next job finishes.
+# pbtchaos serialises disruptions through one queue; `make split`/`make heal` bypass it.
 DEFAULT_CHAOS = {
     "enabled": True,
     "image": "pbt-chaos:local",
-    # In migration mode this service must not touch the network until the
-    # switchover is finished, so it runs behind the gate rather than being
-    # skipped outright: set gate: true to have the full lifecycle - chaos
-    # before the fork, across it, and after it - in one run.
+    # Runs behind the gate in migration mode instead of being skipped; set gate: true.
     "gate": False,
-    # Depth ceiling for the gated run. After the switchover finality is
-    # flowing again, so a reorg deeper than a light victim can heal from
-    # would strand it; the deep case belongs to the gate's own window.
+    # Depth ceiling for the gated run: caps how deep a post-fork reorg can go.
     "gate_max_depth": 8,
-    # Periodic one-block reorgs, produced by isolating whichever node proposes next: it
-    # builds a block nobody else receives, then has to unwind it. The doomed node rotates,
-    # so reorgs land on both client types.
+    # Periodic one-block reorgs from isolating the next proposer; victim rotates.
     "isolation": True,
     "isolate_min_blocks": 15,
     "isolate_max_blocks": 30,
-    # Empty means two slots: the isolation starts once the chain reaches the slot BEFORE
-    # the duty, so it has to span the rest of that slot and the whole proposal slot.
+    # Empty means two slots: the slot before the duty plus the proposal slot.
     "isolate_for": "",
     # Default depth for `make scenario` when none is given.
     "depth": 10,
-    # Nodes pbtchaos must never disrupt, 1-based.
-    #
-    # Participant 1 is ethereum-package's sole consensus bootnode and is launched without boot
-    # nodes of its own, so a partition leaves it with no way back: zero peers for the rest of
-    # the run. args/devnet.yaml gives that role to a dedicated node so the four under test
-    # stay eligible. Set to [] if participant 1 is a node you actually want disrupted.
+    # Participant 1 is the bootnode; a partition would strand it with no peers.
     "protect_nodes": [1],
-    # A pair of keys per scenario run, walked so runs do not repeat a pair: a reorged-out
-    # transaction stays valid and re-enters the pool, and a reused key then reads a nonce
-    # that goes stale underneath it. Three is the most that fits below the hammer without
-    # reaching the accounts other services claim -- see the guard below -- so consecutive
-    # runs do still share one key.
+    # Sender pair walked per scenario run so a reused key never reads a stale nonce.
     "senders": 3,
 }
 
@@ -153,13 +97,8 @@ DEFAULT_MONITOR = {
     "verify_oracle": True,
     "poll": "2s",
     "probe_every": 8,
-    # Optional, and the only POSITIVE proof the clients are on the binary tree: clients
-    # agreeing with each other says nothing if they all built a merkle-patricia genesis.
-    #
-    # It has to be the root of the genesis THIS devnet runs, which pbt-egg generates. NOT
-    # `make genesis`'s -- that tool allocs a different set of accounts, and a state root
-    # commits to the alloc, so its value fails preflight. Read the real one from a run whose
-    # clients already agree: eth_getBlockByNumber(0).stateRoot on any node.
+    # Only positive proof the clients are on the binary tree; must be the root of
+    # THIS devnet's genesis (not `make genesis`'s, which allocs different accounts).
     "expected_genesis_root": "",
 }
 
@@ -167,22 +106,17 @@ DEFAULT_MONITOR = {
 SPAMOOR_ACCOUNT = 13
 ASSERTOOR_ACCOUNT = 9
 
-# disruptoor's own listen port, from ethereum-package's launcher. pbtchaos speaks the
-# native API on it rather than the friendlier start-up config.
+    # disruptoor's listen port; pbtchaos speaks its native API rather than start-up config.
 DISRUPTOOR_SERVICE = "disruptoor"
 DISRUPTOOR_PORT = 7700
 CHAOS_API_PORT = 7800
 
-# ethereum-package uploads the engine API secret under this fixed artifact name, so the
-# monitor can mount the same one the clients use and speak the engine API itself.
+    # Fixed artifact name ethereum-package uploads the engine API secret under.
 JWT_ARTIFACT = "jwt_file"
 JWT_MOUNT_DIR = "/jwt"
 JWT_PATH = JWT_MOUNT_DIR + "/jwtsecret"
 
-# ethereum-package's genesis generator stores the generated network configs —
-# genesis.json included — under this fixed artifact name (StoreSpec in
-# el_cl_genesis_generator.star at the pinned revision), so migration tooling can
-# mount the exact genesis the clients booted from.
+    # Fixed artifact name holding the generated genesis.json (StoreSpec, pinned revision).
 EL_CL_GENESIS_ARTIFACT = "el_cl_genesis_data"
 EL_CL_GENESIS_MOUNT = "/network-configs"
 
@@ -205,12 +139,8 @@ def run(plan, args={}):
         if k not in OURS:
             upstream_args[k] = args[k]
 
-    # Migration mode reshapes the genesis: the egg emits binaryTrieTime =
-    # amsterdam_time + fork_offset_seconds instead of scheduling the tree AT
-    # genesis. Validated loudly, because both failure shapes look healthy: a
-    # stock generator image emits no fork at all, and PBT unset leaves the
-    # offset with nothing to schedule — either way the chain comes up
-    # merkle-forever with no error anywhere.
+    # Migration mode rewrites the genesis generator's env so the egg emits
+    # binaryTrieTime = amsterdam_time + fork_offset_seconds instead of PBT-at-genesis.
     if migration["enabled"]:
         egg = dict(args.get("ethereum_genesis_generator_params", {}))
         if egg.get("image", "") == "":
@@ -223,22 +153,18 @@ def run(plan, args={}):
         extra["PBT_OFFSET_SECONDS"] = str(migration["fork_offset_seconds"])
         egg["extra_env"] = extra
         upstream_args["ethereum_genesis_generator_params"] = egg
-        # Only profiles that actually partition need the skewed stake; a
-        # quiet or single-node run keeps the package's own even split.
+        # Skewed stake only needed when a profile actually partitions the network.
         if migration["chaos_profile"] != "none":
             upstream_args["participants"] = _weight_participants(
                 upstream_args.get("participants", []), migration)
     net = ethereum_package.run(plan, upstream_args)
 
-    # Execution clients only. all_participants includes the consensus side too, and a
-    # participant can legitimately have no execution client.
+    # all_participants also includes consensus-only entries with no execution client.
     els = []
     for p in net.all_participants:
         if p.el_context != None:
             els.append(p.el_context)
-    # Only the monitor needs a second opinion. A single-node run is legitimate for
-    # debugging one client in isolation, which is exactly when you least want the package
-    # refusing to start.
+    # A single node is legitimate for isolated debugging; only the monitor needs two.
     if monitor["enabled"] and len(els) < 2:
         fail("pbt_monitor needs at least two execution clients: one node has nobody to " +
              "disagree with. Set pbt_monitor.enabled: false to run a single node.")
@@ -248,21 +174,13 @@ def run(plan, args={}):
         plan.print("  {0} [{1}] {2}".format(el.service_name, el.client_name, el.rpc_http_url))
 
     if monitor["enabled"]:
-        # pbtmonitor stays on in migration mode, deliberately: its only unconditional
-        # genesis assertion is "not the EMPTY merkle root", which a merkle genesis with
-        # an alloc passes, and its same-height cross-client comparison is
-        # boundary-agnostic. The PBT-commitment assertion only arms when
-        # expected_genesis_root is set, which migration args leave as the merkle root.
+        # Stays on in migration mode: its cross-client comparison is boundary-agnostic,
+        # and its genesis assertion only arms when expected_genesis_root is set.
         _launch_monitor(plan, monitor, args, els)
     if hammer["enabled"]:
         _launch_hammer(plan, hammer, els, net.pre_funded_accounts)
     if migration["enabled"]:
-        # Client-onboarding guard: migration mode's evidence contract
-        # (bootstrap shim, digest line, introspection RPCs) exists only for
-        # the clients in the tooling's registry. A participant outside it
-        # would come up merkle-forever and read as a silently thinner run.
-        # A participant without an execution client would also shift every
-        # index-based victim/stake mapping by one.
+        # Guard: migration mode's evidence contract only exists for registered clients.
         for p in net.all_participants:
             if p.el_context == None:
                 fail("pbt_migration needs every participant to run an execution client: " +
@@ -289,8 +207,7 @@ def run(plan, args={}):
 def _launch_monitor(plan, cfg, args, els):
     cmd = []
     for el in els:
-        # name=engineURL,rpcURL — the monitor needs the engine API for its self-test, and
-        # the plain RPC to follow heads.
+        # engineURL,rpcURL: the monitor needs both the engine API and plain RPC.
         cmd += ["--el", "{0}=http://{1}:{2},{3}".format(
             el.service_name, el.ip_addr, el.engine_rpc_port_num, el.rpc_http_url)]
     cmd += ["--jwt", JWT_PATH, "--poll", cfg["poll"], "--probe-every", str(cfg["probe_every"])]
@@ -318,12 +235,9 @@ def _launch_hammer(plan, cfg, els, prefunded):
     cmd = []
     for el in els:
         cmd += ["--rpc", el.rpc_http_url]
-    # Send from the package's own prefunded accounts, taken from the END of the list.
-    # Passing keys in beats pre-funding our own addresses through the genesis generator:
-    # these are funded on whatever network the package just built, whatever its chain id.
+    # Uses the package's own prefunded accounts rather than a separate premine.
     #
-    # The end, not the start: spamoor's chainload spends the low-index accounts and
-    # assertoor takes another. Sharing one is a nonce collision -- see _launch_chaos.
+    # Takes from the end of the list: spamoor/assertoor spend the low-index accounts.
     n = cfg["senders"]
     if n > len(prefunded):
         fail("asked for {0} senders but the network only prefunds {1} accounts".format(
@@ -347,15 +261,9 @@ def _launch_hammer(plan, cfg, els, prefunded):
 
 
 def _chaos_cmd(plan, cfg, args, net, els, hammer_senders, extra_protect, validator_counts):
-    """The reorg service's argv, shared by the plain and gated launches.
-
-    Built once so the gated run cannot drift from the one the tree-at-genesis
-    devnet uses: same endpoints, same accounts, same cadence, with only the
-    stake mapping and the extra protected node added.
-    """
-    # disruptoor is what applies the partitions and the shaping. Without it pbtchaos has
-    # nothing to drive, and a missing selector target is the one failure that looks like
-    # success, so refuse rather than start a no-op.
+    """The reorg service's argv, shared by the plain and gated launches: keeps both
+    on identical endpoints, accounts, and cadence."""
+    # Refuse rather than start a no-op if disruptoor is not wired up.
     services = args.get("additional_services", [])
     if DISRUPTOOR_SERVICE not in services:
         fail("pbt_chaos needs the '" + DISRUPTOOR_SERVICE + "' additional service: " +
@@ -365,8 +273,7 @@ def _chaos_cmd(plan, cfg, args, net, els, hammer_senders, extra_protect, validat
     cmd = ["--disruptoor", "http://{0}:{1}".format(disruptoor.ip_address, DISRUPTOOR_PORT)]
     for el in els:
         cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
-    # Proposer duties come from the consensus layer, so isolation forks can target the node
-    # that is about to build rather than a node at random.
+    # Proposer duties from the consensus layer let isolation target the next proposer.
     for p in net.all_participants:
         if p.cl_context != None:
             cmd += ["--cl", "{0}={1}".format(p.cl_context.beacon_service_name, p.cl_context.beacon_http_url)]
@@ -378,10 +285,7 @@ def _chaos_cmd(plan, cfg, args, net, els, hammer_senders, extra_protect, validat
     if end - n < 0:
         fail("not enough prefunded accounts for pbt_chaos: need {0} below the hammer's {1}".format(
             n, hammer_senders))
-    # ethereum-package hands specific indices to other services: spamoor takes 13 and
-    # assertoor takes 9, both hardcoded upstream. Sharing one with them means both pick the
-    # same nonce and every send after the first is rejected as underpriced -- silently, and
-    # only under load.
+    # spamoor hardcodes account 13, assertoor 9; sharing one causes a silent nonce collision.
     if end - n <= SPAMOOR_ACCOUNT:
         fail(("pbt_chaos would take prefunded accounts {0}..{1}, but spamoor hardcodes {2} " +
               "and assertoor {3}, out of {4} accounts total. Lower pbt_hammer.senders " +
@@ -397,8 +301,7 @@ def _chaos_cmd(plan, cfg, args, net, els, hammer_senders, extra_protect, validat
         "--isolate-min-blocks", str(cfg["isolate_min_blocks"]),
         "--isolate-max-blocks", str(cfg["isolate_max_blocks"]),
 
-        # Mapping a proposer's validator index back to a participant needs the range
-        # size. 128 is ethereum-package's own default, so this agrees when unset.
+        # 128 matches ethereum-package's own default validator range size.
         "--validators-per-node", str(args.get("network_params", {}).get("num_validator_keys_per_node", 128)),
         "--slot-seconds", "{0}s".format(args.get("network_params", {}).get("seconds_per_slot", 12)),
     ]
@@ -430,14 +333,8 @@ def _launch_chaos(plan, cfg, args, net, els, hammer_senders):
 
 
 def _genesis_field(plan, name, jq_filter, fmt):
-    """One value out of the GENERATED genesis.json, or a loud plan failure.
-
-    run_sh's default image ships jq (upstream's own read-osaka-time step relies on
-    exactly that), and a nonzero exit aborts the plan — which is the point: a missing
-    binaryTrieTime means the wrong egg image, and T must never be guessed. fmt "%d"
-    converts genesis.json's hex timestamp to decimal, the same printf trick the pinned
-    ethereum-package uses for the shadowfork block height.
-    """
+    """One value out of the GENERATED genesis.json, or a loud plan failure: a missing
+    binaryTrieTime means the wrong egg image, and T must never be guessed."""
     result = plan.run_sh(
         name=name,
         description="Reading {0} from the generated genesis".format(jq_filter),
@@ -452,26 +349,14 @@ def _genesis_field(plan, name, jq_filter, fmt):
 
 MIGRATION_PROFILES = ["none", "composite", "composite-smoke"]
 
-# Execution clients the migration tooling has an evidence contract for:
-# bootstrap shim, digest line, introspection RPCs, and a registry entry in
-# internal/migmon. Erigon parses binaryTrieTime but rejects any activation
-# later than genesis (its commitment variant is a whole-datadir property
-# fixed at init), so it stays an at-genesis participant until in-place
-# migration exists upstream.
+# Clients with a migration evidence contract (bootstrap shim, introspection RPCs,
+# registry entry). Erigon rejects any binaryTrieTime later than genesis; not ready yet.
 MIGRATION_READY_CLIENTS = ["geth"]
 
 
 def _weight_participants(participants, cfg):
-    """Give the heavy participant its validator share, everyone else the rest.
-
-    Stake is the chaos design, so it is rendered here rather than repeated
-    in every args file: the heavy node's share and the victim role travel
-    together, and a file that set one without the other would produce a
-    devnet whose partitions cannot heal. Isolating a node holding more than
-    a third of the validators stalls finality for the window instead of
-    finalizing past it; with the stake spread evenly the majority finalizes
-    past an isolated node and the survivors ban it for good.
-    """
+    """Give the heavy participant its validator share, everyone else the rest: isolating
+    >1/3 of validators stalls finality instead of the majority finalizing past it."""
     heavy = cfg["heavy_node"]
     out = []
     for i, p in enumerate(participants):
@@ -485,14 +370,8 @@ def _weight_participants(participants, cfg):
 
 
 def _heavy_share(cfg, els):
-    """The heavy participant's share of the validator set.
-
-    Derived from the same numbers that render validator_count, so the chaos
-    driver's admission arithmetic and the chain's actual stake cannot drift
-    apart. The driver refuses a fork-straddling partition whose victim
-    share would make the heal rewind unbounded, and that refusal is only
-    meaningful if this number is the real one.
-    """
+    """The heavy participant's share of the validator set, derived from the same numbers
+    that render validator_count so the chaos driver's admission math cannot drift."""
     heavy = cfg["heavy_validators"]
     total = heavy + (len(els) - 1) * cfg["light_validators"]
     return float(heavy) / float(total)
@@ -504,10 +383,7 @@ def _launch_migration(plan, cfg, args, els, net):
         fail("pbt_migration.chaos_profile must be one of {0}, got {1}".format(
             MIGRATION_PROFILES, profile))
 
-    # The fork time and the genesis time come from the GENERATED genesis,
-    # never recomputed: the generator wrote binaryTrieTime there and every
-    # client reads that file, so the tooling has to see the identical value.
-    # Every window and acceptance check derives from these two numbers.
+    # Read back from the GENERATED genesis rather than recomputed, so tooling matches clients.
     t = _genesis_field(plan, "read-binary-trie-time", ".config.binaryTrieTime", "%s")
     genesis_time = _genesis_field(plan, "read-genesis-time", ".timestamp", "%d")
     plan.print("migration fork: binaryTrieTime={0} genesis_time={1}".format(t, genesis_time))
@@ -533,12 +409,7 @@ def _launch_migration_monitor(plan, cfg, els, t):
     cmd = []
     for el in els:
         cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
-    # The poll cadence stays on the binary's own 2s default. Sampling runs at
-    # 30s rather than the default minute: a measured run at a half-hour
-    # offset accrued only about 37 usable cross-node root samples at one a
-    # minute, which is thin evidence for a chain that produced hundreds of
-    # blocks. JSONL goes to stdout, so `kurtosis service logs` IS the log,
-    # with nothing to mount and nothing to lose.
+    # 30s sampling (not the default minute): the default gave too few cross-node samples.
     cmd += ["--binary-trie-time", t, "--sample-interval", "30s", "--jsonl", "/dev/stdout"]
     ports = {}
     if cfg["monitor_http_port"] > 0:
@@ -553,8 +424,7 @@ def _launch_migration_monitor(plan, cfg, els, t):
 
 
 def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time, net):
-    # Same refusal as _launch_chaos: without disruptoor a chaos driver that starts
-    # cleanly and disrupts nothing is the failure that looks like success.
+    # Same refusal as _launch_chaos: no-op without disruptoor looks like success.
     if DISRUPTOOR_SERVICE not in args.get("additional_services", []):
         fail("pbt_migration.chaos_profile needs the '" + DISRUPTOOR_SERVICE + "' additional " +
              "service: add it to additional_services, or set chaos_profile: none")
@@ -565,11 +435,8 @@ def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time, net):
         cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
     for n in cfg["protect_nodes"]:
         cmd += ["--protect-node", str(n)]
-    # Two dedicated senders for the straddle state injector, one per island.
-    # Accounts 10 and 11 sit in the hole between assertoor's hardcoded 9 and
-    # spamoor's hardcoded 13, which no other service's slice reaches: the
-    # hammer takes from the top of the list and the gated reorg service takes
-    # the run just below it.
+    # Two senders for the straddle injector, from accounts 10-11 (between assertoor's
+    # hardcoded 9 and spamoor's hardcoded 13, so neither collides).
     prefunded = net.pre_funded_accounts
     if len(prefunded) > 11:
         cmd += ["--key", prefunded[10].private_key, "--key", prefunded[11].private_key]
@@ -597,15 +464,8 @@ def _slot_seconds(args):
 
 
 def _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer_senders, t, genesis_time):
-    """Run the tree-at-genesis reorg service behind the migration gate.
-
-    That service's cadence knows nothing about the activation, so it must not
-    touch the network until the switchover is finished. The gate waits for
-    every client to report the migration done, runs one partition of its own
-    on the far side of the boundary, and then execs the service - so
-    disruptoor passes from one owner to the next with no overlap, provable
-    from the timeline alone.
-    """
+    """Runs the tree-at-genesis reorg service behind the migration gate: waits for every
+    client to finish, runs one partition, then execs the service with no overlap."""
     disruptoor = plan.get_service(name=DISRUPTOOR_SERVICE)
     api = "http://{0}:{1}".format(disruptoor.ip_address, DISRUPTOOR_PORT)
 
@@ -625,10 +485,8 @@ def _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer_senders, 
         "--jsonl", "/dev/stdout",
     ]
 
-    # Everything from here on is the command the gate execs once it hands
-    # over. The heavy node joins the protected set for that run: its
-    # scenarios are sized for a light victim, and a deep reorg off a
-    # heavy share after the switchover belongs to the gate's own window.
+    # From here on: the command the gate execs once it hands over, heavy node included
+    # in the protected set (its scenarios are sized for a light victim).
     counts = []
     for i in range(len(els)):
         if i + 1 == migration["heavy_node"]:
@@ -639,13 +497,8 @@ def _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer_senders, 
         plan, chaos, args, net, els, hammer_senders,
         [migration["heavy_node"]], ",".join(counts))
 
-    # No ports are declared, deliberately. Kurtosis waits for a declared
-    # port to accept connections before calling a service started, and this
-    # one listens on nothing until it hands over - which is the whole point,
-    # and is minutes away. The reorg service still binds its API inside the
-    # container once it takes over; reach it with
-    # `kurtosis service exec <enclave> migration-gate -- wget -qO- ...`,
-    # which is what scripts/lap.sh does.
+    # No ports declared: kurtosis would wait for one to accept connections before
+    # calling the service started, and this one binds only once it hands over.
     plan.add_service(
         name="migration-gate",
         config=ServiceConfig(image=migration["gate_image"], cmd=cmd),
