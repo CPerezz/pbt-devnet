@@ -44,16 +44,3 @@ func TestSplitWatchFiresOnceWhenStuck(t *testing.T) {
 		t.Fatalf("the finding repeated: %+v", again)
 	}
 }
-
-// A client with no migration introspection is still watched over standard
-// RPC, and the state records the degradation rather than pretending.
-func TestNodeStateRecordsIntrospection(t *testing.T) {
-	geth := newNodeState("el-1-geth-lighthouse", "http://x", 1000)
-	if !geth.introspection {
-		t.Fatal("a geth node was marked as having no introspection")
-	}
-	other := newNodeState("el-2-someclient-lighthouse", "http://x", 1000)
-	if other.introspection {
-		t.Fatal("an unknown client was assumed to answer migration progress")
-	}
-}

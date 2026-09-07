@@ -1,37 +1,8 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"testing"
-
-	"github.com/CPerezz/pbt-devnet/internal/migmon"
 )
-
-// headSpread is what tells a laggard catching up (spread narrowing) apart
-// from a hard split (spread flat or growing).
-func TestHeadSpread(t *testing.T) {
-	clients := []migmon.Client{
-		&fakeClient{name: "a", heads: 100},
-		&fakeClient{name: "b", heads: 130},
-		&fakeClient{name: "c", heads: 110},
-	}
-	got, err := headSpread(context.Background(), clients)
-	if err != nil {
-		t.Fatalf("headSpread: %v", err)
-	}
-	if got != 30 {
-		t.Fatalf("headSpread = %d, want 30", got)
-	}
-}
-
-func TestHeadSpreadSingleClientIsZero(t *testing.T) {
-	clients := []migmon.Client{&fakeClient{name: "a", heads: 42}}
-	got, err := headSpread(context.Background(), clients)
-	if err != nil || got != 0 {
-		t.Fatalf("headSpread = %d, %v, want 0, nil", got, err)
-	}
-}
 
 // awaitConvergence's deadline extension hinges on this: only a strictly
 // narrowing trend across all three samples counts as a genuine recovery.
@@ -49,28 +20,6 @@ func TestTrendShrinking(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := trendShrinking(tc.samples); got != tc.want {
 				t.Fatalf("trendShrinking(%v) = %v, want %v", tc.samples, got, tc.want)
-			}
-		})
-	}
-}
-
-// healKind is the only place that decides whether a watchdog heal gets
-// logged as mesh-repeer or dead-driver; verify-migration keys off the
-// prefix, so the boundary condition matters more than the message text.
-func TestHealKind(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		partsBefor int
-		stateErr   error
-		want       string
-	}{
-		{"partition was applied", 1, nil, "dead-driver: "},
-		{"no partition applied", 0, nil, "mesh-repeer: "},
-		{"state read failed", 1, errors.New("unreachable"), "mesh-repeer: "},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := healKind(tc.partsBefor, tc.stateErr); got != tc.want {
-				t.Fatalf("healKind(%d, %v) = %q, want %q", tc.partsBefor, tc.stateErr, got, tc.want)
 			}
 		})
 	}

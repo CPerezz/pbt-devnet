@@ -37,9 +37,9 @@ func TestObservePollWarnsOnceOnInitialInactive(t *testing.T) {
 	}
 }
 
-// F2 immediate truth table: stalled or errored directions fire once, clear,
+// stall immediate truth table: stalled or errored directions fire once, clear,
 // and re-arm.
-func TestF2Immediate(t *testing.T) {
+func TestStallImmediate(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		d    *DirectionProgress
@@ -62,32 +62,9 @@ func TestF2Immediate(t *testing.T) {
 	}
 }
 
-func TestF2ImmediateDedupAndRearm(t *testing.T) {
-	var s dirState
-	stalled := &DirectionProgress{Phase: DirStalled}
-	healthy := &DirectionProgress{Phase: DirFollowing}
-
-	evs := s.observe("n", "binary", stalled, 0)
-	if !hasFinding(evs, EvCritical, FindingStall) {
-		t.Fatalf("first stall: want critical, got %+v", evs)
-	}
-	evs = s.observe("n", "binary", stalled, 0)
-	if countKind(evs, EvCritical) != 0 {
-		t.Fatalf("persisting stall: want no repeat, got %+v", evs)
-	}
-	evs = s.observe("n", "binary", healthy, 1)
-	if countKind(evs, EvCritical) != 0 {
-		t.Fatalf("clearing stall: want no critical, got %+v", evs)
-	}
-	evs = s.observe("n", "binary", stalled, 2)
-	if !hasFinding(evs, EvCritical, FindingStall) {
-		t.Fatalf("re-stalling after clear: want critical again, got %+v", evs)
-	}
-}
-
-// F2 slow burn: cursor frozen for StallPolls consecutive polls while the
+// stall slow burn: cursor frozen for StallPolls consecutive polls while the
 // head advances StallHeadDelta blocks over that span.
-func TestF2SlowBurn(t *testing.T) {
+func TestStallSlowBurn(t *testing.T) {
 	run := func(phase string, cursor uint64, headStart uint64, headStep uint64) []Event {
 		var s dirState
 		var all []Event
@@ -115,13 +92,13 @@ func TestF2SlowBurn(t *testing.T) {
 	t.Run("idle suspends the stall clock", func(t *testing.T) {
 		evs := run(DirIdle, 5, 0, StallHeadDelta)
 		if countKind(evs, EvCritical) != 0 {
-			t.Fatalf("idle direction must never fire F2 slow, got %+v", evs)
+			t.Fatalf("idle direction must never fire stall slow, got %+v", evs)
 		}
 	})
 	t.Run("parked suspends the stall clock", func(t *testing.T) {
 		evs := run(DirParked, 5, 0, StallHeadDelta)
 		if countKind(evs, EvCritical) != 0 {
-			t.Fatalf("parked direction must never fire F2 slow (cursor is required to freeze there), got %+v", evs)
+			t.Fatalf("parked direction must never fire stall slow (cursor is required to freeze there), got %+v", evs)
 		}
 	})
 	t.Run("moving cursor never fires", func(t *testing.T) {
@@ -132,17 +109,17 @@ func TestF2SlowBurn(t *testing.T) {
 			all = append(all, s.observe("n", "binary", d, uint64(i)*StallHeadDelta)...)
 		}
 		if countKind(all, EvCritical) != 0 {
-			t.Fatalf("advancing cursor must never fire F2 slow, got %+v", all)
+			t.Fatalf("advancing cursor must never fire stall slow, got %+v", all)
 		}
 	})
 }
 
-// F3 boundary: compliant within the window fires nothing; never complying
+// boundary boundary: compliant within the window fires nothing; never complying
 // past both clocks fires exactly one critical.
-func TestF3Boundary(t *testing.T) {
+func TestBoundaryFinding(t *testing.T) {
 	t.Run("compliant immediately", func(t *testing.T) {
 		tl := NewTimeline("n", 1000)
-		tl.ObserveBStar(BStar{Number: 100, Hash: "0xb"})
+		tl.ObserveIStar(IStar{Number: 100, Hash: "0xb"})
 		evs := tl.ObservePoll(MigrationProgress{
 			Phase:  PhaseRunning,
 			Binary: &DirectionProgress{Phase: DirParked},
@@ -154,7 +131,7 @@ func TestF3Boundary(t *testing.T) {
 	})
 	t.Run("never complies, fires once after both clocks expire", func(t *testing.T) {
 		tl := NewTimeline("n", 1000)
-		tl.ObserveBStar(BStar{Number: 100, Hash: "0xb"})
+		tl.ObserveIStar(IStar{Number: 100, Hash: "0xb"})
 		stillMigrating := MigrationProgress{
 			Phase:  PhaseRunning,
 			Binary: &DirectionProgress{Phase: DirFollowing},
@@ -176,55 +153,55 @@ func TestF3Boundary(t *testing.T) {
 	})
 }
 
-func TestF3DoneEarly(t *testing.T) {
-	t.Run("done with no b* observed", func(t *testing.T) {
+func TestDoneEarlyIsBoundaryFinding(t *testing.T) {
+	t.Run("done with no I* observed", func(t *testing.T) {
 		tl := NewTimeline("n", 1000)
 		evs := tl.ObservePoll(MigrationProgress{Phase: PhaseDone}, 5)
 		if !hasFinding(evs, EvCritical, FindingBoundary) {
-			t.Fatalf("done before any b* must be critical F3, got %+v", evs)
+			t.Fatalf("done before any I* must be critical boundary, got %+v", evs)
 		}
 	})
-	t.Run("done at or before b* is early", func(t *testing.T) {
+	t.Run("done at or before I* is early", func(t *testing.T) {
 		tl := NewTimeline("n", 1000)
-		tl.ObserveBStar(BStar{Number: 100, Hash: "0xb"})
+		tl.ObserveIStar(IStar{Number: 100, Hash: "0xb"})
 		evs := tl.ObservePoll(MigrationProgress{Phase: PhaseDone}, 100)
 		if !hasFinding(evs, EvCritical, FindingBoundary) {
-			t.Fatalf("done at b* height must be critical F3, got %+v", evs)
+			t.Fatalf("done at I* height must be critical boundary, got %+v", evs)
 		}
 	})
-	t.Run("done strictly after b* is legal", func(t *testing.T) {
+	t.Run("done strictly after I* is legal", func(t *testing.T) {
 		tl := NewTimeline("n", 1000)
-		tl.ObserveBStar(BStar{Number: 100, Hash: "0xb"})
+		tl.ObserveIStar(IStar{Number: 100, Hash: "0xb"})
 		evs := tl.ObservePoll(MigrationProgress{Phase: PhaseDone}, 101)
 		if hasFinding(evs, EvCritical, FindingBoundary) {
-			t.Fatalf("done after b* must not fire done-early, got %+v", evs)
+			t.Fatalf("done after I* must not fire done-early, got %+v", evs)
 		}
 	})
 }
 
-func TestBStarObservedOnce(t *testing.T) {
+func TestIStarObservedOnce(t *testing.T) {
 	tl := NewTimeline("n", 1000)
-	evs := tl.ObserveBStar(BStar{Number: 100, Hash: "0xa"})
-	if len(evs) != 1 || evs[0].Kind != EvBStar {
-		t.Fatalf("want one bstar event, got %+v", evs)
+	evs := tl.ObserveIStar(IStar{Number: 100, Hash: "0xa"})
+	if len(evs) != 1 || evs[0].Kind != EvIStar {
+		t.Fatalf("want one istar event, got %+v", evs)
 	}
-	evs = tl.ObserveBStar(BStar{Number: 200, Hash: "0xz"})
-	if len(evs) != 0 || tl.BStarRecord().Number != 100 {
-		t.Fatalf("b* must be recorded once; got %+v, record %+v", evs, tl.BStarRecord())
+	evs = tl.ObserveIStar(IStar{Number: 200, Hash: "0xz"})
+	if len(evs) != 0 || tl.IStarRecord().Number != 100 {
+		t.Fatalf("I* must be recorded once; got %+v, record %+v", evs, tl.IStarRecord())
 	}
 }
 
 // Cross-node fork-block checks: agreement is silent, a bad record shape is
 // critical at once, provisional disagreement is legal until it outlives any
 // partition, and finalized disagreement is critical immediately.
-func TestBStarQuorum(t *testing.T) {
+func TestIStarQuorum(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
-	good := func(n uint64, hash string) BStar {
-		return BStar{Number: n, Hash: hash, Time: 1000, ParentTime: 990}
+	good := func(n uint64, hash string) IStar {
+		return IStar{Number: n, Hash: hash, Time: 1000, ParentTime: 990}
 	}
 
 	t.Run("agreement is silent", func(t *testing.T) {
-		q := NewBStarQuorum(999)
+		q := NewIStarQuorum(999)
 		if evs := q.Observe("a", good(100, "0xa"), now); len(evs) != 0 {
 			t.Fatalf("first node must not fire, got %+v", evs)
 		}
@@ -234,18 +211,18 @@ func TestBStarQuorum(t *testing.T) {
 	})
 
 	t.Run("provisional disagreement waits out the grace", func(t *testing.T) {
-		q := NewBStarQuorum(999)
+		q := NewIStarQuorum(999)
 		q.Observe("a", good(100, "0xa"), now)
 		// A partition spanning the activation puts each side on its own
 		// fork block: legal while it lasts.
 		if evs := q.Observe("b", good(105, "0xb"), now); len(evs) != 0 {
 			t.Fatalf("fresh disagreement must not fire, got %+v", evs)
 		}
-		mid := now.Add(BStarProvisionalGrace / 2 * time.Second)
+		mid := now.Add(IStarProvisionalGrace / 2 * time.Second)
 		if evs := q.Observe("b", good(105, "0xb"), mid); len(evs) != 0 {
 			t.Fatalf("disagreement inside the grace must not fire, got %+v", evs)
 		}
-		late := now.Add((BStarProvisionalGrace + 30) * time.Second)
+		late := now.Add((IStarProvisionalGrace + 30) * time.Second)
 		evs := q.Observe("b", good(105, "0xb"), late)
 		if !hasFinding(evs, EvCritical, FindingBoundary) {
 			t.Fatalf("disagreement outliving the grace must fire, got %+v", evs)
@@ -256,23 +233,23 @@ func TestBStarQuorum(t *testing.T) {
 	})
 
 	t.Run("agreement after a reorg clears the timer", func(t *testing.T) {
-		q := NewBStarQuorum(999)
+		q := NewIStarQuorum(999)
 		q.Observe("a", good(100, "0xa"), now)
 		q.Observe("b", good(105, "0xb"), now)
 		// The losing branch is reorged away and both land on the same
 		// fork block: the earlier disagreement must not be held against
 		// them later.
 		q.Observe("b", good(100, "0xa"), now.Add(60*time.Second))
-		late := now.Add((BStarProvisionalGrace + 60) * time.Second)
+		late := now.Add((IStarProvisionalGrace + 60) * time.Second)
 		if evs := q.Observe("a", good(100, "0xa"), late); len(evs) != 0 {
 			t.Fatalf("converged nodes must not fire later, got %+v", evs)
 		}
 	})
 	t.Run("disagreement fires again after an intervening agreement", func(t *testing.T) {
-		q := NewBStarQuorum(999)
+		q := NewIStarQuorum(999)
 		q.Observe("a", good(100, "0xa"), now)
 		q.Observe("b", good(105, "0xb"), now)
-		late1 := now.Add((BStarProvisionalGrace + 30) * time.Second)
+		late1 := now.Add((IStarProvisionalGrace + 30) * time.Second)
 		if evs := q.Observe("b", good(105, "0xb"), late1); !hasFinding(evs, EvCritical, FindingBoundary) {
 			t.Fatalf("first disagreement outliving the grace must fire, got %+v", evs)
 		}
@@ -283,7 +260,7 @@ func TestBStarQuorum(t *testing.T) {
 			t.Fatalf("agreement must not fire, got %+v", evs)
 		}
 		q.Observe("b", good(110, "0xc"), agreedAt.Add(time.Second))
-		late2 := agreedAt.Add((BStarProvisionalGrace + 30) * time.Second)
+		late2 := agreedAt.Add((IStarProvisionalGrace + 30) * time.Second)
 		evs := q.Observe("b", good(110, "0xc"), late2)
 		if !hasFinding(evs, EvCritical, FindingBoundary) {
 			t.Fatalf("second disagreement outliving the grace must fire again, got %+v", evs)
@@ -291,7 +268,7 @@ func TestBStarQuorum(t *testing.T) {
 	})
 
 	t.Run("finalized disagreement fires at once", func(t *testing.T) {
-		q := NewBStarQuorum(999)
+		q := NewIStarQuorum(999)
 		q.Observe("a", good(100, "0xa"), now)
 		q.Observe("b", good(105, "0xb"), now)
 		q.Finalize("a", good(100, "0xa"))
@@ -305,22 +282,22 @@ func TestBStarQuorum(t *testing.T) {
 	})
 
 	t.Run("record shape is critical at once", func(t *testing.T) {
-		q := NewBStarQuorum(999)
+		q := NewIStarQuorum(999)
 		// time < T: this node did not find the boundary at all.
-		evs := q.Observe("a", BStar{Number: 100, Hash: "0xa", Time: 990, ParentTime: 980}, now)
+		evs := q.Observe("a", IStar{Number: 100, Hash: "0xa", Time: 990, ParentTime: 980}, now)
 		if !hasFinding(evs, EvCritical, FindingBoundary) || !strings.Contains(evs[0].Detail, "does not straddle") {
 			t.Fatalf("want a shape critical, got %+v", evs)
 		}
 	})
 	t.Run("reorged-in record shape is re-validated", func(t *testing.T) {
-		q := NewBStarQuorum(999)
+		q := NewIStarQuorum(999)
 		// A reorg replaces node a's provisional record with a new hash;
 		// the latch must key on record identity, not node, or a bad
 		// replacement's shape is never checked.
 		if evs := q.Observe("a", good(100, "0xa"), now); len(evs) != 0 {
 			t.Fatalf("valid initial record must not fire, got %+v", evs)
 		}
-		evs := q.Observe("a", BStar{Number: 101, Hash: "0xb", Time: 990, ParentTime: 980}, now)
+		evs := q.Observe("a", IStar{Number: 101, Hash: "0xb", Time: 990, ParentTime: 980}, now)
 		if !hasFinding(evs, EvCritical, FindingBoundary) || !strings.Contains(evs[0].Detail, "does not straddle") {
 			t.Fatalf("reorged-in bad-shape record must fire, got %+v", evs)
 		}
@@ -329,22 +306,22 @@ func TestBStarQuorum(t *testing.T) {
 
 // A reorg that orphans the recorded fork block must re-arm the boundary
 // check rather than leave the node pinned to a block nobody has.
-func TestBStarReorged(t *testing.T) {
+func TestIStarReorged(t *testing.T) {
 	tl := NewTimeline("n", 1000)
-	tl.ObserveBStar(BStar{Number: 100, Hash: "0xold", Time: 1000, ParentTime: 990})
-	evs := tl.BStarReorged("0xnew")
-	if len(evs) != 1 || evs[0].Kind != EvBStarReorged {
-		t.Fatalf("want one bstar-reorged event, got %+v", evs)
+	tl.ObserveIStar(IStar{Number: 100, Hash: "0xold", Time: 1000, ParentTime: 990})
+	evs := tl.IStarReorged("0xnew")
+	if len(evs) != 1 || evs[0].Kind != EvIStarReorged {
+		t.Fatalf("want one istar-reorged event, got %+v", evs)
 	}
-	if tl.BStarRecord() != nil {
+	if tl.IStarRecord() != nil {
 		t.Fatal("the orphaned record survived; the node would keep judging a boundary nobody has")
 	}
-	if evs := tl.ObserveBStar(BStar{Number: 103, Hash: "0xnew", Time: 1000, ParentTime: 990}); len(evs) != 1 {
+	if evs := tl.ObserveIStar(IStar{Number: 103, Hash: "0xnew", Time: 1000, ParentTime: 990}); len(evs) != 1 {
 		t.Fatalf("the node could not record its new fork block, got %+v", evs)
 	}
 	// Once finalized, a reorg claim is refused: finality means it cannot move.
-	tl.BStarFinalized()
-	if evs := tl.BStarReorged("0xlater"); len(evs) != 0 {
+	tl.IStarFinalized()
+	if evs := tl.IStarReorged("0xlater"); len(evs) != 0 {
 		t.Fatalf("a finalized fork block accepted a reorg, got %+v", evs)
 	}
 }

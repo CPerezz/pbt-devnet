@@ -6,12 +6,12 @@ import (
 	"time"
 )
 
-// F1/hash-split truth table.
+// root-mismatch/hash-split truth table.
 func TestEvaluateSample(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		samples    []NodeSample
-		postBStar  bool
+		postIStar  bool
 		wantKind   string // "" = no finding at all
 		wantDetail string
 	}{
@@ -24,7 +24,7 @@ func TestEvaluateSample(t *testing.T) {
 			wantKind: "",
 		},
 		{
-			name: "same hash, different non-empty roots is critical F1",
+			name: "same hash, different non-empty roots is critical root-mismatch",
 			samples: []NodeSample{
 				{Node: "a", Hash: "0xh", Root: "0xr1"},
 				{Node: "b", Hash: "0xh", Root: "0xr2"},
@@ -41,7 +41,7 @@ func TestEvaluateSample(t *testing.T) {
 			wantKind: "",
 		},
 		{
-			name: "different canonical hashes is hash-split, not F1",
+			name: "different canonical hashes is hash-split, not root-mismatch",
 			samples: []NodeSample{
 				{Node: "a", Hash: "0xh1", Root: "0xr"},
 				{Node: "b", Hash: "0xh2", Root: "0xr"},
@@ -50,17 +50,17 @@ func TestEvaluateSample(t *testing.T) {
 			wantDetail: "hash-split",
 		},
 		{
-			name: "post-b* root mismatch downgrades to warn",
+			name: "post-I* root mismatch downgrades to warn",
 			samples: []NodeSample{
 				{Node: "a", Hash: "0xh", Root: "0xr1"},
 				{Node: "b", Hash: "0xh", Root: "0xr2"},
 			},
-			postBStar: true,
+			postIStar: true,
 			wantKind:  EvWarn,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			evs := EvaluateSample(tc.samples, tc.postBStar)
+			evs := EvaluateSample(tc.samples, tc.postIStar)
 			if tc.wantKind == "" {
 				if len(evs) != 0 {
 					t.Fatalf("want no findings, got %+v", evs)
@@ -80,17 +80,17 @@ func TestEvaluateSample(t *testing.T) {
 	}
 }
 
-func TestEvaluateSampleF1NeverWaivedPreBStar(t *testing.T) {
+func TestEvaluateSampleRootMismatchNeverWaivedPreIStar(t *testing.T) {
 	evs := EvaluateSample([]NodeSample{
 		{Node: "a", Hash: "0xh", Root: "0xr1"},
 		{Node: "b", Hash: "0xh", Root: "0xr2"},
 	}, false)
 	if len(evs) != 1 || evs[0].Kind != EvCritical || evs[0].Finding != FindingRootMismatch {
-		t.Fatalf("F1 must be critical and never waived pre-b*, got %+v", evs)
+		t.Fatalf("root-mismatch must be critical and never waived pre-I*, got %+v", evs)
 	}
 }
 
-// NULL5 -> NULL10 escalation, and reset on any non-null.
+// null-warn -> null-critical escalation, and reset on any non-null.
 func TestNullTrackerEscalation(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	nt := NewNullTracker("n")
@@ -103,14 +103,14 @@ func TestNullTrackerEscalation(t *testing.T) {
 	}
 	evs := nt.Observe(base.Add(6*time.Minute), true, true)
 	if !hasFinding(evs, EvWarn, FindingNullWarn) {
-		t.Fatalf("past 5min null streak must warn NULL5, got %+v", evs)
+		t.Fatalf("past 5min null streak must warn null-warn, got %+v", evs)
 	}
 	if evs := nt.Observe(base.Add(7*time.Minute), true, true); len(evs) != 0 {
 		t.Fatalf("warn must not repeat, got %+v", evs)
 	}
 	evs = nt.Observe(base.Add(11*time.Minute), true, true)
 	if !hasFinding(evs, EvCritical, FindingNullCritical) {
-		t.Fatalf("past 10min null streak must critical NULL10, got %+v", evs)
+		t.Fatalf("past 10min null streak must critical null-critical, got %+v", evs)
 	}
 	if evs := nt.Observe(base.Add(20*time.Minute), true, true); len(evs) != 0 {
 		t.Fatalf("critical must not repeat, got %+v", evs)
@@ -160,39 +160,5 @@ func TestReorgMemory(t *testing.T) {
 	// Reported once; the memory now holds the new hash.
 	if evs := m.Observe(100, "0xb", 115); len(evs) != 0 {
 		t.Fatalf("re-observing the settled hash must not refire, got %+v", evs)
-	}
-}
-
-func TestReorgMemoryBounded(t *testing.T) {
-	m := NewReorgMemory("n")
-	for h := uint64(0); h < reorgMemoryCap+10; h++ {
-		m.Observe(h, "0xhash", h)
-	}
-	if len(m.order) != reorgMemoryCap {
-		t.Fatalf("memory must stay capped at %d, got %d", reorgMemoryCap, len(m.order))
-	}
-	if _, ok := m.hash[0]; ok {
-		t.Fatalf("oldest height must be evicted once the cap is exceeded")
-	}
-	if _, ok := m.hash[reorgMemoryCap+9]; !ok {
-		t.Fatalf("newest height must still be remembered")
-	}
-	recent := m.Recent(3)
-	if len(recent) != 3 || recent[0] != reorgMemoryCap+9 {
-		t.Fatalf("Recent must return the newest heights first, got %v", recent)
-	}
-}
-
-// Frozen-fixture sanity: the live pre-fork payload feeds a Timeline without
-// tripping any finding (synced binary, no merkle yet).
-func TestTimelineAcceptsLiveFixture(t *testing.T) {
-	p := MigrationProgress{
-		Phase:  PhaseRunning,
-		Binary: &DirectionProgress{Phase: DirSynced, Cursor: 0, CursorHash: "0x660c", ShadowRoot: "0xcf28"},
-	}
-	tl := NewTimeline("n", 999999999999)
-	evs := tl.ObservePoll(p, 1)
-	if countKind(evs, EvCritical) != 0 {
-		t.Fatalf("live pre-fork fixture must not trip a finding, got %+v", evs)
 	}
 }

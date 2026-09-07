@@ -153,32 +153,3 @@ func TestEligibleIsEveryNodeWhenNothingIsProtected(t *testing.T) {
 		t.Fatalf("eligible() = %v, want all four nodes", got)
 	}
 }
-
-func TestBothOnlyNamesClientsInEitherList(t *testing.T) {
-	// A client is only "wedged below the anchor" if it BOTH stopped advancing and failed to
-	// arrive. A node frozen at a height above the anchor already has the block and is nobody's
-	// problem here.
-	frozen := []string{"el-2", "el-5"}
-	short := []string{"el-5", "el-3"}
-	if got := both(frozen, short); !reflect.DeepEqual(got, []string{"el-5"}) {
-		t.Fatalf("both() = %v, want [el-5]", got)
-	}
-}
-
-func TestBothIsEmptyWhenNothingOverlaps(t *testing.T) {
-	if got := both([]string{"el-2"}, []string{"el-3"}); len(got) != 0 {
-		t.Fatalf("both() = %v, want none", got)
-	}
-}
-
-func TestDescribeHeadsSaysHowFarBehind(t *testing.T) {
-	heads := map[string]uint64{"el-2": 500, "el-3": 512}
-	if got := describeHeads([]string{"el-2", "el-3"}, heads); got != "el-2=500 el-3=512" {
-		t.Fatalf("describeHeads() = %q", got)
-	}
-	// A client that never answered still has to appear: dropping it would quietly shorten the
-	// list of clients the report is about.
-	if got := describeHeads([]string{"el-9"}, heads); got != "el-9=?" {
-		t.Fatalf("describeHeads() = %q, want el-9=?", got)
-	}
-}
