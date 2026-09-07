@@ -1,15 +1,8 @@
-# Config for the PBT devnet. Everything except the three pbt_* blocks at the bottom is
-# ethpandaops/ethereum-package's own schema — it sanity-checks its input and fails on any
-# key it does not recognise, so consult its README rather than inventing fields here.
+# PBT-at-genesis devnet, six clients under test. Non-pbt_* keys are ethereum-package schema.
 
 participants:
-  # Pairs of each client, configured differently within a pair: one binary agreeing with
-  # itself proves nothing. Enough nodes that isolating one still leaves the majority above
-  # 2/3, which is what finality needs.
-  #
-  # PARTICIPANT 1 IS THE BOOTNODE. ethereum-package gives the first participant no
-  # --boot-nodes of its own, so partitioning it strands it with nothing to rediscover
-  # through. pbt_chaos.protect_nodes keeps it out of the rotation.
+  # Pairs of each client; isolating one still leaves the majority above 2/3 for finality.
+  # Participant 1 is the bootnode (no --boot-nodes of its own) and is never disrupted.
   - el_type: geth
     el_image: pbt-geth:local
     cl_type: lighthouse
@@ -20,8 +13,6 @@ participants:
     el_image: pbt-geth:local
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
-    # Part of the full-sync condition in geth_launcher.star. The binary tree refuses snap
-    # sync outright, so this is not a preference.
     checkpoint_sync_enabled: false
     el_extra_params: ["--state.size-tracking"]
 
@@ -31,21 +22,14 @@ participants:
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
     el_storage_type: archive
-    # The archive branch of geth_launcher.star emits --gcmode=archive and NO --syncmode at
-    # all, so geth would fall back to snap. Because the launcher passes nothing here, this
-    # is an addition rather than a conflicting duplicate.
     el_extra_params: ["--syncmode=full"]
 
-  # The second implementation, and the whole point: geth agreeing with geth shows
-  # consistency, geth agreeing with besu shows correctness.
   - el_type: besu
     el_image: besu-pbt:local
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    # Besu's switch for the tree. Must NOT be combined with el_storage_type: archive —
-    # that makes besu_launcher.star append --data-storage-format=FOREST, which contradicts
-    # BINARY.
+    # Do not combine with el_storage_type: archive, which forces FOREST and conflicts with BINARY.
     el_extra_params: ["--data-storage-format=BINARY"]
 
   - el_type: besu
@@ -53,19 +37,8 @@ participants:
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    # The same tree, but every trie log kept instead of pruned to the default window.
-    #
-    # This is the axis that matters for reorgs: besu unwinds a branch by REVERSING trie
-    # logs where geth replaces layers, and a missing log is the mechanism behind the
-    # StateRootMismatchException in issue #7. If the pruning besu above fails a deep reorg
-    # and this one survives it, the difference names the cause. The differentiator is
-    # deliberately the MORE capable config — a crippled node would manufacture failures
-    # rather than isolate one.
     el_extra_params: ["--data-storage-format=BINARY", "--bonsai-limit-trie-logs-enabled=false"]
 
-  # No trie configuration: erigon reads binaryTrieTime out of the genesis and records the
-  # tree, with blake3, when `erigon init` creates the datadir. build-images.sh gates on the
-  # checkout being new enough to do that.
   - el_type: erigon
     el_image: erigon-pbt:local
     cl_type: lighthouse
@@ -77,61 +50,27 @@ participants:
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    # Keeps the commitment history, so this node can answer for a trie root it has already
-    # unwound past. A flag rather than an env var: it is read at node start, not by init.
     el_extra_params: ["--prune.include-commitment-history"]
 
 network_params:
-  # Load-bearing, and its effect is indirect. The geth and besu launchers choose full sync
-  # only when the network is named "kurtosis"; any custom name silently yields
-  # --syncmode=snap / --sync-mode=SNAP, which the binary tree refuses, and the engine API
-  # then goes quiet. For erigon it is PUBLIC_NETWORKS membership that matters instead: a
-  # public name skips the `erigon init` prefix and the node comes up with no genesis.
   network: "kurtosis"
-  # mainnet, NOT minimal. Under minimal the consensus clients lose every peer a few minutes
-  # in and never reconnect, so the devnet splits into separate chains that each look
-  # healthy. Deterministic, and `make diagnose` shows it as a divergence exactly where the
-  # peer count hit zero.
   preset: mainnet
   seconds_per_slot: 6
   genesis_delay: 20
-  # PBT is a property of the chain from genesis and requires Amsterdam, so the execution
-  # layer is Amsterdam at block 0 — which forces the consensus layer to be Gloas at slot 0.
   fulu_fork_epoch: 0
   gloas_fork_epoch: 0
 
 ethereum_genesis_generator_params:
-  # Fork of ethereum-genesis-generator: emits "binaryTrieTime" — ONE key, taken by every
-  # client — into genesis.json, and bundles a fork of eth-beacon-genesis that derives the
-  # consensus genesis from the binary-tree block hash instead of a merkle-patricia one.
-  # Build with scripts/build-images.sh.
-  #
-  # The PBT env var below is named after the retired `"pbt": true` boolean; it now selects
-  # the activation timestamp. The name is historical, the behaviour is not.
   image: pbt-egg:local
   extra_env:
     PBT: "true"
 
-# Deliberately NO builder. buildoor wires one shared builder to participant 0's execution
-# client, so every payload on the chain would be built by that one node and the others
-# would only ever import — precisely the half of each client this harness exists to
-# compare. Without it each proposer builds locally through its own engine API, so every
-# client both proposes and validates.
-#
-# ORDER IS PART OF THE CONTRACT: published host ports are
-# port_publisher.additional_services.public_port_start + 2*index, so reordering this list
-# silently moves every UI. `make ui` reads the real ports rather than assuming these.
+# Order matters: published host ports are public_port_start + 2*index.
 additional_services:
   - dora        # 36000  block explorer
   - spamoor     # 36002  transaction spammer + UI
   - assertoor   # 36004  test playbooks + UI
   - disruptoor  # 36006  partition and latency injection (needs `kurtosis run --privileged`)
-  #
-  # forky is deliberately absent. Under Gloas the beacon block carries no execution payload,
-  # so lighthouse reports `validity: null` for every fork-choice node and forky's parser
-  # discards the whole dump -- it renders nothing and logs an error per node per slot. The
-  # newest image is the one that fails and upstream has no fix. Use `make forks`, and Dora's
-  # /forks page, both of which read APIs that Gloas did not change.
 
 port_publisher:
   additional_services:
@@ -142,12 +81,6 @@ dora_params:
   image: ethpandaops/dora:latest
 
 spamoor_params:
-  # Setting `spammers` REPLACES both built-in defaults, so everything wanted is listed.
-  # Scenarios chosen for what the binary tree changed rather than for raw throughput; the
-  # hammer covers the shapes spamoor has no scenario for (zeroization, shared code,
-  # 7702 clear-to-zero).
-  # The built-in chain-load group is off: it adds unmeasured traffic on top of the four
-  # spammers below, and it is what backs up into a partitioned minority.
   start_chainload: false
   start_fuzzing: false
   spammers:
@@ -165,47 +98,17 @@ spamoor_params:
       config: {throughput: 3, max_pending: 6, max_wallets: 10, base_fee: 20}
 
 assertoor_params:
-  # Stability is off because this devnet destabilises itself: pbtchaos reorgs every 15-30
-  # blocks, and the check asserts <=2 reorgs per epoch and a fork distance <=3, which this
-  # devnet breaks by design.
   run_stability_check: false
-  # This one is safe under reorgs: it watches the block-event stream rather than the
-  # canonical chain, so a proposal still counts after being orphaned.
   run_block_proposal_check: true
-  # Independent execution coverage: EOA transfers in legacy and dynamic-fee envelopes, from
-  # and via every client pair.
   run_transaction_test: true
-  # Entries may be a path OR an http(s) URL: assertoor fetches remote playbooks, and the
-  # launcher passes each string through as {"file": ...}. So a curated upstream check needs
-  # no file mounting.
-  #
-  # synchronized-check is the one that matters here. It watches every client pair's CL and EL
-  # sync status for the length of the run, which is exactly the failure this devnet produces
-  # on its own: a node that is partitioned, healed, and then never rebuilds its peer set sits
-  # quietly behind forever. `make repeer` is the repair; this is what notices.
   tests:
     - https://raw.githubusercontent.com/ethpandaops/assertoor/master/playbooks/dev/synchronized-check.yaml
 
-  # Deliberately NOT enabled, all for the same reason -- reorgs break their assumptions:
-  #   run_opcodes_transaction_test  chains calls through a previous deploy, and asserts a
-  #                                 fork distance of 1. Worth running by hand when quiet.
-  #   run_blob_transaction_test     an orphaned blob block cannot satisfy minBlobCount.
-  #   run_lifecycle_test            wants ~500 validators and 48-72h of finality.
-
-# Chaos sidecar. pbtchaos drives disruptoor continuously, so the default devnet is NOT
-# quiet: expect a reorg every 15-30 blocks. `make scenario` queues one of the six state
-# scenarios; `make split` / `make heal` write to disruptoor directly, outside that queue.
 disruptoor_params:
   image: ethpandaops/disruptoor:latest
 
 ### Everything below is ours, not ethereum-package's.
-#
-# The defaults live in main.star (DEFAULT_HAMMER, DEFAULT_CHAOS, DEFAULT_MONITOR) and this
-# devnet runs entirely on them, so nothing is set here. Add a block only to override a key.
-#
-#   pbt_hammer   Transaction load. Raising interval, batch or code_size raises block
-#                fullness -- keep blocks under HALF the gas limit or the base fee compounds
-#                until nothing can be paid for.
-#   pbt_chaos    Reorgs, ON by default. `enabled: false` for the quiet baseline that
-#                `make proposals` needs.
-#   pbt_monitor  The state-root divergence watch, with a self-proving oracle.
+# Defaults live in main.star; add a block only to override a key.
+#   pbt_hammer   Transaction load; keep blocks under half the gas limit.
+#   pbt_chaos    Reorgs, on by default.
+#   pbt_monitor  State-root divergence watch.

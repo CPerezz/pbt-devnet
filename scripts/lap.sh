@@ -1,34 +1,22 @@
 #!/usr/bin/env bash
-# Drive one migration run end to end: start the devnet, follow it in the
-# terminal, do the host-side work the schedule leaves room for, dump the
-# evidence and judge it.
-#
-# The point of this script is that a run is followable and repeatable
-# without a person watching a browser for an hour. It prints one line per
-# state change from the monitor's own view, restarts a node in the gap the
-# schedule leaves for it, asks the reorg service for its scenarios once the
-# migration is done, and finishes by running the acceptance checks.
+# Drive one migration run end to end: start, restart a node in the schedule's
+# gap, run the post-switchover scenarios, quiesce, dump evidence, judge.
 set -euo pipefail
 
 ENCLAVE="${ENCLAVE:-pbt}"
 ARGS="${ARGS:-args/migration-composite.yaml}"
 OUT="${OUT:-/tmp/$ENCLAVE-lap}"
-# Host-side node restart, in the gap the schedule leaves clear. Empty skips
-# it; the node must be a light one, never the heavy victim.
+# Host-side node restart in the schedule's gap; 0 skips it. Never the heavy victim.
 RESTART_NODE="${RESTART_NODE:-4}"
 RESTART_AT="${RESTART_AT:-1000}"   # seconds after genesis
 RESTART_FOR="${RESTART_FOR:-60}"
-# Scenarios to ask the reorg service for after the switchover: the full
-# at-genesis suite by default, because phase 3's contract is "everything the
-# at-genesis devnet tested, now on the post-fork tree".
+# Post-switchover scenarios: the full at-genesis suite by default.
 SCENARIOS="${SCENARIOS:-code-sole code-shared delegate account storage-add storage-del}"
 SCENARIO_DEPTH="${SCENARIO_DEPTH:-8}"
 # The reorg service's API port inside the enclave, matching main.star.
 CHAOS_PORT="${CHAOS_PORT:-7800}"
 
-# Optional heavy-victim override: rewrites pbt_migration.heavy_node into a
-# temp copy of the args file, so victim placement is a lap parameter instead
-# of a hardcoded participant. Empty keeps the args file's own value.
+# HEAVY=<n> rewrites pbt_migration.heavy_node into a temp copy of the args file.
 HEAVY="${HEAVY:-}"
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 mkdir -p "$OUT"
@@ -64,52 +52,12 @@ fi
 say "genesis=$GENESIS fork=$FORK (offset $((FORK - GENESIS))s)"
 printf 'enclave=%s\nargs=%s\ngenesis=%s\nfork=%s\n' "$ENCLAVE" "$ARGS" "$GENESIS" "$FORK" > "$OUT/lap.env"
 
-# The monitor's own view, if it is serving one: this is what makes a lap
-# followable from the terminal that launched it.
-STATE_URL=""
 if port=$(kurtosis port print "$ENCLAVE" migration-monitor http 2>/dev/null); then
-  STATE_URL="$port/api/state"
   say "live view: $port"
 fi
 
-# Follow the run: print one line per change rather than a stream nobody can
-# read. Runs until the chain is done and the post-switchover work finishes.
-follow() {
-  local last=""
-  while :; do
-    sleep 20
-    [ -n "$STATE_URL" ] || continue
-    local line
-    line=$(curl -s --max-time 5 "$STATE_URL" 2>/dev/null | python3 -c '
-import json,sys
-try:
-    s = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-parts = []
-for n in s.get("nodes", []):
-    tag = n.get("phase") or ("no introspection" if not n.get("introspection") else "?")
-    fb = n.get("fork_block") or {}
-    if fb.get("number"):
-        tag += " fork@%s%s" % (fb["number"], "" if fb.get("final") else "?")
-    parts.append("%s=%s/%s" % (n["name"].split("-")[1], n.get("head", 0), tag))
-ev = s.get("events") or []
-notable = [e for e in ev if e.get("kind") in ("critical", "reorg", "bstar-reorged")]
-tail = ""
-if notable:
-    e = notable[-1]
-    tail = " | %s %s %s" % (e.get("kind"), e.get("finding", ""), (e.get("detail") or "")[:70])
-print("to-fork=%ss %s%s" % (int(s.get("seconds_to_fork", 0)), " ".join(parts), tail))
-' 2>/dev/null) || true
-    if [ -n "$line" ] && [ "$line" != "$last" ]; then say "$line"; last="$line"; fi
-  done
-}
-follow & FOLLOW=$!
-trap 'kill $FOLLOW 2>/dev/null || true' EXIT
 
-# Host-side restart, inside the gap the schedule leaves for it. The published
-# RPC port changes when a service restarts, so nothing may cache URLs across
-# this point.
+# The published RPC port changes across a restart; never cache URLs past this point.
 restart_at_unix=""
 if [ -n "$RESTART_NODE" ] && [ "$RESTART_NODE" != "0" ]; then
   target=$((GENESIS + RESTART_AT))
@@ -140,13 +88,8 @@ else
   say "no client reported the migration done before the deadline; judging anyway"
 fi
 
-# Scenarios, if the reorg service is running behind the gate. Its API is
-# reachable only inside the enclave: the gate declares no ports, because
-# kurtosis would wait for one to open and nothing listens there until the
-# handover. So ask from inside the container.
-# kurtosis exec prints its own "command executed" banner on stderr and the
-# payload on stdout - but the payload is ONE json line, so any line-trimming
-# here deletes it. Keep only lines that look like json instead.
+# The gate declares no port (nothing listens until handover), so ask from inside it.
+# kurtosis exec banners on stderr; the payload is one json line on stdout - keep json-shaped lines only.
 gate_api() {
   kurtosis service exec "$ENCLAVE" migration-gate \
     "wget -qO- --timeout=5 $1 2>/dev/null" 2>/dev/null | grep -E '^\s*[\[{]' || true
@@ -170,10 +113,7 @@ if kurtosis service inspect "$ENCLAVE" migration-gate >/dev/null 2>&1; then
       say "scenario $s at depth $SCENARIO_DEPTH"
       kurtosis service exec "$ENCLAVE" migration-gate \
         "wget -qO- --timeout=10 --post-data= 'http://127.0.0.1:$CHAOS_PORT/scenario/$s?depth=$SCENARIO_DEPTH'" >/dev/null 2>&1 || true
-      # Wait for THIS scenario to record an outcome rather than sleeping a
-      # guess: pbtchaos serialises its jobs and publishes each run in its
-      # /status history, and the verifier judges recorded outcomes, not
-      # fire-and-forget.
+      # Wait for this scenario's own outcome; the verifier judges recorded outcomes.
       for _ in $(seq 1 40); do
         sleep 10
         seen=$(gate_api "http://127.0.0.1:$CHAOS_PORT/status" 2>/dev/null \
@@ -181,8 +121,7 @@ if kurtosis service inspect "$ENCLAVE" migration-gate >/dev/null 2>&1; then
         if [ "${seen:-0}" -ge 1 ]; then break; fi
       done
     done
-    # Quiesce the cadence before judging: an end state sampled under live
-    # partitions measures the chaos driver, not the clients.
+    # Quiesce before judging: end state under live partitions measures the chaos driver.
     gate_api_post "http://127.0.0.1:$CHAOS_PORT/quiesce" >/dev/null 2>&1 || true
     quiesced_at=$(date +%s)
     say "reorg service quiesced; letting the network settle"
@@ -194,9 +133,7 @@ try:
     d = json.load(open(sys.argv[1]))
 except Exception:
     print("[]"); raise SystemExit
-# pbtchaos publishes every job in "history", including its own cadence ops;
-# only the scenarios this lap asked for are the lap's to account for. Last
-# occurrence wins per name (a retried scenario is judged by its final run).
+# history holds every job incl. cadence ops; only requested scenarios count, last run wins.
 wanted = sys.argv[2].split()
 last = {}
 for r in d.get("history", []):
@@ -219,28 +156,24 @@ for svc in migration-chaos migration-gate; do
   kurtosis service logs "$ENCLAVE" "$svc" -a 2>/dev/null | sed 's/^\[[^]]*\] //' > "$OUT/$svc.jsonl" || true
 done
 
-# The manifest records what this driver DID - restart, scenarios and their
-# recorded outcomes, quiesce - so the verifier can fail a lap whose steps
-# silently never ran instead of judging a thinner run green.
-python3 - "$OUT/manifest.json" "$ARGS" "${RESTART_NODE:-0}" "${restart_at_unix:-0}" "${handed_over}" "${quiesced_at}" "${scenario_results}" <<'PYEOF'
+# The manifest records what this driver did, for the verifier to reconcile.
+python3 - "$OUT/manifest.json" "$ARGS" "${RESTART_NODE:-0}" "${restart_at_unix:-0}" "${quiesced_at}" "${scenario_results}" <<'PYEOF'
 import json, re, sys
-out, args_file, rnode, rat, handed, quiesced, scenarios = sys.argv[1:8]
-profile = ""
-m = re.search(r'chaos_profile:\s*"?([a-z-]+)"?', open(args_file).read())
-if m:
-    profile = m.group(1)
+out, args_file, rnode, rat, quiesced, scenarios = sys.argv[1:7]
+args = open(args_file).read()
+m = re.search(r'chaos_profile:\s*"?([a-z-]+)"?', args)
 manifest = {
-    "profile": profile,
+    "profile": m.group(1) if m else "",
     "restart": {"node": int(rnode), "at": int(rat)} if int(rat) else None,
     "scenarios": json.loads(scenarios),
-    "handover_expected": handed == "1",
+    # a profile that configures the gate must hand over; whether it did is the verifier's question
+    "handover_expected": re.search(r'^\s*gate:\s*true', args, re.M) is not None,
     "quiesced_at": int(quiesced),
 }
 json.dump(manifest, open(out, "w"))
 PYEOF
 
 say "judging the run"
-kill $FOLLOW 2>/dev/null || true
 els=$(cd scripts && python3 -c "import pbt; print(' '.join('--el ' + n + '=' + pbt.url('$ENCLAVE', n, 'rpc') for n in pbt.services('$ENCLAVE','el-')))")
 chaos_args=""
 [ -s "$OUT/migration-chaos.jsonl" ] && chaos_args="--chaos-jsonl $OUT/migration-chaos.jsonl"
