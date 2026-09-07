@@ -151,6 +151,19 @@ func (s *sender) send(ctx context.Context, e *el, r txReq) (common.Hash, common.
 	return tx.Hash(), created, nil
 }
 
+// awaitAllOK confirms every transaction in hs succeeded. The sends went out
+// back to back, so they share the minority's next block or two; confirming
+// them one at a time would instead pay one minority block interval per
+// transaction, which on a 20% island is longer than the isolation window.
+func (s *sender) awaitAllOK(ctx context.Context, e *el, hs []common.Hash) error {
+	for i, h := range hs {
+		if err := s.awaitOK(ctx, e, h, 120*time.Second); err != nil {
+			return fmt.Errorf("transaction %d of %d: %w", i+1, len(hs), err)
+		}
+	}
+	return nil
+}
+
 // awaitOK waits for a receipt and insists the transaction actually succeeded.
 //
 // Discarding the status lets a scenario pass without doing anything: each asserts an

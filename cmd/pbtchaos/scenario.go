@@ -133,6 +133,7 @@ var scenarios = map[string]*scenario{
 			return nil
 		},
 		apply: func(ctx context.Context, r *run) error {
+			var sent []common.Hash
 			for i := 0; i < 3; i++ {
 				key, err := crypto.GenerateKey()
 				if err != nil {
@@ -153,12 +154,10 @@ var scenarios = map[string]*scenario{
 				if err != nil {
 					return err
 				}
-				if err := r.viaMin.awaitOK(ctx, r.minority, h, 120*time.Second); err != nil {
-					return fmt.Errorf("authority %s: %w", authority, err)
-				}
+				sent = append(sent, h)
 				r.doomed = append(r.doomed, authority)
 			}
-			return nil
+			return r.viaMin.awaitAllOK(ctx, r.minority, sent)
 		},
 		// A delegation shows up as code: 0xef0100 followed by the target.
 		effect: hasCode,
@@ -167,6 +166,7 @@ var scenarios = map[string]*scenario{
 	"account": {
 		name: "account",
 		apply: func(ctx context.Context, r *run) error {
+			var sent []common.Hash
 			for i := 0; i < 5; i++ {
 				var addr common.Address
 				if _, err := rand.Read(addr[:]); err != nil {
@@ -180,12 +180,10 @@ var scenarios = map[string]*scenario{
 				if err != nil {
 					return err
 				}
-				if err := r.viaMin.awaitOK(ctx, r.minority, h, 120*time.Second); err != nil {
-					return fmt.Errorf("account %s: %w", addr, err)
-				}
+				sent = append(sent, h)
 				r.doomed = append(r.doomed, addr)
 			}
-			return nil
+			return r.viaMin.awaitAllOK(ctx, r.minority, sent)
 		},
 		effect: func(ctx context.Context, r *run, e *el, at *big.Int) (int, int, error) {
 			n := 0
@@ -341,17 +339,16 @@ func (r *run) deploy(ctx context.Context, e *el, s *sender, initcode []byte) (co
 // wrote half its state report a clean pass, which is the failure the effect predicate exists
 // to prevent and cannot catch on its own.
 func (r *run) writeAll(ctx context.Context, to common.Address, slots []uint64, val func(uint64) common.Hash) error {
+	var sent []common.Hash
 	for _, s := range slots {
 		data := append(txkit.SlotKey(s).Bytes(), val(s).Bytes()...)
 		h, _, err := r.viaMin.send(ctx, r.minority, txReq{to: &to, data: data, gas: 200_000})
 		if err != nil {
 			return err
 		}
-		if err := r.viaMin.awaitOK(ctx, r.minority, h, 120*time.Second); err != nil {
-			return fmt.Errorf("slot %d: %w", s, err)
-		}
+		sent = append(sent, h)
 	}
-	return nil
+	return r.viaMin.awaitAllOK(ctx, r.minority, sent)
 }
 
 // describeEffect reports which clients see the doomed change, for an error message.
