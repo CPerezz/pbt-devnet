@@ -135,9 +135,19 @@ make verify-migration ENCLAVE=pbt LOGS_DIR=... BINARY_TRIE_TIME=...
 | `migration-composite` | 4 nodes, the whole lifecycle, before/across/after the fork | ~90 min |
 
 `make lap` runs one profile end to end. `migration-monitor` cross-checks shadow roots between
-nodes and serves a live view (`make ui`). `migration-chaos` schedules partitions around the
+nodes and serves the live view (`make ui`). `migration-chaos` schedules partitions around the
 fork. `migration-gate` holds the at-genesis reorg service until every client finishes
 migrating, then hands disruptoor over. `verify-migration` judges a finished run.
+
+The live view draws the chain on a slot axis: the canonical chain on lane 0, every competing
+branch on its own lane, blocks coloured by their primary root (MPT blue before I*, PBT orange
+after) and ringed by cross-node agreement on the *shadow* root - the PBT follower's root before
+I*, the reverse-direction MPT root after. Node chips ride their heads; a reorg leaves a rewind
+arrow to the common ancestor, a catch-up arrow along the winner and a ghost of the node at the
+tip it left. Partitions (from disruptoor) and the schedule (from the profile) sit on the same
+axis, so "which node was cut off when, and what did it cost" is one look. Hover a block for its
+roots, click to pin it in the inspector. `make ui-preview` shows the page on a synthetic lap
+without an enclave.
 
 The bootnode (participant 1) anchors the network with 40% of the stake and is never
 partitioned, so fork choice always brings the lights back onto its chain. Deep partitions

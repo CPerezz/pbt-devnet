@@ -390,7 +390,7 @@ def _launch_migration(plan, cfg, args, els, net):
     genesis_time = _genesis_field(plan, "read-genesis-time", ".timestamp", "%d")
     plan.print("migration fork: binaryTrieTime={0} genesis_time={1}".format(t, genesis_time))
 
-    _launch_migration_monitor(plan, cfg, els, t)
+    _launch_migration_monitor(plan, cfg, args, els, net, t, genesis_time)
 
     if profile == "none":
         plan.print("migration-chaos not launched: pbt_migration.chaos_profile is none")
@@ -411,7 +411,7 @@ def _launch_migration(plan, cfg, args, els, net):
     return t, genesis_time
 
 
-def _launch_migration_monitor(plan, cfg, els, t):
+def _launch_migration_monitor(plan, cfg, args, els, net, t, genesis_time):
     cmd = []
     for el in els:
         cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
@@ -419,7 +419,27 @@ def _launch_migration_monitor(plan, cfg, els, t):
     cmd += ["--binary-trie-time", t, "--sample-interval", "30s", "--jsonl", "/dev/stdout"]
     ports = {}
     if cfg["monitor_http_port"] > 0:
-        cmd += ["--http", ":{0}".format(cfg["monitor_http_port"])]
+        # The page draws on a slot axis and overlays the reorg service's schedule and
+        # disruptoor's applied partitions; consensus peers come from the beacon APIs.
+        cmd += [
+            "--http", ":{0}".format(cfg["monitor_http_port"]),
+            "--genesis-time", genesis_time,
+            "--seconds-per-slot", str(_slot_seconds(args)),
+        ]
+        for p in net.all_participants:
+            if p.cl_context != None:
+                cmd += ["--cl", "{0}={1}".format(p.cl_context.beacon_service_name, p.cl_context.beacon_http_url)]
+        # The chaos launch refuses a profile without disruptoor with its own message; skip here.
+        if cfg["chaos_profile"] != "none" and DISRUPTOOR_SERVICE in args.get("additional_services", []):
+            disruptoor = plan.get_service(name=DISRUPTOOR_SERVICE)
+            cmd += [
+                "--disruptoor", "http://{0}:{1}".format(disruptoor.ip_address, DISRUPTOOR_PORT),
+                "--profile", cfg["chaos_profile"],
+                "--anchor-node", str(cfg["anchor_node"]),
+                "--anchor-share", str(_anchor_share(cfg, els)),
+            ]
+            for n in cfg["protect_nodes"]:
+                cmd += ["--protect-node", str(n)]
         ports["http"] = PortSpec(
             number=cfg["monitor_http_port"], transport_protocol="TCP", application_protocol="http")
     plan.add_service(
