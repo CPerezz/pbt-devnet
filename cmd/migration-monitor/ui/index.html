@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>migration monitor</title>
+<style>
+  :root { font: 12px/1.35 ui-sans-serif, system-ui, sans-serif; color: #222; }
+  body { margin: 0; background: #fbfbfb; }
+  header { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline; padding: 8px 12px; border-bottom: 1px solid #e3e3e3; background: #fff; position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  header .kv { color: #555; } header .kv b { color: #222; font-weight: 600; }
+  header .spacer { flex: 1; }
+  header .legend { display: flex; gap: 10px; color: #555; font-size: 11px; white-space: nowrap; }
+  header .legend .grp { color: #999; margin-right: -4px; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: -1px; margin-right: 3px; }
+  #root { padding: 6px 12px 12px; }
+  svg { display: block; width: 100%; }
+  svg.ribbon { margin-bottom: 2px; }
+  svg.agree { margin-bottom: 4px; }
+  svg.river { background: #fff; border: 1px solid #e6e6e6; border-radius: 4px; cursor: grab; user-select: none; }
+  svg.river:active { cursor: grabbing; }
+  svg.strip { margin-top: 6px; }
+  .edge { fill: none; stroke-width: 1.6; } .edge.stub { stroke-dasharray: 2 2; }
+  .ring { fill: none; stroke-width: 1.6; } .ring.dashed { stroke-dasharray: 3 2; }
+  .block.orphaned { opacity: 0.4; }
+  .badge { font-size: 11px; font-weight: 600; } .badge.lost { opacity: 0.8; }
+  .band { pointer-events: all; } .band.open { outline: 1px solid rgba(0,0,0,0.2); }
+  .finalized { fill: rgba(0,0,0,0.05); pointer-events: all; }
+  .fork-rule { stroke: #222; stroke-width: 1.4; stroke-dasharray: 6 3; }
+  .fork-rule.heavy { stroke-width: 3; stroke-dasharray: none; opacity: 0.85; }
+  .fork-label { font-size: 11px; font-weight: 700; fill: #fff; }
+  .now-rule { stroke: #999; stroke-width: 1; }
+  .axis-label, .ribbon-label, .strip-text { font-size: 10px; }
+  .ribbon-label { font-weight: 600; }
+  .strip-text { font-variant-numeric: tabular-nums; }
+  .chip-body { stroke-width: 2.2; } .chip-body.unreachable { fill: url(#hatch-red) !important; }
+  .chip-istar { fill: none; stroke: #222; stroke-width: 1.4; }
+  .chip-istar.none { display: none; } .chip-istar.provisional { stroke-dasharray: 3 2; }
+  .chip-label { font-size: 10px; font-weight: 700; fill: #fff; pointer-events: none; }
+  .reorg-badge { font-size: 11px; font-weight: 700; fill: #e0433d; }
+  .tether { stroke: #555; stroke-dasharray: 2 2; } .cursor.detached { opacity: 0.5; }
+  .rewind { font-size: 10px; font-weight: 700; fill: #e0433d; }
+  svg.river .axis, svg.river .badges, svg.river .tint, svg.river .cursors { pointer-events: none; }
+  .move-hit .hit { fill: none; stroke: transparent; stroke-width: 10; pointer-events: stroke; }
+  path.rewind { fill: none; stroke: #e0433d; stroke-width: 1.6; stroke-dasharray: 5 3; }
+  path.catchup { fill: none; stroke: #2fa84f; stroke-width: 1.8; }
+  .ghost-body { fill: #fff; stroke: #e0433d; stroke-width: 1.5; stroke-dasharray: 3 2; }
+  .ghost-label { font-size: 10px; font-weight: 700; fill: #e0433d; }
+  .move-label { font-size: 10px; font-weight: 700; fill: #2fa84f; }
+  #tip { position: fixed; display: none; background: #222; color: #fff; padding: 6px 8px; border-radius: 4px; font-size: 11px; pointer-events: none; max-width: 420px; z-index: 5; }
+  #tip .mono, .mono { font-family: ui-monospace, monospace; word-break: break-all; }
+  #tip .doc { color: #ddd; margin: 3px 0; }
+  .muted { color: #888; } .bad { color: #e0433d; } .ok { color: #1f8a3c; }
+  #tip .bad { color: #ff8f8f; } #tip .muted { color: #aaa; }
+  .agree-split { color: #e0433d; } .agree-all { color: #1f8a3c; } #tip .agree-all { color: #7fe08a; } #tip .agree-split { color: #ff8f8f; }
+  #bottom { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(560px, 1.4fr); gap: 12px; padding: 0 12px 16px; align-items: start; }
+  #bottom > * { background: #fff; border: 1px solid #e6e6e6; border-radius: 4px; padding: 8px 10px; }
+  #bottom h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: #555; }
+  details.alerts summary { cursor: pointer; color: #555; font-weight: 600; }
+  details.alerts li { font-variant-numeric: tabular-nums; } details.alerts li.critical { color: #c22; }
+  details.alerts li.expected { color: #777; } details.alerts li.expected::after { content: ' · expected'; }
+  #block .card-head { margin-bottom: 4px; }
+  #block .kv { display: grid; grid-template-columns: 120px 1fr; gap: 6px; padding: 2px 0; border-top: 1px solid #f0f0f0; }
+  #block .kv > span:first-child { color: #555; }
+  #block .placeholder { color: #888; }
+  #moves { list-style: none; padding: 0; margin: 0; }
+  #moves li { padding: 2px 0; cursor: pointer; border-top: 1px solid #f0f0f0; } #moves li:hover { background: #f6f6f6; }
+  #controls { display: flex; gap: 10px; align-items: center; color: #555; margin: 4px 12px 10px; }
+  #controls input[type=range] { width: 320px; }
+</style>
+<body>
+<header>
+  <h1>migration monitor</h1>
+  <span class="kv">slot <b id="k-slot">–</b></span>
+  <span class="kv">I* <b id="k-fork">–</b></span>
+  <span class="kv">finalized <b id="k-final">–</b></span>
+  <span class="kv">head <b id="k-head">–</b></span>
+  <span class="kv" id="k-mode"></span>
+  <span class="spacer"></span>
+  <span class="legend">
+    <span class="grp">primary</span>
+    <span><i class="sw" style="background:#4c8dff"></i>MPT</span>
+    <span><i class="sw" style="background:#ff9a3c"></i>PBT</span>
+    <span>◆ I*</span>
+    <span class="grp">shadow</span>
+    <span><i class="sw" style="border:2px solid #2fa84f"></i>agree</span>
+    <span><i class="sw" style="border:2px solid #e0433d"></i>split</span>
+    <span class="grp">node</span>
+    <span><i class="sw" style="background:#2fa84f"></i>synced</span>
+    <span><i class="sw" style="background:#ffc27a"></i>window</span>
+    <span><i class="sw" style="background:#ff8a1f"></i>done</span>
+    <span><i class="sw" style="background:repeating-linear-gradient(45deg,#999 0 2px,transparent 2px 5px)"></i>cut off</span>
+    <span class="grp">move</span>
+    <span style="color:#e0433d">⤺ rewind</span><span style="color:#2fa84f">▸ catch-up</span>
+  </span>
+</header>
+<div id="root"></div>
+<div id="controls"></div>
+<div id="bottom">
+  <div>
+    <details class="alerts" id="alerts" open><summary>alerts</summary><ul></ul></details>
+    <h3 style="margin-top:10px">head moves</h3>
+    <ul id="moves"></ul>
+  </div>
+  <div id="block"><span class="placeholder">hover a block for its roots; click to pin</span></div>
+</div>
+<div id="tip"></div>
+<script type="module">
+  import { River } from './river.js';
+  const root = document.getElementById('root');
+  const river = new River(root, { tip: document.getElementById('tip'), block: document.getElementById('block'), moves: document.getElementById('moves') });
+  window.river = river; // debugging handle
+  const params = new URLSearchParams(location.search);
+  const synthetic = params.has('synthetic');
+
+  function paint(s) {
+    river.render(s);
+    const secs = s.now_slot * s.slot_seconds;
+    document.getElementById('k-slot').textContent = `${s.now_slot} (${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, '0')}s)`;
+    document.getElementById('k-fork').textContent = `slot ${s.fork_slot}` + (s.now_slot >= s.fork_slot ? ` (+${s.now_slot - s.fork_slot})` : ` (in ${s.fork_slot - s.now_slot})`);
+    document.getElementById('k-final').textContent = `slot ${s.finalized_slot}`;
+    const spine = s.segments.find(x => x.lane === 0);
+    document.getElementById('k-head').textContent = spine ? `#${spine.blocks}` : '–';
+    const ul = document.querySelector('#alerts ul'); ul.replaceChildren();
+    for (const a of s.alerts.slice().reverse()) {
+      const li = document.createElement('li'); li.className = a.kind + (a.expected ? ' expected' : '');
+      li.textContent = `slot ${a.slot} · node ${a.node} · ${a.detail}`; ul.appendChild(li);
+    }
+    document.querySelector('#alerts summary').textContent = `alerts (${s.alerts.filter(a => !a.expected).length} unexpected, ${s.alerts.length} total)`;
+  }
+
+  if (synthetic) {
+    // Review scaffolding, served by `make ui-preview` only: a scripted lap
+    // advancing one slot per tick, with a clock scrubber.
+    const { syntheticLap } = await import('./synthetic.js');
+    let slot = +(params.get('slot') || 60), playing = true;
+    const controls = document.getElementById('controls');
+    controls.innerHTML = `<button id="play">pause</button> <input id="clock" type="range" min="1" max="520" value="${slot}"> <span id="clock-v"></span> <span>· wheel zooms, drag pans, double-click re-follows</span>`;
+    document.getElementById('k-mode').textContent = '· synthetic lap';
+    const clock = document.getElementById('clock');
+    const tick = () => { paint(syntheticLap(slot)); clock.value = slot; document.getElementById('clock-v').textContent = `slot ${slot}`; };
+    document.getElementById('play').onclick = (e) => { playing = !playing; e.target.textContent = playing ? 'pause' : 'play'; };
+    clock.oninput = () => { slot = +clock.value; tick(); };
+    setInterval(() => { if (playing && slot < 520) { slot++; tick(); } }, 700);
+    tick();
+  } else {
+    let seq = -1;
+    const poll = async () => {
+      try {
+        const r = await fetch('/api/state'); const s = await r.json();
+        if (s.seq !== seq) { seq = s.seq; paint(s); }
+        document.getElementById('k-mode').textContent = '';
+      } catch (e) { document.getElementById('k-mode').textContent = '· disconnected'; }
+    };
+    poll(); setInterval(poll, 2000);
+  }
+  window.addEventListener('resize', () => { if (river.prev) river.render(river.prev); });
+</script>
+</body>
+</html>

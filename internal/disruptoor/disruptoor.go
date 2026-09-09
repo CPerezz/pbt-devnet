@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/CPerezz/pbt-devnet/internal/cli"
@@ -140,4 +142,48 @@ func (d *Client) State() (partitions, shaping int, err error) {
 		return 0, 0, err
 	}
 	return len(s.Partitions), len(s.Shaping), nil
+}
+
+// Applied is one partition disruptoor currently holds; Groups are the node-index lists
+// (participant numbers) of each side.
+type Applied struct {
+	Name   string
+	Groups [][]int
+}
+
+// Partitions lists the applied partitions with their groups. Parsing is lenient: a
+// partition missing a name or groups is reported with those fields empty rather than
+// failing the whole poll. disruptoor echoes node-index entries back as strings
+// ("2"), not the numbers Partition sent, so both spellings are accepted.
+func (d *Client) Partitions() ([]Applied, error) {
+	raw, err := d.do(http.MethodGet, "/v1/state", nil)
+	if err != nil {
+		return nil, err
+	}
+	var s struct {
+		Partitions []struct {
+			Name   string `json:"name"`
+			Groups []struct {
+				NodeIndex []json.RawMessage `json:"node-index"`
+			} `json:"groups"`
+		} `json:"partitions"`
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, err
+	}
+	out := make([]Applied, len(s.Partitions))
+	for i, p := range s.Partitions {
+		out[i].Name = p.Name
+		out[i].Groups = make([][]int, len(p.Groups))
+		for j, g := range p.Groups {
+			for _, m := range g.NodeIndex {
+				n, err := strconv.Atoi(strings.Trim(string(m), `"`))
+				if err != nil {
+					return nil, fmt.Errorf("partition %q: node-index %s: %w", p.Name, m, err)
+				}
+				out[i].Groups[j] = append(out[i].Groups[j], n)
+			}
+		}
+	}
+	return out, nil
 }

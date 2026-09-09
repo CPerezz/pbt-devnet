@@ -17,7 +17,7 @@ BINARY_TRIE_TIME ?=
 LOGS_DIR ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help up down logs sources build besu besu-image bin genesis check verify-migration lap
+.PHONY: help up down logs sources build besu besu-image bin genesis check verify-migration lap ui-preview
 
 help:
 	@echo "pbt-devnet — a differential test harness for EIP-8297 execution clients"
@@ -53,7 +53,12 @@ ui: ## print every web UI and API url
 	  spamoor    "$$(kurtosis port print $(ENCLAVE) spamoor http 2>/dev/null)" \
 	  assertoor  "$$(kurtosis port print $(ENCLAVE) assertoor http 2>/dev/null)" \
 	  disruptoor "$$(kurtosis port print $(ENCLAVE) disruptoor http 2>/dev/null)" \
-	  pbtchaos   "$$(kurtosis port print $(ENCLAVE) pbtchaos http 2>/dev/null)"
+	  pbtchaos   "$$(kurtosis port print $(ENCLAVE) pbtchaos http 2>/dev/null)" \
+	  migration  "$$(kurtosis port print $(ENCLAVE) migration-monitor http 2>/dev/null)"
+
+ui-preview: ## serve the migration monitor page on a synthetic lap (no enclave needed)
+	@echo "==> http://127.0.0.1:8765/index.html?synthetic"
+	@python3 -m http.server 8765 --bind 127.0.0.1 -d cmd/migration-monitor/ui
 
 status: ## show every execution client's head and state root
 	@scripts/pbt.py status $(ENCLAVE)
