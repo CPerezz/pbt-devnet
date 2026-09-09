@@ -14,7 +14,7 @@ type Dump struct {
 	Profile     string   `json:"profile"`
 	Genesis     int64    `json:"genesis"`
 	Fork        int64    `json:"fork"`
-	Heavy       int      `json:"heavy"`
+	Anchor      int      `json:"anchor"`
 	SlotSeconds int64    `json:"slot_seconds"`
 	Ops         []DumpOp `json:"ops"`
 	Failsafes   []int64  `json:"failsafes"`
@@ -23,33 +23,48 @@ type Dump struct {
 
 // DumpOp is one op in the dump. Times are unix seconds.
 type DumpOp struct {
-	Name    string `json:"name"`
-	Class   string `json:"class"`
-	Start   int64  `json:"start"`
-	End     int64  `json:"end"`
-	Victims []int  `json:"victims"`
-	Refused string `json:"refused,omitempty"`
+	Name      string `json:"name"`
+	Class     string `json:"class"`
+	Start     int64  `json:"start"`
+	End       int64  `json:"end"`
+	HoldUntil int64  `json:"hold_until,omitempty"` // latest heal of an op that waits for its islands to cross the fork
+	Victims   []int  `json:"victims"`
+	Mutual    bool   `json:"mutual,omitempty"` // every victim on its own island
+	Refused   string `json:"refused,omitempty"`
+}
+
+// Latest is the unix instant the op is certainly healed.
+func (o DumpOp) Latest() int64 {
+	if o.HoldUntil != 0 {
+		return o.HoldUntil
+	}
+	return o.End
 }
 
 // NewDump renders the schedule for publication.
-func (s Schedule) NewDump(genesis, fork time.Time, heavy int) Dump {
+func (s Schedule) NewDump(genesis, fork time.Time, anchor int) Dump {
 	d := Dump{
 		Profile:     s.Profile,
 		Genesis:     genesis.Unix(),
 		Fork:        fork.Unix(),
-		Heavy:       heavy,
+		Anchor:      anchor,
 		SlotSeconds: s.SlotSeconds,
 		Quiet:       s.Quiet.Unix(),
 	}
 	for _, o := range s.Ops {
-		d.Ops = append(d.Ops, DumpOp{
+		op := DumpOp{
 			Name:    o.Name,
 			Class:   string(o.Class),
 			Start:   o.Start.Unix(),
 			End:     o.End.Unix(),
 			Victims: o.Victims,
+			Mutual:  o.Mutual,
 			Refused: o.Refused,
-		})
+		}
+		if !o.HoldUntil.IsZero() {
+			op.HoldUntil = o.HoldUntil.Unix()
+		}
+		d.Ops = append(d.Ops, op)
 	}
 	for _, f := range s.Failsafes {
 		d.Failsafes = append(d.Failsafes, f.Unix())
@@ -85,7 +100,7 @@ func (d Dump) Admitted() []DumpOp {
 // (straddle or window) by its own end plus healConvergeAllowance.
 func (d Dump) HealDeadline(o DumpOp) time.Time {
 	if c := Class(o.Class); c == ClassStraddle || c == ClassWindow {
-		return time.Unix(o.End, 0).Add(healConvergeAllowance * time.Second)
+		return time.Unix(o.Latest(), 0).Add(healConvergeAllowance * time.Second)
 	}
 	fork := time.Unix(d.Fork, 0)
 	deadline := fork
@@ -102,7 +117,7 @@ func (d Dump) HealDeadline(o DumpOp) time.Time {
 func (d Dump) Gaps(from, to time.Time) [][2]time.Time {
 	busy := make([][2]time.Time, 0, len(d.Ops))
 	for _, o := range d.Admitted() {
-		busy = append(busy, [2]time.Time{time.Unix(o.Start, 0), time.Unix(o.End, 0)})
+		busy = append(busy, [2]time.Time{time.Unix(o.Start, 0), time.Unix(o.Latest(), 0)})
 	}
 	sort.Slice(busy, func(i, j int) bool { return busy[i][0].Before(busy[j][0]) })
 

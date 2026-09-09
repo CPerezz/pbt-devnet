@@ -4,6 +4,13 @@
 bin/
 artifacts/
 **/*.log
+# `go build ./cmd/<x>/` drops the binary in the repo root; a 10MB upload per stray one.
+/pbtchaos
+/pbtmonitor
+/pbthammer
+/gengenesis
+/migration-*
+/verify-migration
 
 # The repository history is the largest thing here by far and the package never reads it.
 .git/

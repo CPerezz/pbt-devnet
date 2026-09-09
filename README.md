@@ -139,8 +139,12 @@ nodes and serves a live view (`make ui`). `migration-chaos` schedules partitions
 fork. `migration-gate` holds the at-genesis reorg service until every client finishes
 migrating, then hands disruptoor over. `verify-migration` judges a finished run.
 
-Validator stake is uneven: the heavy participant holds 40%, so isolating it stalls finality
-without letting it win.
+The bootnode (participant 1) anchors the network with 40% of the stake and is never
+partitioned, so fork choice always brings the lights back onto its chain. Deep partitions
+isolate a pair of lights (40% together) to stall finality without letting them win, and the
+straddle isolates every light on its own island across I* and heals once each has crossed on
+its own block, so every test client is forced to rewind below I* and re-cross - the anchor
+never does.
 
 ## Adding another execution client
 
@@ -153,7 +157,7 @@ time. Onboarding a client needs:
 2. **An introspection adapter** (`migmon.Client`) reporting migration progress and shadow roots.
 3. **A registry entry** (`internal/migmon/registry.go`) describing its evidence contract.
 4. **A reorg log pattern** to corroborate a heal from the client's own log.
-5. **An args participant block**, optionally as `pbt_migration.heavy_node`.
+5. **An args participant block**, optionally as `pbt_migration.anchor_node`.
 
 Erigon is not ready: its genesis validation rejects a future `binaryTrieTime`, and it has no
 follower or migration introspection. It runs only in `args/devnet.yaml`.

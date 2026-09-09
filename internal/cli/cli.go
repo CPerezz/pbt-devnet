@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -13,6 +14,19 @@ type MultiFlag []string
 
 func (m *MultiFlag) String() string     { return strings.Join(*m, ",") }
 func (m *MultiFlag) Set(v string) error { *m = append(*m, v); return nil }
+
+// IntsFlag collects a repeatable participant-index flag, as in --protect-node 1.
+type IntsFlag []int
+
+func (f *IntsFlag) String() string { return fmt.Sprint([]int(*f)) }
+func (f *IntsFlag) Set(v string) error {
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return fmt.Errorf("not a participant index: %q", v)
+	}
+	*f = append(*f, n)
+	return nil
+}
 
 // Fatal logs through the given logger and exits non-zero.
 //

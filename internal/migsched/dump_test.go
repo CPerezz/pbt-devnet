@@ -12,7 +12,7 @@ func TestHealDeadlineIsTheSweepNotTheOpEnd(t *testing.T) {
 	genesis := time.Unix(1_000_000, 0)
 	fork := genesis.Add(780 * time.Second)
 	s, err := Resolve("composite-smoke", genesis, fork, Topology{
-		Heavy: 2, Lights: []int{3, 4}, HeavyShare: 0.4, SecondsPerSlot: 6,
+		Anchor: 1, Lights: []int{2, 3, 4}, Participants: 4, AnchorShare: 0.4, SecondsPerSlot: 6,
 	})
 	if err != nil {
 		t.Fatal(err)

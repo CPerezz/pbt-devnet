@@ -46,12 +46,14 @@ DEFAULT_MIGRATION = {
     "gate_image": "pbt-migration-gate:local",
     # Participant 1 is the bootnode and is never disrupted.
     "protect_nodes": [1],
-    # Heavy node's stake travels with the victim role: isolating >1/3 stalls finality.
-    "heavy_node": 2,
-    "heavy_validators": 256,
+    # The anchor holds the heavy stake and is never partitioned: fork choice makes the
+    # lighter side of every heal rewind, so every light is forced back onto its chain -
+    # including across the fork - while it never has to rewind. It must be protected.
+    "anchor_node": 1,
+    "anchor_validators": 256,
     "light_validators": 128,
-    # Post-switchover reorg: none, short-light, or deep-heavy.
-    "post_op": "deep-heavy",
+    # Post-switchover reorg: none, short-light, or deep-pair (two lights, 40% together).
+    "post_op": "deep-pair",
     # The monitor's live view. Empty disables it.
     "monitor_http_port": 8080,
 }
@@ -355,26 +357,26 @@ MIGRATION_READY_CLIENTS = ["geth"]
 
 
 def _weight_participants(participants, cfg):
-    """Give the heavy participant its validator share, everyone else the rest: isolating
-    >1/3 of validators stalls finality instead of the majority finalizing past it."""
-    heavy = cfg["heavy_node"]
+    """Give the anchor its validator share, everyone else the rest: a pair of lights
+    (>1/3) stalls finality without winning, and no single light can outweigh the anchor."""
+    anchor = cfg["anchor_node"]
     out = []
     for i, p in enumerate(participants):
         weighted = dict(p)
-        if i + 1 == heavy:
-            weighted["validator_count"] = cfg["heavy_validators"]
+        if i + 1 == anchor:
+            weighted["validator_count"] = cfg["anchor_validators"]
         else:
             weighted["validator_count"] = cfg["light_validators"]
         out.append(weighted)
     return out
 
 
-def _heavy_share(cfg, els):
-    """The heavy participant's share of the validator set, derived from the same numbers
-    that render validator_count so the chaos driver's admission math cannot drift."""
-    heavy = cfg["heavy_validators"]
-    total = heavy + (len(els) - 1) * cfg["light_validators"]
-    return float(heavy) / float(total)
+def _anchor_share(cfg, els):
+    """The anchor's share of the validator set, derived from the same numbers that render
+    validator_count so the chaos driver's admission math cannot drift."""
+    anchor = cfg["anchor_validators"]
+    total = anchor + (len(els) - 1) * cfg["light_validators"]
+    return float(anchor) / float(total)
 
 
 def _launch_migration(plan, cfg, args, els, net):
@@ -394,13 +396,17 @@ def _launch_migration(plan, cfg, args, els, net):
         plan.print("migration-chaos not launched: pbt_migration.chaos_profile is none")
         return t, genesis_time
 
-    heavy = cfg["heavy_node"]
-    if heavy in cfg["protect_nodes"]:
-        fail(("pbt_migration.heavy_node is {0}, which is also in protect_nodes: the deep and " +
-              "fork-straddling partitions would have no victim").format(heavy))
-    if heavy < 1 or heavy > len(els):
-        fail("pbt_migration.heavy_node is {0}, outside the {1} execution clients".format(
-            heavy, len(els)))
+    anchor = cfg["anchor_node"]
+    if anchor < 1 or anchor > len(els):
+        fail("pbt_migration.anchor_node is {0}, outside the {1} execution clients".format(
+            anchor, len(els)))
+    if anchor not in cfg["protect_nodes"]:
+        fail(("pbt_migration.anchor_node is {0} but protect_nodes is {1}: the anchor holds the " +
+              "heavy stake and must never be partitioned, or an island could win a heal").format(
+            anchor, cfg["protect_nodes"]))
+    if len(els) - len(cfg["protect_nodes"]) < 2:
+        fail("the migration profiles need at least two disruptable lights; {0} clients, {1} protected".format(
+            len(els), cfg["protect_nodes"]))
     _launch_migration_chaos(plan, cfg, args, els, t, genesis_time, net)
     return t, genesis_time
 
@@ -446,8 +452,8 @@ def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time, net):
         "--genesis-time", genesis_time,
         "--binary-trie-time", t,
         "--profile", cfg["chaos_profile"],
-        "--heavy-node", str(cfg["heavy_node"]),
-        "--heavy-share", str(_heavy_share(cfg, els)),
+        "--anchor-node", str(cfg["anchor_node"]),
+        "--anchor-share", str(_anchor_share(cfg, els)),
         "--seconds-per-slot", str(_slot_seconds(args)),
         "--jsonl", "/dev/stdout",
     ]
@@ -455,8 +461,8 @@ def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time, net):
         name="migration-chaos",
         config=ServiceConfig(image=cfg["chaos_image"], cmd=cmd),
     )
-    plan.print("started migration-chaos: profile {0}, heavy victim is participant {1}".format(
-        cfg["chaos_profile"], cfg["heavy_node"]))
+    plan.print("started migration-chaos: profile {0}, anchor is participant {1}".format(
+        cfg["chaos_profile"], cfg["anchor_node"]))
 
 
 def _slot_seconds(args):
@@ -481,24 +487,24 @@ def _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer_senders, 
         "--genesis-time", genesis_time,
         "--binary-trie-time", t,
         "--profile", migration["chaos_profile"],
-        "--heavy-node", str(migration["heavy_node"]),
-        "--heavy-share", str(_heavy_share(migration, els)),
+        "--anchor-node", str(migration["anchor_node"]),
+        "--anchor-share", str(_anchor_share(migration, els)),
         "--seconds-per-slot", str(_slot_seconds(args)),
         "--post-op", migration["post_op"],
         "--jsonl", "/dev/stdout",
     ]
 
-    # From here on: the command the gate execs once it hands over, heavy node included
-    # in the protected set (its scenarios are sized for a light victim).
+    # From here on: the command the gate execs once it hands over. Every test node is a
+    # light, so its scenarios need no extra protection beyond the anchor.
     counts = []
     for i in range(len(els)):
-        if i + 1 == migration["heavy_node"]:
-            counts.append(str(migration["heavy_validators"]))
+        if i + 1 == migration["anchor_node"]:
+            counts.append(str(migration["anchor_validators"]))
         else:
             counts.append(str(migration["light_validators"]))
     cmd += ["pbtchaos"] + _chaos_cmd(
         plan, chaos, args, net, els, hammer_senders,
-        [migration["heavy_node"]], ",".join(counts))
+        [], ",".join(counts))
 
     # No ports declared: kurtosis would wait for one to accept connections before
     # calling the service started, and this one binds only once it hands over.

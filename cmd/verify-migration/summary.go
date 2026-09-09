@@ -98,7 +98,7 @@ func (v *verifier) renderSummary(results []checkResult) string {
 	if schedErr == nil {
 		fmt.Fprintf(&b, "- profile: %s\n", dump.Profile)
 		fmt.Fprintf(&b, "- fork time: %s\n", time.Unix(dump.Fork, 0).UTC().Format(time.RFC3339))
-		fmt.Fprintf(&b, "- heavy victim: node-%d\n", dump.Heavy)
+		fmt.Fprintf(&b, "- anchor: node-%d\n", dump.Anchor)
 	} else {
 		fmt.Fprintf(&b, "- schedule: unavailable (%v)\n", schedErr)
 	}
@@ -107,9 +107,9 @@ func (v *verifier) renderSummary(results []checkResult) string {
 	if schedErr == nil {
 		admitted := dump.Admitted()
 		matched, _ := v.attributeWindows(dump, v.chaosWindows())
-		byOp := map[string]chaosWindow{}
+		byOp := map[string][]chaosWindow{} // one window per victim
 		for _, ow := range matched {
-			byOp[ow.op.Name] = ow.window
+			byOp[ow.op.Name] = append(byOp[ow.op.Name], ow.window)
 		}
 		b.WriteString("## Ops\n\n")
 		b.WriteString("| op | class | victims | window | observed drop |\n|---|---|---|---|---|\n")
@@ -117,12 +117,16 @@ func (v *verifier) renderSummary(results []checkResult) string {
 			window := fmt.Sprintf("%s..%s",
 				time.Unix(o.Start, 0).UTC().Format("15:04:05"), time.Unix(o.End, 0).UTC().Format("15:04:05"))
 			drop := "not isolated"
-			if w, ok := byOp[o.Name]; ok {
-				if ev := v.matchReorg(w); ev.matched {
-					drop = fmt.Sprintf("%d", ev.depth)
-				} else {
-					drop = "none observed"
+			if ws := byOp[o.Name]; len(ws) > 0 {
+				parts := make([]string, 0, len(ws))
+				for _, w := range ws {
+					if ev := v.matchReorg(w); ev.matched {
+						parts = append(parts, fmt.Sprintf("%s:%d", w.node, ev.depth))
+					} else {
+						parts = append(parts, w.node+":none")
+					}
 				}
+				drop = strings.Join(parts, ", ")
 			}
 			fmt.Fprintf(&b, "| %s | %s | %v | %s | %s |\n", o.Name, o.Class, o.Victims, window, drop)
 		}

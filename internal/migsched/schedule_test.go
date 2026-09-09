@@ -7,8 +7,21 @@ import (
 
 // A four-node topology: participant 1 is the bootnode (never disruptable,
 // so absent here), 2 holds 40% of the validators, 3 and 4 the rest.
+// topo is the shipped layout: the bootnode anchors 40%, three lights hold 20% each.
 func topo() Topology {
-	return Topology{Heavy: 2, Lights: []int{3, 4}, HeavyShare: 0.40, SecondsPerSlot: 6}
+	return Topology{Anchor: 1, Lights: []int{2, 3, 4}, Participants: 4, AnchorShare: 0.40, SecondsPerSlot: 6}
+}
+
+func victimsEqual(got, want []int) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func at(base time.Time, secs int) time.Time { return base.Add(time.Duration(secs) * time.Second) }
@@ -26,8 +39,8 @@ func sweepsEqual(t *testing.T, got, want []time.Time) {
 }
 
 // preForkFixture is a pre-fork-only profile for exercising rotation,
-// refusal and sweep placement: three deeps on the heavy victim, then two
-// shorts rotating over the lights. Injected because no shipped profile is
+// refusal and sweep placement: three deeps over rotating pairs of lights,
+// then two shorts rotating over single lights. Injected because no shipped profile is
 // pre-fork-only anymore, and these behaviors must not depend on which
 // profiles happen to ship.
 func preForkFixture(t *testing.T) string {
@@ -47,8 +60,8 @@ func preForkFixture(t *testing.T) string {
 	return name
 }
 
-// The pre-fork shape: deeps pin the heavy victim, shorts rotate over the
-// lights, everything is admitted with room to spare.
+// The pre-fork shape: deeps cycle through pairs of lights, shorts rotate over
+// single lights, everything is admitted with room to spare.
 func TestResolvePreFork(t *testing.T) {
 	genesis := time.Unix(1_000_000, 0)
 	fork := at(genesis, 1800)
@@ -58,14 +71,14 @@ func TestResolvePreFork(t *testing.T) {
 	}
 	want := []struct {
 		start, end int
-		victim     int
+		victims    []int
 		class      Class
 	}{
-		{240, 430, 2, ClassDeep},
-		{540, 730, 2, ClassDeep},
-		{840, 1030, 2, ClassDeep},
-		{1090, 1240, 3, ClassShort},
-		{1300, 1450, 4, ClassShort},
+		{240, 430, []int{2, 3}, ClassDeep},
+		{540, 730, []int{3, 4}, ClassDeep},
+		{840, 1030, []int{4, 2}, ClassDeep},
+		{1090, 1240, []int{2}, ClassShort},
+		{1300, 1450, []int{3}, ClassShort},
 	}
 	if len(s.Ops) != len(want) {
 		t.Fatalf("ops = %d, want %d", len(s.Ops), len(want))
@@ -78,8 +91,8 @@ func TestResolvePreFork(t *testing.T) {
 		if !o.Start.Equal(at(genesis, w.start)) || !o.End.Equal(at(genesis, w.end)) {
 			t.Fatalf("op %d = [%s,%s], want [+%ds,+%ds]", i, o.Start, o.End, w.start, w.end)
 		}
-		if o.Class != w.class || len(o.Victims) != 1 || o.Victims[0] != w.victim {
-			t.Fatalf("op %d = %s on %v, want %s on %d", i, o.Class, o.Victims, w.class, w.victim)
+		if o.Class != w.class || !victimsEqual(o.Victims, w.victims) || o.Mutual {
+			t.Fatalf("op %d = %s on %v (mutual=%v), want %s on %v as one island", i, o.Class, o.Victims, o.Mutual, w.class, w.victims)
 		}
 	}
 	// Two pre-fork sweeps: the last admitted end, then the deadline, which
@@ -122,8 +135,8 @@ func TestPreForkAdmission(t *testing.T) {
 
 // The composite profile carries the straddle anchored to the fork, adds the
 // post-fork window op, leaves the restart gap alone, and sweeps five times:
-// the last pre-fork end, the pre-fork deadline, the straddle's heal, its
-// repeat a minute later, and the window op's repeat.
+// the last pre-fork end, the pre-fork deadline, the straddle's latest heal,
+// its repeat a minute later, and the window op's repeat.
 func TestResolveComposite(t *testing.T) {
 	genesis := time.Unix(2_000_000, 0)
 	fork := at(genesis, 1800)
@@ -143,15 +156,15 @@ func TestResolveComposite(t *testing.T) {
 	if !ok {
 		t.Fatal("composite resolved without a straddle")
 	}
-	if !str.Start.Equal(at(fork, -90)) || !str.End.Equal(at(fork, 90)) {
-		t.Fatalf("straddle = [%s,%s], want fork-90..fork+90", str.Start, str.End)
+	if !str.Start.Equal(at(fork, -120)) || !str.End.Equal(at(fork, 60)) || !str.HoldUntil.Equal(at(fork, 180)) {
+		t.Fatalf("straddle = [%s,%s] hold %s, want fork-120..fork+60, hold to fork+180", str.Start, str.End, str.HoldUntil)
 	}
-	if str.Victims[0] != 2 {
-		t.Fatalf("straddle victim = %v, want the heavy participant", str.Victims)
+	// Every light on its own island: each crosses the fork on its own block
+	// and every one of them rewinds onto the anchor's chain at the heal.
+	if !str.Mutual || !victimsEqual(str.Victims, []int{2, 3, 4}) {
+		t.Fatalf("straddle victims = %v mutual=%v, want every light, mutually isolated", str.Victims, str.Mutual)
 	}
-	// The window op lives inside the open migration window, on a light
-	// victim that is NOT the straddle's: the mid-migration disruption and
-	// the boundary rewind must land on different nodes to be separable.
+	// The window op lives inside the open migration window, on a single light.
 	var win *Op
 	for i := range s.Ops {
 		if s.Ops[i].Class == ClassWindow {
@@ -161,11 +174,11 @@ func TestResolveComposite(t *testing.T) {
 	if win == nil {
 		t.Fatal("composite resolved without a window op")
 	}
-	if !win.Start.Equal(at(fork, 240)) || !win.End.Equal(at(fork, 390)) {
-		t.Fatalf("window op = [%s,%s], want fork+240..fork+390", win.Start, win.End)
+	if !win.Start.Equal(at(fork, 300)) || !win.End.Equal(at(fork, 450)) {
+		t.Fatalf("window op = [%s,%s], want fork+300..fork+450", win.Start, win.End)
 	}
-	if len(win.Victims) != 1 || win.Victims[0] == str.Victims[0] {
-		t.Fatalf("window victims = %v, want one light distinct from the straddle victim %v", win.Victims, str.Victims)
+	if len(win.Victims) != 1 || win.Victims[0] == topo().Anchor {
+		t.Fatalf("window victims = %v, want one light", win.Victims)
 	}
 	// The restart gap: no partition may be open while a node is being
 	// restarted there.
@@ -176,10 +189,10 @@ func TestResolveComposite(t *testing.T) {
 		}
 	}
 	sweepsEqual(t, s.Failsafes, []time.Time{
-		at(genesis, 940), at(genesis, 1410), at(fork, 90), at(fork, 150), at(fork, 450),
+		at(genesis, 940), at(genesis, 1410), at(fork, 180), at(fork, 240), at(fork, 510),
 	})
-	if !s.Quiet.Equal(at(fork, 510)) {
-		t.Fatalf("quiet = %s, want fork+510 (window op end + quiet tail)", s.Quiet)
+	if !s.Quiet.Equal(at(fork, 570)) {
+		t.Fatalf("quiet = %s, want fork+570 (window op end + quiet tail)", s.Quiet)
 	}
 }
 
@@ -194,16 +207,16 @@ func TestStraddleDivergenceIsLegal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, probe := range []int{-89, -30, 0, 30, 89, 90, 150, 209, 250, 380, 500} {
+	for _, probe := range []int{-119, -30, 0, 30, 60, 150, 180, 299, 310, 440, 560} {
 		if !s.Covers(at(fork, probe)) {
 			t.Fatalf("fork%+ds reads as illegal divergence; a watchdog would cut the op short", probe)
 		}
 	}
 	// Past the window op's heal allowance it must stop being legal, or a
 	// genuinely wedged node would never be noticed. The straddle's own
-	// tail ends at fork+210; fork+230 sits in the gap before the window
-	// op opens at fork+240.
-	for _, probe := range []int{230, 540} {
+	// tail ends at fork+300 (latest heal + tail), exactly where the window
+	// op opens; fork+600 is past everything.
+	for _, probe := range []int{600, 900} {
 		if s.Covers(at(fork, probe)) {
 			t.Fatalf("fork+%ds still reads as legal chaos; a wedge would go unhealed", probe)
 		}
@@ -226,12 +239,13 @@ func TestStraddleGeometryErrors(t *testing.T) {
 	fork := at(genesis, 900)
 
 	for name, w := range map[string][]window{
-		"too-little-before": {{start: -30, end: 90, anchor: FromFork, class: ClassStraddle}},
+		"too-little-before": {{start: -30, end: 60, anchor: FromFork, class: ClassStraddle}},
 		"too-little-after":  {{start: -90, end: 30, anchor: FromFork, class: ClassStraddle}},
-		"too-long-after":    {{start: -90, end: 200, anchor: FromFork, class: ClassStraddle}},
+		// end+hold must stay inside the bound: 90+120 > 180
+		"too-long-after": {{start: -90, end: 90, anchor: FromFork, class: ClassStraddle}},
 		"two-straddles": {
-			{start: -90, end: 90, anchor: FromFork, class: ClassStraddle},
-			{start: 300, end: 480, anchor: FromFork, class: ClassStraddle},
+			{start: -90, end: 60, anchor: FromFork, class: ClassStraddle},
+			{start: 300, end: 450, anchor: FromFork, class: ClassStraddle},
 		},
 	} {
 		profiles["test-"+name] = profile{windows: w, preForkMargin: 390}
@@ -242,21 +256,51 @@ func TestStraddleGeometryErrors(t *testing.T) {
 		}
 	}
 
-	// A share so heavy the expected dropped branch exceeds the bound.
-	heavy := topo()
-	heavy.HeavyShare = 0.95
 	profiles["test-straddle"] = profile{
-		windows:       []window{{start: -90, end: 90, anchor: FromFork, class: ClassStraddle}},
+		windows:       []window{{start: -120, end: 60, anchor: FromFork, class: ClassStraddle}},
 		preForkMargin: 390,
 	}
 	t.Cleanup(func() { delete(profiles, "test-straddle") })
-	if _, err := Resolve("test-straddle", genesis, fork, heavy); err == nil {
-		t.Fatal("a 95% victim share resolved; the heal rewind would be unbounded")
+	// The anchor must outweigh every island by the proposer-boost margin, or
+	// an island could win the heal and never rewind across the fork.
+	weak := topo()
+	weak.AnchorShare = 0.30 // lights hold 0.233 each: margin 0.067 > 0.05 passes; 0.27 would not
+	if _, err := Resolve("test-straddle", genesis, fork, weak); err != nil {
+		t.Fatalf("a 30/23 anchor margin was refused: %v", err)
 	}
-	// The victim rule is defensive - Resolve pins the heavy node itself -
-	// so exercise it directly.
-	if err := admitStraddle(Op{Class: ClassStraddle, Victims: []int{3}, Start: at(fork, -90), End: at(fork, 90)}, fork, topo()); err == nil {
-		t.Fatal("a straddle on a light victim passed admission")
+	weak.AnchorShare = 0.27
+	if _, err := Resolve("test-straddle", genesis, fork, weak); err == nil {
+		t.Fatal("an anchor barely heavier than an island resolved; proposer boost could flip the heal")
+	}
+	// At or above 2/3 the anchor finalizes its own fork block mid-straddle.
+	super := topo()
+	super.AnchorShare = 0.70
+	if _, err := Resolve("test-straddle", genesis, fork, super); err == nil {
+		t.Fatal("a 70% anchor resolved; it would finalize during the split")
+	}
+	// A single-island straddle is not a straddle: only the victim would revert the fork.
+	if err := admitStraddle(Op{Class: ClassStraddle, Victims: []int{2}, Start: at(fork, -120), End: at(fork, 60)}, fork, topo()); err == nil {
+		t.Fatal("a one-island straddle passed admission")
+	}
+}
+
+// A deep island must stall finality without being able to win: its summed
+// share stays inside (1/3, 1/2). Two lights at 20% do; one light or three do not.
+func TestDeepIslandShare(t *testing.T) {
+	if err := admitDeep(Op{Class: ClassDeep, Victims: []int{2, 3}}, topo()); err != nil {
+		t.Fatalf("a 40%% pair was refused: %v", err)
+	}
+	if err := admitDeep(Op{Class: ClassDeep, Victims: []int{2}}, topo()); err == nil {
+		t.Fatal("a 20% island passed: the majority would finalize past it")
+	}
+	if err := admitDeep(Op{Class: ClassDeep, Victims: []int{2, 3, 4}}, topo()); err == nil {
+		t.Fatal("a 60% island passed: it could finalize its own branch")
+	}
+	one := topo()
+	one.Lights = []int{2}
+	one.Participants = 2
+	if _, err := Resolve(preForkFixture(t), time.Unix(1, 0), at(time.Unix(1, 0), 1800), one); err == nil {
+		t.Fatal("a deep profile resolved with a single light; a deep island is a pair")
 	}
 }
 
@@ -275,7 +319,7 @@ func TestProfilesRespectStraddleWindow(t *testing.T) {
 		if !ok {
 			continue
 		}
-		quietTo := str.End.Add(120 * time.Second)
+		quietTo := str.Latest().Add(120 * time.Second)
 		for _, o := range s.Ops {
 			if o.Class == ClassStraddle || !o.Admitted() {
 				continue
