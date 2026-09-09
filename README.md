@@ -139,6 +139,8 @@ nodes and serves the live view (`make ui`). `migration-chaos` schedules partitio
 fork. `migration-gate` holds the at-genesis reorg service until every client finishes
 migrating, then hands disruptoor over. `verify-migration` judges a finished run.
 
+![the migration monitor on a synthetic lap](docs/migration-monitor.gif)
+
 The live view draws the chain on a slot axis: the canonical chain on lane 0, every competing
 branch on its own lane, blocks coloured by their primary root (MPT blue before I*, PBT orange
 after) and ringed by cross-node agreement on the *shadow* root - the PBT follower's root before
