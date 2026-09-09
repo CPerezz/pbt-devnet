@@ -3,6 +3,7 @@
 # has nothing to do with the package and only slows the upload.
 bin/
 artifacts/
+docs/
 **/*.log
 # `go build ./cmd/<x>/` drops the binary in the repo root; a 10MB upload per stray one.
 /pbtchaos
