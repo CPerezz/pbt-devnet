@@ -1,7 +1,4 @@
-// Command migration-gate holds a service back until every execution
-// client finishes migrating, then runs one partition of its own and
-// execs the wrapped command. Gating keeps disruptoor under exactly one
-// owner at a time; the reorg service otherwise has no activation boundary.
+// Command migration-gate holds a service back until every client's migration is done, then runs one partition of its own and execs the wrapped command; gating keeps disruptoor under exactly one owner at a time.
 package main
 
 import (
@@ -16,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/CPerezz/pbt-devnet/internal/cli"
 	"github.com/CPerezz/pbt-devnet/internal/disruptoor"
 	"github.com/CPerezz/pbt-devnet/internal/migmon"
 	"github.com/CPerezz/pbt-devnet/internal/migsched"
@@ -25,14 +23,12 @@ const (
 	donePoll  = 10 * time.Second // how often clients are polled for done
 	settle    = 60 * time.Second // pause after done before disturbing the network
 	watchPoll = 30 * time.Second // watchdog canonical-chain comparison interval
-	// deepWindow/shortWindow match the pre-fork schedule so both sides of
-	// the handoff are comparable.
+	// deepWindow/shortWindow match the pre-fork schedule so both sides of the handoff are comparable.
 	deepWindow  = 190 * time.Second
 	shortWindow = 150 * time.Second
 )
 
-// held marks a partition this process holds itself, so the watchdog does
-// not treat it as stuck.
+// held marks a partition this process holds itself, so the watchdog does not treat it as stuck.
 type held struct {
 	mu    sync.Mutex
 	until time.Time
@@ -72,31 +68,19 @@ func (e *elFlag) Set(v string) error {
 	return nil
 }
 
-type intsFlag struct{ vals []int }
-
-func (f *intsFlag) String() string { return fmt.Sprint(f.vals) }
-func (f *intsFlag) Set(v string) error {
-	var n int
-	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
-		return fmt.Errorf("not a participant index: %q", v)
-	}
-	f.vals = append(f.vals, n)
-	return nil
-}
-
 func main() {
 	var (
 		els       elFlag
 		cls       elFlag
-		protected intsFlag
+		protected cli.IntsFlag
 		api       = flag.String("disruptoor", "", "disruptoor native API base URL")
 		genesisTS = flag.Int64("genesis-time", 0, "chain genesis unix time")
 		forkTS    = flag.Int64("binary-trie-time", 0, "tree activation unix time")
 		profile   = flag.String("profile", "", "the chaos profile this run uses: "+strings.Join(migsched.Names(), ", "))
-		heavy     = flag.Int("heavy-node", 0, "participant index holding the heavy validator share")
-		share     = flag.Float64("heavy-share", 0.40, "that participant's share of the validator set")
+		anchor    = flag.Int("anchor-node", 1, "participant holding the heavy validator share; never a victim")
+		share     = flag.Float64("anchor-share", 0.40, "that participant's share of the validator set")
 		slotSecs  = flag.Int("seconds-per-slot", 6, "chain slot duration")
-		postOp    = flag.String("post-op", "deep-heavy", "partition to run once migration completes: none, short-light, deep-heavy")
+		postOp    = flag.String("post-op", "deep-pair", "partition to run once migration completes: none, short-light, deep-pair")
 		jsonlPath = flag.String("jsonl", "", "JSONL event path (default stdout)")
 	)
 	flag.Var(&els, "el", "execution client as name=url, repeatable; order is the participant index")
@@ -105,11 +89,11 @@ func main() {
 	flag.Parse()
 
 	wrapped := flag.Args()
-	if len(els.names) == 0 || *forkTS == 0 || *genesisTS == 0 || *profile == "" || *heavy == 0 {
-		fmt.Fprintln(os.Stderr, "required: --el (>=1), --genesis-time, --binary-trie-time, --profile, --heavy-node")
+	if len(els.names) == 0 || *forkTS == 0 || *genesisTS == 0 || *profile == "" {
+		fmt.Fprintln(os.Stderr, "required: --el (>=1), --genesis-time, --binary-trie-time, --profile")
 		os.Exit(2)
 	}
-	if *postOp != "none" && *postOp != "short-light" && *postOp != "deep-heavy" {
+	if *postOp != "none" && *postOp != "short-light" && *postOp != "deep-pair" {
 		fmt.Fprintf(os.Stderr, "unknown --post-op %q\n", *postOp)
 		os.Exit(2)
 	}
@@ -127,11 +111,12 @@ func main() {
 	log := migmon.NewLog(out)
 
 	genesis, fork := time.Unix(*genesisTS, 0), time.Unix(*forkTS, 0)
-	lights := lightNodes(len(els.names), *heavy, protected.vals)
+	lights := migsched.Lights(len(els.names), *anchor, protected)
 	sched, err := migsched.Resolve(*profile, genesis, fork, migsched.Topology{
-		Heavy:          *heavy,
+		Anchor:         *anchor,
 		Lights:         lights,
-		HeavyShare:     *share,
+		Participants:   len(els.names),
+		AnchorShare:    *share,
 		SecondsPerSlot: *slotSecs,
 	})
 	if err != nil {
@@ -181,7 +166,7 @@ func main() {
 				return
 			}
 		}
-		if err := runPostOp(ctx, log, d, clients, *postOp, *heavy, lights, len(els.names), mine); err != nil {
+		if err := runPostOp(ctx, log, d, clients, *postOp, lights, len(els.names), mine, deepWindow, shortWindow); err != nil {
 			log.Emit(migmon.Event{Kind: migmon.EvCritical, Finding: migmon.FindingNoConvergence, Detail: err.Error()})
 			os.Exit(1)
 		}
@@ -203,24 +188,7 @@ func main() {
 	}
 }
 
-// lightNodes returns the disruptable participants that are neither the
-// heavy victim nor protected.
-func lightNodes(count, heavy int, protect []int) []int {
-	blocked := map[int]bool{heavy: true}
-	for _, n := range protect {
-		blocked[n] = true
-	}
-	var out []int
-	for i := 1; i <= count; i++ {
-		if !blocked[i] {
-			out = append(out, i)
-		}
-	}
-	return out
-}
-
-// waitForDone blocks until every introspectable client reports done. A
-// client with no introspection surface is excluded and logged once.
+// waitForDone blocks until every introspectable client reports done; one with no introspection surface is excluded and logged once.
 func waitForDone(ctx context.Context, log *migmon.Log, clients []migmon.Client) bool {
 	var watched []migmon.Client
 	for _, c := range clients {
@@ -274,32 +242,39 @@ func waitForDone(ctx context.Context, log *migmon.Log, clients []migmon.Client) 
 	}
 }
 
-// runPostOp applies one partition after migration, heals it, and waits
-// for the network to reconverge.
-func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clients []migmon.Client, kind string, heavy int, lights []int, participants int, mine *held) error {
-	victim, window := heavy, deepWindow
-	if kind == "short-light" {
+// runPostOp applies one partition after migration, heals it, and waits for reconvergence; a deep island is a pair of lights that together stall finality without winning the heal.
+func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clients []migmon.Client, kind string, lights []int, participants int, mine *held, deepWindow, shortWindow time.Duration) error {
+	var victims []int
+	window := deepWindow
+	switch kind {
+	case "short-light":
 		if len(lights) == 0 {
 			return fmt.Errorf("post-migration short needs a light participant; none are disruptable")
 		}
-		victim, window = lights[0], shortWindow
+		victims, window = lights[:1], shortWindow
+	default:
+		if len(lights) < 2 {
+			return fmt.Errorf("post-migration deep needs a pair of light participants; %d disruptable", len(lights))
+		}
+		victims = lights[:2]
 	}
 	if n, err := d.Containers(); err != nil || n == 0 {
 		return fmt.Errorf("disruptoor sees %d containers (err=%v); a partition here would change no traffic", n, err)
 	}
 
 	name := fmt.Sprintf("post-migration-%s", kind)
-	// Claim the window before applying it: the watchdog runs concurrently
-	// and would otherwise heal this as an unclaimed divergence.
+	// Claim the window before applying it: the watchdog would otherwise heal this as an unclaimed divergence.
 	mine.hold(window)
-	if err := d.Partition(name, others(participants, victim), []int{victim}); err != nil {
+	if err := d.Partition(name, migsched.Others(participants, victims), victims); err != nil {
 		mine.release()
-		return fmt.Errorf("partitioning node %d after the migration: %w", victim, err)
+		return fmt.Errorf("partitioning nodes %v after the migration: %w", victims, err)
 	}
-	log.Emit(migmon.Event{
-		Kind: migmon.EvIsolate, Node: nodeName(victim),
-		Detail: fmt.Sprintf("class=%s window=%.0fs after the migration completed", kind, window.Seconds()),
-	})
+	for _, v := range victims {
+		log.Emit(migmon.Event{
+			Kind: migmon.EvIsolate, Node: migsched.NodeName(v),
+			Detail: fmt.Sprintf("class=%s window=%.0fs after the migration completed", kind, window.Seconds()),
+		})
+	}
 
 	if !sleep(ctx, window) {
 		d.Clear()
@@ -308,10 +283,11 @@ func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clien
 	if err := d.Clear(); err != nil {
 		return fmt.Errorf("healing the post-migration partition: %w", err)
 	}
-	log.Emit(migmon.Event{Kind: migmon.EvHeal, Node: nodeName(victim), Detail: "post-migration window closed"})
+	for _, v := range victims {
+		log.Emit(migmon.Event{Kind: migmon.EvHeal, Node: migsched.NodeName(v), Detail: "post-migration window closed"})
+	}
 
-	// Rebuild the peer mesh: this devnet's execution layer runs with
-	// almost no peers of its own.
+	// Rebuild the peer mesh: this devnet's execution layer runs with almost no peers of its own.
 	rctx, rcancel := context.WithTimeout(ctx, 30*time.Second)
 	defer rcancel()
 	if err := migmon.Repeer(rctx, clients); err != nil {
@@ -325,10 +301,7 @@ func runPostOp(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clien
 	return err
 }
 
-// awaitConvergence waits for every client to agree on the canonical chain
-// again. On deadline expiry, if the head spread is still shrinking the
-// wait is extended once by the same deadline; a static or growing spread
-// fails immediately.
+// awaitConvergence waits for every client to agree on the canonical chain again, extending the deadline once if the head spread is still shrinking; a static or growing spread fails immediately.
 func awaitConvergence(ctx context.Context, log *migmon.Log, clients []migmon.Client) error {
 	deadline := time.Now().Add(migmon.ConvergenceGrace * time.Second)
 	extended := false
@@ -368,8 +341,7 @@ func awaitConvergence(ctx context.Context, log *migmon.Log, clients []migmon.Cli
 	}
 }
 
-// spreadShrinking samples the head spread three times, 5s apart, and
-// reports whether it is strictly narrowing.
+// spreadShrinking samples the head spread three times, 5s apart, and reports whether it is strictly narrowing.
 func spreadShrinking(ctx context.Context, clients []migmon.Client) (bool, string, error) {
 	samples := make([]uint64, 0, 3)
 	for i := range 3 {
@@ -414,8 +386,7 @@ func headSpread(ctx context.Context, clients []migmon.Client) (uint64, error) {
 	return max - min, nil
 }
 
-// converged reports whether every client has the same canonical hash at the
-// shallowest common height.
+// converged reports whether every client has the same canonical hash at the shallowest common height.
 func converged(ctx context.Context, clients []migmon.Client) (bool, string, error) {
 	var min uint64
 	first := true
@@ -449,9 +420,7 @@ func converged(ctx context.Context, clients []migmon.Client) (bool, string, erro
 	return false, fmt.Sprintf("block %d: %s", min, strings.Join(parts, " vs ")), nil
 }
 
-// watchdog heals a partition nobody is holding. Inside a scheduled window
-// divergence is expected; outside one, past the grace period, it means a
-// driver died holding the partition open.
+// watchdog heals a partition nobody is holding; inside a scheduled window divergence is expected, outside one past the grace period it means a driver died holding it.
 func watchdog(ctx context.Context, log *migmon.Log, d *disruptoor.Client, clients []migmon.Client, sched migsched.Schedule, mine *held) {
 	var since time.Time
 	fired := false
@@ -500,8 +469,7 @@ func watchdog(ctx context.Context, log *migmon.Log, d *disruptoor.Client, client
 	}
 }
 
-// healKind: State() read right before Clear() says whether a partition was
-// applied. If so a driver died holding it; otherwise re-peering fixed it.
+// healKind: State() read right before Clear() says whether a partition was applied, distinguishing a dead driver from a mesh-level re-peer fix.
 func healKind(partsBefore int, stateErr error) string {
 	if stateErr == nil && partsBefore > 0 {
 		return "dead-driver: "
@@ -519,20 +487,7 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func others(participants, victim int) []int {
-	var out []int
-	for i := 1; i <= participants; i++ {
-		if i != victim {
-			out = append(out, i)
-		}
-	}
-	return out
-}
-
-func nodeName(idx int) string { return fmt.Sprintf("node-%d", idx) }
-
-// peerStarvedAfter is how long a consensus client may sit at zero peers
-// outside any scheduled partition before it is reported starved.
+// peerStarvedAfter is how long a consensus client may sit at zero peers outside any scheduled partition before it is reported starved.
 const peerStarvedAfter = 90 * time.Second
 
 // starvation is one consensus client's zero-peer episode.
@@ -541,9 +496,7 @@ type starvation struct {
 	fired bool
 }
 
-// observe updates the episode with one poll and reports whether to emit.
-// Peers, an unreachable API, or a legally held partition all end the
-// episode: a victim at zero peers inside its window is not starved.
+// observe updates the episode with one poll and reports whether to emit; peers, an unreachable API, or a legally held partition all end the episode.
 func (s *starvation) observe(now time.Time, peers int, err error, held bool) bool {
 	if err != nil || peers > 0 || held {
 		*s = starvation{}
@@ -560,11 +513,7 @@ func (s *starvation) observe(now time.Time, peers int, err error, held bool) boo
 	return true
 }
 
-// peerWatch reports a consensus client left with no peers while the network
-// is supposed to be whole. Partitions cut peers by design; what must not
-// happen is a client failing to get them back after the heal - measured on
-// the bootnode, which has no boot-nodes of its own to redial. Emitted as a
-// warning once per episode; the lap driver restarts the client on it.
+// peerWatch reports a consensus client left with no peers while the network should be whole, measured on the bootnode which has no boot-nodes to redial; emitted once per episode, and the lap driver restarts the client on it.
 func peerWatch(ctx context.Context, log *migmon.Log, cls elFlag, sched migsched.Schedule, mine *held) {
 	episodes := make([]starvation, len(cls.names))
 	for {

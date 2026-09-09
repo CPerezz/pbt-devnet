@@ -25,6 +25,8 @@ var ErrNoIntrospection = errors.New("this client exposes no migration introspect
 type Header struct {
 	Number uint64
 	Hash   string
+	Parent string
+	Root   string // header state root: MPT before the binary tree, PBT from I* on
 	Time   uint64
 }
 
@@ -45,6 +47,9 @@ type Client interface {
 	AddPeer(ctx context.Context, enode string) error
 	HeaderByNumber(ctx context.Context, height uint64) (*Header, error)
 	HeaderByTag(ctx context.Context, tag string) (*Header, error)
+	// HeaderByHash reads a block the node holds on any branch; nil for an unknown hash.
+	HeaderByHash(ctx context.Context, hash string) (*Header, error)
+	PeerCount(ctx context.Context) (int, error)
 }
 
 // ClientType returns the execution implementation named in a service name (el-<index>-<execution>-<consensus>).
@@ -161,29 +166,43 @@ func (c *rpcClient) call(ctx context.Context, method string, out any, params ...
 
 // rpcHeader is the wire shape of the header fields read.
 type rpcHeader struct {
-	Number    hexutil.Uint64 `json:"number"`
-	Hash      common.Hash    `json:"hash"`
-	Timestamp hexutil.Uint64 `json:"timestamp"`
+	Number     hexutil.Uint64 `json:"number"`
+	Hash       common.Hash    `json:"hash"`
+	ParentHash common.Hash    `json:"parentHash"`
+	StateRoot  common.Hash    `json:"stateRoot"`
+	Timestamp  hexutil.Uint64 `json:"timestamp"`
 }
 
 func (c *rpcClient) HeaderByNumber(ctx context.Context, height uint64) (*Header, error) {
-	return c.header(ctx, hexutil.EncodeUint64(height))
+	return c.header(ctx, "eth_getBlockByNumber", hexutil.EncodeUint64(height))
 }
 
 // HeaderByTag reads a named head; "finalized" learns settlement without a consensus-layer API.
 func (c *rpcClient) HeaderByTag(ctx context.Context, tag string) (*Header, error) {
-	return c.header(ctx, tag)
+	return c.header(ctx, "eth_getBlockByNumber", tag)
 }
 
-func (c *rpcClient) header(ctx context.Context, param string) (*Header, error) {
+func (c *rpcClient) HeaderByHash(ctx context.Context, hash string) (*Header, error) {
+	return c.header(ctx, "eth_getBlockByHash", hash)
+}
+
+func (c *rpcClient) header(ctx context.Context, method, param string) (*Header, error) {
 	var h *rpcHeader
-	if err := c.call(ctx, "eth_getBlockByNumber", &h, param, false); err != nil {
+	if err := c.call(ctx, method, &h, param, false); err != nil {
 		return nil, err
 	}
 	if h == nil {
-		return nil, nil // a legal absence: the tag has no block yet
+		return nil, nil // a legal absence: the tag has no block yet, or the hash is unknown here
 	}
-	return &Header{Number: uint64(h.Number), Hash: h.Hash.Hex(), Time: uint64(h.Timestamp)}, nil
+	return &Header{Number: uint64(h.Number), Hash: h.Hash.Hex(), Parent: h.ParentHash.Hex(), Root: h.StateRoot.Hex(), Time: uint64(h.Timestamp)}, nil
+}
+
+func (c *rpcClient) PeerCount(ctx context.Context) (int, error) {
+	var out hexutil.Uint64
+	if err := c.call(ctx, "net_peerCount", &out); err != nil {
+		return 0, err
+	}
+	return int(out), nil
 }
 
 func (c *rpcClient) HeadNumber(ctx context.Context) (uint64, error) {

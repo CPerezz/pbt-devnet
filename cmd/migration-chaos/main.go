@@ -1,7 +1,5 @@
-// Command migration-chaos applies a fixed partition schedule to a
-// migrating devnet: deep windows on the heavy node before the fork, short
-// ones on light nodes, optionally one spanning the fork. Schedule resolved
-// by internal/migsched, shared with the post-migration gate.
+// Command migration-chaos drives a fixed partition schedule (internal/migsched) against a
+// migrating devnet: pair and single-light windows before the fork, one straddle across it.
 package main
 
 import (
@@ -23,8 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-// elFlag collects repeated --el name=url flags. The URL is unused here;
-// flag order gives the 1-based participant index disruptoor selects by.
+// elFlag collects repeated --el name=url flags; flag order is the 1-based participant index.
 type elFlag struct {
 	names []string
 	urls  []string
@@ -41,28 +38,16 @@ func (e *elFlag) Set(v string) error {
 	return nil
 }
 
-type intsFlag struct{ vals []int }
-
-func (f *intsFlag) String() string { return fmt.Sprint(f.vals) }
-func (f *intsFlag) Set(v string) error {
-	var n int
-	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
-		return fmt.Errorf("not a participant index: %q", v)
-	}
-	f.vals = append(f.vals, n)
-	return nil
-}
-
 func main() {
 	var (
 		els       elFlag
-		protected intsFlag
+		protected cli.IntsFlag
 		api       = flag.String("disruptoor", "", "disruptoor native API base URL")
 		genesisTS = flag.Int64("genesis-time", 0, "chain genesis unix time")
 		forkTS    = flag.Int64("binary-trie-time", 0, "tree activation unix time")
 		profile   = flag.String("profile", "", "schedule profile: "+strings.Join(migsched.Names(), ", "))
-		heavy     = flag.Int("heavy-node", 0, "participant index holding the heavy validator share")
-		share     = flag.Float64("heavy-share", 0.40, "that participant's share of the validator set")
+		anchor    = flag.Int("anchor-node", 1, "participant holding the heavy validator share; never a victim, every heal converges on its chain")
+		share     = flag.Float64("anchor-share", 0.40, "that participant's share of the validator set")
 		slotSecs  = flag.Int("seconds-per-slot", 6, "chain slot duration")
 		dryRun    = flag.Bool("dry-run", false, "print the resolved schedule and exit")
 		jsonlPath = flag.String("jsonl", "", "JSONL event path (default stdout)")
@@ -73,8 +58,12 @@ func main() {
 	flag.Var(&protected, "protect-node", "participant index never isolated, repeatable")
 	flag.Parse()
 
-	if *genesisTS == 0 || *forkTS == 0 || *profile == "" || len(els.names) == 0 || *heavy == 0 {
-		fmt.Fprintln(os.Stderr, "required: --el (>=1), --genesis-time, --binary-trie-time, --profile, --heavy-node")
+	if *genesisTS == 0 || *forkTS == 0 || *profile == "" || len(els.names) == 0 {
+		fmt.Fprintln(os.Stderr, "required: --el (>=1), --genesis-time, --binary-trie-time, --profile")
+		os.Exit(2)
+	}
+	if *anchor < 1 || *anchor > len(els.names) {
+		fmt.Fprintf(os.Stderr, "anchor participant %d is outside the %d configured clients\n", *anchor, len(els.names))
 		os.Exit(2)
 	}
 
@@ -91,19 +80,20 @@ func main() {
 	log := migmon.NewLog(out)
 
 	genesis, fork := time.Unix(*genesisTS, 0), time.Unix(*forkTS, 0)
-	topo, err := topology(els.names, protected.vals, *heavy, *share, *slotSecs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "topology: %v\n", err)
-		os.Exit(2)
-	}
-	sched, err := migsched.Resolve(*profile, genesis, fork, topo)
+	sched, err := migsched.Resolve(*profile, genesis, fork, migsched.Topology{
+		Anchor:         *anchor,
+		Lights:         migsched.Lights(len(els.names), *anchor, protected),
+		Participants:   len(els.names),
+		AnchorShare:    *share,
+		SecondsPerSlot: *slotSecs,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "schedule: %v\n", err)
 		os.Exit(2)
 	}
 
 	// Published before use: readers need it for op class and heal deadline.
-	publish(log, sched, genesis, fork, *heavy)
+	publish(log, sched, genesis, fork, *anchor)
 
 	if *dryRun {
 		emitPlan(log, sched)
@@ -122,83 +112,80 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Clients are needed only to rebuild their peer mesh after a partition.
 	clients := make([]migmon.Client, 0, len(els.names))
 	for i, name := range els.names {
 		clients = append(clients, migmon.NewClient(name, els.urls[i]))
 	}
 
-	// The straddle injector needs one RPC per side (participant indices are
-	// 1-based flag order). Fewer than two keys, or no straddle in this
-	// profile, leaves it off.
+	// The injector writes on the first island and on the anchor, whose chain wins the heal.
 	var inj *injector
 	if str, ok := sched.Straddle(); ok && len(keys) >= 2 {
-		majority := 1
-		if len(protected.vals) > 0 {
-			majority = protected.vals[0]
-		}
-		victimIdx, majIdx := str.Victims[0]-1, majority-1
-		if victimIdx >= 0 && victimIdx < len(els.urls) && majIdx >= 0 && majIdx < len(els.urls) {
-			parsed := make([]*ecdsa.PrivateKey, 0, len(keys))
-			for _, k := range keys {
-				key, err := crypto.HexToECDSA(strings.TrimPrefix(k, "0x"))
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "bad --key: %v\n", err)
-					os.Exit(2)
-				}
-				parsed = append(parsed, key)
-			}
-			var err error
-			if inj, err = newInjector(els.urls[victimIdx], els.urls[majIdx], parsed); err != nil {
-				fmt.Fprintf(os.Stderr, "injector: %v\n", err)
+		parsed := make([]*ecdsa.PrivateKey, 0, len(keys))
+		for _, k := range keys {
+			key, err := crypto.HexToECDSA(strings.TrimPrefix(k, "0x"))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "bad --key: %v\n", err)
 				os.Exit(2)
 			}
+			parsed = append(parsed, key)
+		}
+		if inj, err = newInjector(els.urls[str.Victims[0]-1], els.urls[*anchor-1], parsed); err != nil {
+			fmt.Fprintf(os.Stderr, "injector: %v\n", err)
+			os.Exit(2)
 		}
 	}
-	run(log, d, sched, len(els.names), clients, inj)
+	watch := straddleWatch{fork: fork, anchor: clients[*anchor-1], clients: clients}
+	run(log, d, sched, clients, inj, watch.probe())
 }
 
-// topology derives the victim layout: the heavy participant takes every
-// deep and straddle window, unprotected nodes rotate through short ones.
-func topology(names []string, protect []int, heavy int, share float64, slotSecs int) (migsched.Topology, error) {
-	blocked := map[int]bool{}
-	for _, n := range protect {
-		blocked[n] = true
-	}
-	if blocked[heavy] {
-		return migsched.Topology{}, fmt.Errorf("participant %d is both the heavy victim and protected", heavy)
-	}
-	if heavy < 1 || heavy > len(names) {
-		return migsched.Topology{}, fmt.Errorf("heavy participant %d is outside the %d configured clients", heavy, len(names))
-	}
-	var lights []int
-	for i := range names {
-		idx := i + 1
-		if idx != heavy && !blocked[idx] {
-			lights = append(lights, idx)
+// crossedFn reports whether a victim's head is past the fork on a block the anchor does not know.
+type crossedFn func(ctx context.Context, victim int) (bool, error)
+
+type straddleWatch struct {
+	fork    time.Time
+	anchor  migmon.Client
+	clients []migmon.Client
+}
+
+func (w straddleWatch) probe() crossedFn {
+	return func(ctx context.Context, victim int) (bool, error) {
+		head, err := w.clients[victim-1].HeaderByTag(ctx, "latest")
+		if err != nil {
+			return false, err
 		}
+		if head == nil || int64(head.Time) < w.fork.Unix() {
+			return false, nil
+		}
+		known, err := w.anchor.HeaderByHash(ctx, head.Hash)
+		if err != nil {
+			return false, err
+		}
+		return known == nil, nil
 	}
-	return migsched.Topology{
-		Heavy:          heavy,
-		Lights:         lights,
-		HeavyShare:     share,
-		SecondsPerSlot: slotSecs,
-	}, nil
 }
 
-// publish writes the resolved schedule as one JSONL record.
-func publish(log *migmon.Log, s migsched.Schedule, genesis, fork time.Time, heavy int) {
-	raw, err := json.Marshal(s.NewDump(genesis, fork, heavy))
+// islands renders an op's disruptoor groups: the rest of the network, then one per victim when mutual.
+func islands(participants int, o migsched.Op) [][]int {
+	groups := [][]int{migsched.Others(participants, o.Victims)}
+	if o.Mutual {
+		for _, v := range o.Victims {
+			groups = append(groups, []int{v})
+		}
+		return groups
+	}
+	return append(groups, o.Victims)
+}
+
+func publish(log *migmon.Log, s migsched.Schedule, genesis, fork time.Time, anchor int) {
+	raw, err := json.Marshal(s.NewDump(genesis, fork, anchor))
 	if err != nil {
-		// Unpublishable schedule cannot be judged either.
 		fmt.Fprintf(os.Stderr, "publishing the schedule: %v\n", err)
 		os.Exit(1)
 	}
 	log.Emit(migmon.Event{Kind: migmon.EvSchedule, Detail: s.Profile, Raw: raw})
 }
 
-// emitPlan prints what the schedule would do, without touching disruptoor.
-// Records carry a dry-run marker so they're never read as real.
+// emitPlan prints the schedule without touching disruptoor; Plan marks the records as never executed.
 func emitPlan(log *migmon.Log, s migsched.Schedule) {
 	for _, o := range s.Ops {
 		kind, detail := migmon.EvIsolate, window(o)
@@ -206,7 +193,7 @@ func emitPlan(log *migmon.Log, s migsched.Schedule) {
 			kind, detail = migmon.EvSkip, o.Refused
 		}
 		for _, v := range o.Victims {
-			log.Emit(migmon.Event{Kind: kind, Node: nodeName(v), Detail: detail, Plan: true})
+			log.Emit(migmon.Event{Kind: kind, Node: migsched.NodeName(v), Detail: detail, Plan: true})
 		}
 	}
 	for _, f := range s.Failsafes {
@@ -215,31 +202,51 @@ func emitPlan(log *migmon.Log, s migsched.Schedule) {
 	log.Emit(migmon.Event{Kind: migmon.EvPause, Detail: "quiet from " + s.Quiet.UTC().Format(time.RFC3339), Plan: true})
 }
 
-// run executes the schedule as one serial action list: op starts, ends,
-// and failsafe sweeps interleaved in wall-clock order.
-func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participants int, clients []migmon.Client, inj *injector) {
+// clock is the loop's notion of time, faked in tests; sleepUntil is false when shutdown interrupted it.
+type clock struct {
+	now        func() time.Time
+	sleepUntil func(time.Time) bool
+}
+
+func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, clients []migmon.Client, inj *injector, probe crossedFn) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	clk := clock{now: time.Now, sleepUntil: func(t time.Time) bool { return sleepUntil(t, stop) }}
+	if execute(log, d, s, clients, inj, probe, clk) {
+		<-stop
+	}
+}
 
+// execute runs the schedule as one serial action list; false means a shutdown signal cut it short.
+func execute(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, clients []migmon.Client, inj *injector, probe crossedFn, clk clock) bool {
 	for _, o := range s.Ops {
 		if !o.Admitted() {
 			for _, v := range o.Victims {
-				log.Emit(migmon.Event{Kind: migmon.EvSkip, Node: nodeName(v), Detail: o.Refused})
+				log.Emit(migmon.Event{Kind: migmon.EvSkip, Node: migsched.NodeName(v), Detail: o.Refused})
 			}
 		}
 	}
 
-	// Tracks whether the last op's heal is known to have worked.
-	healed := true
+	// A shutdown mid-window must not leave the partition applied.
+	wait := func(t time.Time) bool {
+		if clk.sleepUntil(t) {
+			return true
+		}
+		d.Clear()
+		return false
+	}
+	sleepFor := func(dur time.Duration) bool { return clk.sleepUntil(clk.now().Add(dur)) }
+
+	healed := true               // the last op's heal is known to have worked
+	applied := map[string]bool{} // ops disruptoor accepted; only these have anything to heal
 
 	for _, a := range s.Actions() {
 		switch a.Kind {
 		case migsched.ActOpStart:
 			// Deploy while the network is still whole, so it lands canonical.
 			if inj != nil && a.Op.Class == migsched.ClassStraddle {
-				if !sleepUntil(a.At.Add(-60*time.Second), stop) {
-					d.Clear()
-					return
+				if !wait(a.At.Add(-60 * time.Second)) {
+					return false
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 				if err := inj.deploy(ctx, log); err != nil {
@@ -247,30 +254,29 @@ func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participant
 				}
 				cancel()
 			}
-			if !sleepUntil(a.At, stop) {
-				d.Clear()
-				return
+			if !wait(a.At) {
+				return false
 			}
-			if a.StaleAt(time.Now()) {
-				log.Emit(migmon.Event{Kind: migmon.EvSkip, Node: nodeName(a.Op.Victims[0]),
+			if a.StaleAt(clk.now()) {
+				log.Emit(migmon.Event{Kind: migmon.EvSkip, Node: migsched.NodeName(a.Op.Victims[0]),
 					Detail: fmt.Sprintf("op %s window already closed at execution time; skipped, not run zero-length", a.Op.Name)})
 				continue
 			}
-			if err := d.Partition(a.Op.Name, others(participants, a.Op.Victims), a.Op.Victims); err != nil {
+			if err := d.Partition(a.Op.Name, islands(len(clients), a.Op)...); err != nil {
 				for _, v := range a.Op.Victims {
-					log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: nodeName(v), Detail: "partition failed: " + err.Error()})
+					log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: migsched.NodeName(v), Detail: "partition failed: " + err.Error()})
 				}
 				continue
 			}
+			applied[a.Op.Name] = true
 			healed = false
 			for _, v := range a.Op.Victims {
-				log.Emit(migmon.Event{Kind: migmon.EvIsolate, Node: nodeName(v), Detail: window(a.Op)})
+				log.Emit(migmon.Event{Kind: migmon.EvIsolate, Node: migsched.NodeName(v), Detail: window(a.Op)})
 			}
 			if inj != nil && a.Op.Class == migsched.ClassStraddle {
 				// Let both sides mint a block first, then write conflicting state.
-				if !sleepUntil(a.At.Add(15*time.Second), stop) {
-					d.Clear()
-					return
+				if !wait(a.At.Add(15 * time.Second)) {
+					return false
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 110*time.Second)
 				inj.splitWrites(ctx, log)
@@ -278,9 +284,22 @@ func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participant
 			}
 
 		case migsched.ActOpEnd:
-			if !sleepUntil(a.At, stop) {
-				d.Clear()
-				return
+			if !wait(a.At) {
+				return false
+			}
+			if !applied[a.Op.Name] {
+				for _, v := range a.Op.Victims {
+					log.Emit(migmon.Event{Kind: migmon.EvSkip, Node: migsched.NodeName(v), Detail: "never applied: " + a.Op.Name})
+				}
+				continue
+			}
+			var crossed, unreachable map[int]bool
+			if !a.Op.HoldUntil.IsZero() {
+				var ok bool
+				if crossed, unreachable, ok = holdUntilCrossed(log, a.Op, probe, s.SlotSeconds, clk.now, sleepFor); !ok {
+					d.Clear()
+					return false
+				}
 			}
 			if err := d.Clear(); err != nil {
 				log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "heal failed: " + err.Error()})
@@ -288,14 +307,20 @@ func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participant
 			}
 			healed = true
 			for _, v := range a.Op.Victims {
-				log.Emit(migmon.Event{Kind: migmon.EvHeal, Node: nodeName(v), Detail: "window closed"})
+				detail := "window closed"
+				switch {
+				case unreachable[v]:
+					detail += "; unreachable during the hold"
+				case !a.Op.HoldUntil.IsZero() && !crossed[v]:
+					detail += "; never crossed the fork on its own branch"
+				}
+				log.Emit(migmon.Event{Kind: migmon.EvHeal, Node: migsched.NodeName(v), Detail: detail})
 			}
 			repeer(log, clients)
 
 		case migsched.ActSweep:
-			if !sleepUntil(a.At, stop) {
-				d.Clear()
-				return
+			if !wait(a.At) {
+				return false
 			}
 			err := d.Clear()
 			switch {
@@ -315,11 +340,60 @@ func run(log *migmon.Log, d *disruptoor.Client, s migsched.Schedule, participant
 		}
 	}
 
-	if !sleepUntil(s.Quiet, stop) {
-		return
+	if !clk.sleepUntil(s.Quiet) {
+		return false
 	}
 	log.Emit(migmon.Event{Kind: migmon.EvPause, Detail: "schedule complete; disruptoor released"})
-	<-stop
+	return true
+}
+
+// holdUntilCrossed polls once a slot until every victim has crossed the fork on its own branch
+// or HoldUntil passes; unreachable are victims whose probe failed on every poll, ok is false on shutdown.
+func holdUntilCrossed(log *migmon.Log, o migsched.Op, probe crossedFn, slotSeconds int64, now func() time.Time, sleep func(time.Duration) bool) (crossed, unreachable map[int]bool, ok bool) {
+	crossed = map[int]bool{}
+	reached, warned := map[int]bool{}, map[int]bool{}
+	paused := false
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		var waiting []string
+		for _, v := range o.Victims {
+			if crossed[v] {
+				continue
+			}
+			switch c, err := probe(ctx, v); {
+			case err != nil:
+				if !warned[v] {
+					warned[v] = true
+					log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: migsched.NodeName(v), Detail: "hold probe: " + err.Error()})
+				}
+			case c:
+				reached[v], crossed[v] = true, true
+				log.Emit(migmon.Event{Kind: migmon.EvIsolate, Node: migsched.NodeName(v), Detail: "crossed the fork on its own branch"})
+				continue
+			default:
+				reached[v] = true
+			}
+			waiting = append(waiting, migsched.NodeName(v))
+		}
+		cancel()
+		if len(waiting) == 0 || !now().Before(o.HoldUntil) {
+			break
+		}
+		if !paused {
+			paused = true
+			log.Emit(migmon.Event{Kind: migmon.EvPause, Detail: "hold: waiting for " + strings.Join(waiting, ",") + " to cross the fork"})
+		}
+		if !sleep(time.Duration(slotSeconds) * time.Second) {
+			return crossed, nil, false
+		}
+	}
+	unreachable = map[int]bool{}
+	for _, v := range o.Victims {
+		if !reached[v] {
+			unreachable[v] = true
+		}
+	}
+	return crossed, unreachable, true
 }
 
 // sleepUntil returns false if a shutdown signal arrived first.
@@ -336,29 +410,11 @@ func sleepUntil(t time.Time, stop <-chan os.Signal) bool {
 	}
 }
 
-// others returns every participant index outside victims, ascending.
-func others(participants int, victims []int) []int {
-	skip := map[int]bool{}
-	for _, v := range victims {
-		skip[v] = true
-	}
-	var out []int
-	for i := 1; i <= participants; i++ {
-		if !skip[i] {
-			out = append(out, i)
-		}
-	}
-	return out
-}
-
-func nodeName(idx int) string { return fmt.Sprintf("node-%d", idx) }
-
 func window(o migsched.Op) string {
 	return fmt.Sprintf("class=%s start=%d end=%d", o.Class, o.Start.Unix(), o.End.Unix())
 }
 
-// repeer rebuilds the execution layer's peer mesh after a partition: a
-// victim missing blocks otherwise has no peer to fetch the gap from.
+// repeer rebuilds the peer mesh after a heal: a victim missing blocks otherwise has no peer to fetch from.
 func repeer(log *migmon.Log, clients []migmon.Client) {
 	if len(clients) < 2 {
 		return

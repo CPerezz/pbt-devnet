@@ -2,8 +2,8 @@
 # nodes convert at boot and switch at binaryTrieTime = amsterdam_time + fork_offset_seconds;
 # reorgs run before, across, and after the fork. Non-pbt_* keys are ethereum-package schema.
 
-# Validator stake is rendered by main.star from pbt_migration.heavy_node: the heavy
-# participant holds 40%, so isolating it stalls finality without letting it win.
+# Validator stake is rendered by main.star from pbt_migration.anchor_node: the bootnode
+# anchors 40% and is never partitioned; the lights it forces back onto its chain hold 20% each.
 participants:
   # Participant 1 is the bootnode (no --boot-nodes of its own) and is never disrupted.
   - el_type: geth
@@ -111,4 +111,4 @@ pbt_migration:
   enabled: true
   fork_offset_seconds: 1800
   chaos_profile: composite
-  post_op: deep-heavy
+  post_op: deep-pair

@@ -26,9 +26,12 @@ watch_starved() {
   done
 }
 
-# Host-side node restart in the schedule's gap; 0 skips it. Never the heavy victim.
+# Host-side node restart in the composite schedule's gap; 0 skips it. Never the
+# anchor (participant 1). The short heals at +940 and a heal may take 120s to
+# reconverge; restarting inside that window contaminates its evidence, and the
+# verifier fails the lap for it.
 RESTART_NODE="${RESTART_NODE:-4}"
-RESTART_AT="${RESTART_AT:-1000}"   # seconds after genesis
+RESTART_AT="${RESTART_AT:-1080}"   # seconds after genesis
 RESTART_FOR="${RESTART_FOR:-60}"
 # Post-switchover scenarios: the full at-genesis suite by default.
 SCENARIOS="${SCENARIOS:-code-sole code-shared delegate account storage-add storage-del}"
@@ -36,30 +39,14 @@ SCENARIO_DEPTH="${SCENARIO_DEPTH:-8}"
 # The reorg service's API port inside the enclave, matching main.star.
 CHAOS_PORT="${CHAOS_PORT:-7800}"
 
-# HEAVY=<n> rewrites pbt_migration.heavy_node into a temp copy of the args file.
-HEAVY="${HEAVY:-}"
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 mkdir -p "$OUT"
 
 say() { printf '%s  %s\n' "$(date +%H:%M:%S)" "$*"; }
 
+# Build the judge first: a lap whose verdict cannot be computed is wasted.
+go build -o bin/verify-migration ./cmd/verify-migration
 say "starting $ENCLAVE from $ARGS"
-if [ -n "$HEAVY" ]; then
-  python3 - "$ARGS" "$OUT/args-heavy.yaml" "$HEAVY" <<'PYEOF'
-import re, sys
-src, dst, heavy = sys.argv[1], sys.argv[2], int(sys.argv[3])
-t = open(src).read()
-if re.search(r'^(\s*)heavy_node:\s*\d+', t, re.M):
-    t = re.sub(r'^(\s*)heavy_node:\s*\d+', r'\g<1>heavy_node: ' + str(heavy), t, flags=re.M)
-elif re.search(r'^pbt_migration:\s*$', t, re.M):
-    t = re.sub(r'^pbt_migration:\s*$', 'pbt_migration:\n  heavy_node: ' + str(heavy), t, flags=re.M)
-else:
-    raise SystemExit(src + " has no pbt_migration block to set heavy_node in")
-open(dst, 'w').write(t)
-PYEOF
-  ARGS="$OUT/args-heavy.yaml"
-  say "heavy victim overridden to participant $HEAVY (args copy at $ARGS)"
-fi
 kurtosis enclave rm -f "$ENCLAVE" >/dev/null 2>&1 || true
 kurtosis run . --enclave "$ENCLAVE" --args-file "$ARGS" --privileged > "$OUT/run.log" 2>&1 || {
   say "the run failed to start; tail of the log:"; tail -20 "$OUT/run.log"; exit 1; }
@@ -178,17 +165,17 @@ for svc in migration-chaos migration-gate; do
   kurtosis service logs "$ENCLAVE" "$svc" -a 2>/dev/null | sed 's/^\[[^]]*\] //' > "$OUT/$svc.jsonl" || true
 done
 
-# The manifest records what this driver did, for the verifier to reconcile.
-python3 - "$OUT/manifest.json" "$ARGS" "${RESTART_NODE:-0}" "${restart_at_unix:-0}" "${quiesced_at}" "${scenario_results}" <<'PYEOF'
+# The manifest records what this driver did and asked for, for the verifier to reconcile.
+python3 - "$OUT/manifest.json" "$ARGS" "${RESTART_NODE:-0}" "${restart_at_unix:-0}" "${quiesced_at}" "${scenario_results}" "$SCENARIOS" <<'PYEOF'
 import json, re, sys
-out, args_file, rnode, rat, quiesced, scenarios = sys.argv[1:7]
+out, args_file, rnode, rat, quiesced, scenarios, requested = sys.argv[1:8]
 args = open(args_file).read()
 m = re.search(r'chaos_profile:\s*"?([a-z-]+)"?', args)
 manifest = {
     "profile": m.group(1) if m else "",
     "restart": {"node": int(rnode), "at": int(rat)} if int(rat) else None,
+    "requested": requested.split(),
     "scenarios": json.loads(scenarios),
-    # a profile that configures the gate must hand over; whether it did is the verifier's question
     "handover_expected": re.search(r'^\s*gate:\s*true', args, re.M) is not None,
     "quiesced_at": int(quiesced),
 }
@@ -197,12 +184,12 @@ PYEOF
 
 say "judging the run"
 els=$(cd scripts && python3 -c "import pbt; print(' '.join('--el ' + n + '=' + pbt.url('$ENCLAVE', n, 'rpc') for n in pbt.services('$ENCLAVE','el-')))")
+# One driver stream for the judge: the chaos schedule first, then the gate; the
+# dumped files themselves stay as captured.
+cat "$OUT/migration-chaos.jsonl" > "$OUT/driver.jsonl"
+grep '^{' "$OUT/migration-gate.jsonl" >> "$OUT/driver.jsonl" 2>/dev/null || true
 chaos_args=""
-[ -s "$OUT/migration-chaos.jsonl" ] && chaos_args="--chaos-jsonl $OUT/migration-chaos.jsonl"
-if [ -s "$OUT/migration-gate.jsonl" ]; then
-  grep '^{' "$OUT/migration-gate.jsonl" >> "$OUT/migration-chaos.jsonl" || true
-fi
-go build -o bin/verify-migration ./cmd/verify-migration
+[ -s "$OUT/driver.jsonl" ] && chaos_args="--chaos-jsonl $OUT/driver.jsonl"
 set +e
 bin/verify-migration $els \
   --monitor-jsonl "$OUT/migration-monitor.jsonl" \

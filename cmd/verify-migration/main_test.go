@@ -50,16 +50,16 @@ func writeFile(t *testing.T, path, content string) {
 
 const testFork = int64(100000)
 
-// straddleTestOps is a schedule with three pre-fork isolations (two deep,
-// one short) and a straddle spanning testFork, one victim each -
-// participant indices 1-4 so chaos events can name them "node-<i>" and
-// attributeWindows can resolve them back to these ops.
+// straddleTestOps is a schedule with a deep op isolating a pair of lights
+// together, a short op isolating a single light, and a mutual straddle
+// putting every light (2,3,4) on its own island against anchor 1; chaos
+// events name victims "node-<i>" and attributeWindows resolves them back
+// to these ops.
 func straddleTestOps() []migsched.DumpOp {
 	return []migsched.DumpOp{
-		{Name: "pre1", Class: "deep", Start: 1000, End: 1100, Victims: []int{1}},
-		{Name: "pre2", Class: "short", Start: 2000, End: 2100, Victims: []int{2}},
-		{Name: "pre3", Class: "deep", Start: 3000, End: 3100, Victims: []int{3}},
-		{Name: "straddle1", Class: "straddle", Start: testFork - 50, End: testFork + 50, Victims: []int{4}},
+		{Name: "pre1", Class: "deep", Start: 1000, End: 1100, Victims: []int{2, 3}},
+		{Name: "pre2", Class: "short", Start: 2000, End: 2100, Victims: []int{4}},
+		{Name: "straddle1", Class: "straddle", Start: testFork - 50, End: testFork + 50, HoldUntil: testFork + 90, Victims: []int{2, 3, 4}, Mutual: true},
 	}
 }
 
@@ -78,22 +78,28 @@ func reorgEv(node string, tm int64, depth int) migmon.Event {
 	return e
 }
 
-// baselineChaosAndMonitor isolates and heals all four straddleTestOps
-// victims on time, each corroborated by a reorg - the fixture every
-// partitions-healed/prefork-deep-reorg variant below tweaks from. Indices: 0/1 = pre1 isolate/heal,
-// 2/3 = pre2, 4/5 = pre3, 6/7 = straddle1; monitor 0-3 are their reorgs.
+// baselineChaosAndMonitor isolates and heals every straddleTestOps window on
+// time, each corroborated by a reorg - the fixture every
+// partitions-healed/prefork-deep-reorg variant below tweaks from. Indices:
+// 0/1 = pre1 node-2, 2/3 = pre1 node-3, 4/5 = pre2 node-4, 6/7 = straddle1
+// node-2, 8/9 = straddle1 node-3, 10/11 = straddle1 node-4; monitor 0-5 are
+// their reorgs in the same order.
 func baselineChaosAndMonitor() (chaos, monitor []migmon.Event) {
 	chaos = []migmon.Event{
-		ev(migmon.EvIsolate, "node-1", 1000), ev(migmon.EvHeal, "node-1", 1050),
-		ev(migmon.EvIsolate, "node-2", 2000), ev(migmon.EvHeal, "node-2", 2050),
-		ev(migmon.EvIsolate, "node-3", 3000), ev(migmon.EvHeal, "node-3", 3050),
-		ev(migmon.EvIsolate, "node-4", testFork-50), ev(migmon.EvHeal, "node-4", testFork-10),
+		ev(migmon.EvIsolate, "node-2", 1000), ev(migmon.EvHeal, "node-2", 1050),
+		ev(migmon.EvIsolate, "node-3", 1000), ev(migmon.EvHeal, "node-3", 1050),
+		ev(migmon.EvIsolate, "node-4", 2000), ev(migmon.EvHeal, "node-4", 2050),
+		ev(migmon.EvIsolate, "node-2", testFork-50), ev(migmon.EvHeal, "node-2", testFork+60),
+		ev(migmon.EvIsolate, "node-3", testFork-50), ev(migmon.EvHeal, "node-3", testFork+70),
+		ev(migmon.EvIsolate, "node-4", testFork-50), ev(migmon.EvHeal, "node-4", testFork+80),
 	}
 	monitor = []migmon.Event{
-		reorgEv("node-1", 1060, 5),
-		reorgEv("node-2", 2060, 6),
-		reorgEv("node-3", 3060, 7),
-		reorgEv("node-4", testFork-5, 8),
+		reorgEv("node-2", 1060, 5),
+		reorgEv("node-3", 1060, 6),
+		reorgEv("node-4", 2060, 6),
+		reorgEv("node-2", testFork+65, 7),
+		reorgEv("node-3", testFork+75, 8),
+		reorgEv("node-4", testFork+85, 8),
 	}
 	return chaos, monitor
 }
@@ -108,7 +114,7 @@ func withSchedule(t *testing.T, dump migsched.Dump, chaos []migmon.Event) []migm
 func TestCheckPartitionsHealedScheduleDrivenDeadlines(t *testing.T) {
 	// Quiet is what tells a post-migration isolation from a stray one, and
 	// the driver always publishes it.
-	dump := migsched.Dump{Profile: "straddle-fixture", Fork: testFork, Heavy: 4, Ops: straddleTestOps(), Quiet: testFork + 210}
+	dump := migsched.Dump{Profile: "straddle-fixture", Fork: testFork, Anchor: 1, Ops: straddleTestOps(), Quiet: testFork + 210}
 
 	t.Run("baseline: all four heal on time, fully corroborated, passes", func(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
@@ -123,12 +129,12 @@ func TestCheckPartitionsHealedScheduleDrivenDeadlines(t *testing.T) {
 	// a straddle heals after the fork itself by design.
 	t.Run("straddle heals after the fork but inside its own deadline: still passes", func(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
-		chaos[7].Time = time.Unix(testFork+60, 0).UTC() // straddle heal, well after the fork
-		monitor[3] = reorgEv("node-4", testFork+65, 8)
+		chaos[7].Time = time.Unix(testFork+150, 0).UTC() // straddle heal (node-2), well after the fork
+		monitor[3] = reorgEv("node-2", testFork+155, 8)
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
 		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictPass {
-			t.Fatalf("want pass (straddle's deadline is End+120s, not the fork), got %s: %s", r, evidence)
+			t.Fatalf("want pass (straddle's deadline is Latest()+120s, not the fork), got %s: %s", r, evidence)
 		}
 	})
 
@@ -147,13 +153,13 @@ func TestCheckPartitionsHealedScheduleDrivenDeadlines(t *testing.T) {
 
 	t.Run("healed but unmatched op is inconclusive, not fail (stochastic miss)", func(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
-		monitor = append(monitor[:2], monitor[3]) // drop pre3's reorg only: 3/4 corroborated
+		monitor = monitor[:3] // drop straddle1's three reorgs: 6 healed, 3 corroborated
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
 		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictInconclusive {
-			t.Fatalf("want inconclusive (4 healed, 3 corroborated), got %s: %s", r, evidence)
+			t.Fatalf("want inconclusive (6 healed, 3 corroborated), got %s: %s", r, evidence)
 		}
-		if !strings.Contains(evidence, "pre3") {
+		if !strings.Contains(evidence, "straddle1") {
 			t.Fatalf("evidence %q should name the unmatched op", evidence)
 		}
 	})
@@ -205,13 +211,13 @@ func TestCheckPartitionsHealedScheduleDrivenDeadlines(t *testing.T) {
 	})
 
 	t.Run("all admitted ops healed but fewer than a full run schedules is inconclusive", func(t *testing.T) {
-		// A profile that only schedules three partitions cannot produce
-		// four; that makes the evidence thin, not the run broken.
-		three := migsched.Dump{Profile: "three", Fork: testFork, Heavy: 4, Quiet: testFork + 210,
-			Ops: straddleTestOps()[:3]}
+		// A profile that only schedules the two pre-fork ops cannot produce
+		// the full run's isolation count; that makes the evidence thin, not the run broken.
+		two := migsched.Dump{Profile: "two", Fork: testFork, Anchor: 1, Quiet: testFork + 210,
+			Ops: straddleTestOps()[:2]}
 		chaos, monitor := baselineChaosAndMonitor()
-		chaos = chaos[:6] // only the three ops this schedule admits
-		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, three, chaos), monitor: monitor}
+		chaos = chaos[:6] // only the two pre-fork ops' windows
+		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, two, chaos), monitor: monitor}
 		r, evidence := v.checkPartitionsHealed(context.Background())
 		if r != verdictInconclusive {
 			t.Fatalf("want inconclusive (thin coverage), got %s: %s", r, evidence)
@@ -253,16 +259,16 @@ func TestCheckPreForkDeepReorgDeepReorg(t *testing.T) {
 		}
 	})
 
-	t.Run("one isolation reaches depth >= 10: passes", func(t *testing.T) {
+	t.Run("second victim of a deep pair reaches depth >= 10: passes, names it", func(t *testing.T) {
 		chaos, monitor := baselineChaosAndMonitor()
-		monitor[2] = reorgEv("node-3", 3060, 12)
+		monitor[1] = reorgEv("node-3", 1065, 12) // pre1's second victim (node-3 of the [2,3] pair)
 		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
 		r, evidence := v.checkPreForkDeepReorg(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s: %s", r, evidence)
 		}
-		if !strings.Contains(evidence, "pre3") {
-			t.Fatalf("evidence %q should name the deep op", evidence)
+		if !strings.Contains(evidence, "pre1") || !strings.Contains(evidence, "node-3") {
+			t.Fatalf("evidence %q should name the deep op and its qualifying victim", evidence)
 		}
 	})
 
@@ -292,7 +298,7 @@ func istarReorgedEv(node string, height uint64, oldHash, newHash string, tm int6
 }
 
 func TestCheckStraddleRewindStraddle(t *testing.T) {
-	straddleOp := migsched.DumpOp{Name: "straddle1", Class: "straddle", Start: testFork - 50, End: testFork + 50, Victims: []int{4}}
+	straddleOp := migsched.DumpOp{Name: "straddle1", Class: "straddle", Start: testFork - 50, End: testFork + 50, HoldUntil: testFork + 90, Victims: []int{2, 3, 4}, Mutual: true}
 	nonStraddleOnly := migsched.Dump{Profile: "p", Fork: testFork, Ops: straddleTestOps()[:1]}
 	withStraddle := migsched.Dump{Profile: "p", Fork: testFork, Ops: []migsched.DumpOp{straddleOp}}
 
@@ -304,35 +310,130 @@ func TestCheckStraddleRewindStraddle(t *testing.T) {
 		}
 	})
 
-	t.Run("straddle admitted but victim never orphaned: inconclusive", func(t *testing.T) {
-		v := &verifier{chaos: []migmon.Event{scheduleEvent(t, withStraddle)}}
+	t.Run("straddle op with no victims: fails", func(t *testing.T) {
+		empty := migsched.Dump{Profile: "p", Fork: testFork, Ops: []migsched.DumpOp{
+			{Name: "straddle1", Class: "straddle", Start: testFork - 50, End: testFork + 50, Mutual: true},
+		}}
+		v := &verifier{chaos: []migmon.Event{scheduleEvent(t, empty)}}
 		r, evidence := v.checkStraddleRewind(context.Background())
-		if r != verdictInconclusive {
-			t.Fatalf("want inconclusive, got %s: %s", r, evidence)
+		if r != verdictFail {
+			t.Fatalf("want fail, got %s: %s", r, evidence)
 		}
 	})
 
-	t.Run("straddle admitted, victim orphaned, dropped branch >= 6: passes", func(t *testing.T) {
+	t.Run("all three victims orphaned and rewound: passes, reports each depth", func(t *testing.T) {
 		monitor := []migmon.Event{
-			istarReorgedEv("node-4", 500, testOldHash, testNewHash, testFork+10),
-			reorgEv("node-4", testFork+15, 8),
+			istarReorgedEv("node-2", 500, testOldHash, testNewHash, testFork+10),
+			istarReorgedEv("node-3", 501, testOldHash, testNewHash, testFork+20),
+			istarReorgedEv("node-4", 502, testOldHash, testNewHash, testFork+30),
+			reorgEv("node-2", testFork+15, 5),
+			reorgEv("node-3", testFork+25, 4),
+			reorgEv("node-4", testFork+35, 6),
 		}
 		v := &verifier{chaos: []migmon.Event{scheduleEvent(t, withStraddle)}, monitor: monitor}
 		r, evidence := v.checkStraddleRewind(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s: %s", r, evidence)
 		}
+		if !strings.Contains(evidence, "2,3,4") || !strings.Contains(evidence, "5/4/6") {
+			t.Fatalf("evidence %q missing per-victim names/depths", evidence)
+		}
 	})
 
-	t.Run("straddle admitted, victim orphaned, dropped branch < 6: fails", func(t *testing.T) {
+	t.Run("one victim's hold expired without crossing: inconclusive naming it", func(t *testing.T) {
 		monitor := []migmon.Event{
-			istarReorgedEv("node-4", 500, testOldHash, testNewHash, testFork+10),
-			reorgEv("node-4", testFork+15, 3),
+			istarReorgedEv("node-2", 500, testOldHash, testNewHash, testFork+10),
+			istarReorgedEv("node-3", 501, testOldHash, testNewHash, testFork+20),
+			reorgEv("node-2", testFork+15, 5),
+			reorgEv("node-3", testFork+25, 4),
 		}
-		v := &verifier{chaos: []migmon.Event{scheduleEvent(t, withStraddle)}, monitor: monitor}
+		chaos := []migmon.Event{
+			scheduleEvent(t, withStraddle),
+			{Kind: migmon.EvHeal, Node: "node-4", Time: time.Unix(testFork+90, 0).UTC(),
+				Detail: "window closed; never crossed the fork on its own branch"},
+		}
+		v := &verifier{chaos: chaos, monitor: monitor}
+		r, evidence := v.checkStraddleRewind(context.Background())
+		if r != verdictInconclusive {
+			t.Fatalf("want inconclusive, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "victim 4") {
+			t.Fatalf("evidence %q should name victim 4", evidence)
+		}
+	})
+
+	t.Run("one victim kept its own fork block: fails naming it", func(t *testing.T) {
+		monitor := []migmon.Event{
+			istarReorgedEv("node-2", 500, testOldHash, testNewHash, testFork+10),
+			istarReorgedEv("node-3", 501, testOldHash, testNewHash, testFork+20),
+			reorgEv("node-2", testFork+15, 5),
+			reorgEv("node-3", testFork+25, 4),
+		}
+		chaos := []migmon.Event{
+			scheduleEvent(t, withStraddle),
+			{Kind: migmon.EvHeal, Node: "node-4", Time: time.Unix(testFork+90, 0).UTC(), Detail: "window closed"},
+		}
+		v := &verifier{chaos: chaos, monitor: monitor}
 		r, evidence := v.checkStraddleRewind(context.Background())
 		if r != verdictFail {
 			t.Fatalf("want fail, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "victim 4") {
+			t.Fatalf("evidence %q should name victim 4", evidence)
+		}
+	})
+	t.Run("anchor rewound across I*: fails naming the anchor even though victims crossed", func(t *testing.T) {
+		anchored := migsched.Dump{Profile: "p", Fork: testFork, Anchor: 1, Ops: []migsched.DumpOp{straddleOp}}
+		monitor := []migmon.Event{
+			istarReorgedEv("node-1", 500, testOldHash, testNewHash, testFork+5),
+			istarReorgedEv("node-2", 500, testOldHash, testNewHash, testFork+10),
+			istarReorgedEv("node-3", 501, testOldHash, testNewHash, testFork+20),
+			istarReorgedEv("node-4", 502, testOldHash, testNewHash, testFork+30),
+		}
+		v := &verifier{chaos: []migmon.Event{scheduleEvent(t, anchored)}, monitor: monitor}
+		r, evidence := v.checkStraddleRewind(context.Background())
+		if r != verdictFail {
+			t.Fatalf("want fail, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "anchor node 1 rewound") {
+			t.Fatalf("evidence %q should name the anchor", evidence)
+		}
+	})
+
+	t.Run("straddle victim never applied: fails naming the op", func(t *testing.T) {
+		chaos := []migmon.Event{
+			scheduleEvent(t, withStraddle),
+			{Kind: migmon.EvSkip, Node: "node-3", Time: time.Unix(testFork+50, 0).UTC(), Detail: "never applied: straddle1"},
+		}
+		v := &verifier{chaos: chaos}
+		r, evidence := v.checkStraddleRewind(context.Background())
+		if r != verdictFail {
+			t.Fatalf("want fail, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "never applied") {
+			t.Fatalf("evidence %q should say never applied", evidence)
+		}
+	})
+
+	t.Run("one victim unreachable during the hold: inconclusive naming it", func(t *testing.T) {
+		monitor := []migmon.Event{
+			istarReorgedEv("node-2", 500, testOldHash, testNewHash, testFork+10),
+			istarReorgedEv("node-3", 501, testOldHash, testNewHash, testFork+20),
+			reorgEv("node-2", testFork+15, 5),
+			reorgEv("node-3", testFork+25, 4),
+		}
+		chaos := []migmon.Event{
+			scheduleEvent(t, withStraddle),
+			{Kind: migmon.EvHeal, Node: "node-4", Time: time.Unix(testFork+90, 0).UTC(),
+				Detail: "window closed; unreachable during the hold"},
+		}
+		v := &verifier{chaos: chaos, monitor: monitor}
+		r, evidence := v.checkStraddleRewind(context.Background())
+		if r != verdictInconclusive {
+			t.Fatalf("want inconclusive, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "victim 4 was unreachable during the hold") {
+			t.Fatalf("evidence %q should name victim 4 as unreachable", evidence)
 		}
 	})
 
@@ -700,4 +801,68 @@ func parseHexUintForTest(t *testing.T, s string) uint64 {
 		t.Fatalf("bad hex %q: %v", s, err)
 	}
 	return n
+}
+
+func TestCheckLapManifestRequested(t *testing.T) {
+	dir := t.TempDir()
+	dump := migsched.Dump{Profile: "p", Fork: testFork}
+	scheduleRaw, err := json.Marshal(dump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chaos := []migmon.Event{{Kind: migmon.EvSchedule, Time: time.Unix(0, 0).UTC(), Raw: scheduleRaw}}
+
+	writeManifest := func(t *testing.T, requested []string) string {
+		t.Helper()
+		m := struct {
+			Profile   string `json:"profile"`
+			Scenarios []struct {
+				Name    string `json:"name"`
+				Outcome string `json:"outcome"`
+			} `json:"scenarios"`
+			Requested []string `json:"requested"`
+		}{Profile: "p", Requested: requested}
+		for _, n := range []string{"a", "b", "c", "d", "e"} {
+			m.Scenarios = append(m.Scenarios, struct {
+				Name    string `json:"name"`
+				Outcome string `json:"outcome"`
+			}{Name: n, Outcome: "ok"})
+		}
+		raw, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, t.Name()+".json")
+		writeFile(t, path, string(raw))
+		return path
+	}
+
+	t.Run("requested scenario missing its recorded outcome: fails naming it", func(t *testing.T) {
+		path := writeManifest(t, []string{"a", "b", "c", "d", "e", "f"})
+		manifest, err := loadManifest(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := &verifier{manifestPath: path, manifest: manifest, chaos: chaos}
+		r, evidence := v.checkLapManifest(context.Background())
+		if r != verdictFail {
+			t.Fatalf("want fail, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "requested scenario f has no recorded outcome") {
+			t.Fatalf("evidence %q should name scenario f", evidence)
+		}
+	})
+
+	t.Run("empty requested: no comparison, older manifests unaffected", func(t *testing.T) {
+		path := writeManifest(t, nil)
+		manifest, err := loadManifest(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := &verifier{manifestPath: path, manifest: manifest, chaos: chaos}
+		r, evidence := v.checkLapManifest(context.Background())
+		if r != verdictPass {
+			t.Fatalf("want pass, got %s: %s", r, evidence)
+		}
+	})
 }

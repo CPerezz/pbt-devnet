@@ -4,10 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/CPerezz/pbt-devnet/internal/disruptoor"
 	"github.com/CPerezz/pbt-devnet/internal/migmon"
 	"github.com/CPerezz/pbt-devnet/internal/migsched"
 )
@@ -55,6 +60,9 @@ func (f *fakeClient) HeaderByNumber(_ context.Context, h uint64) (*migmon.Header
 func (f *fakeClient) HeaderByTag(context.Context, string) (*migmon.Header, error) {
 	return nil, nil
 }
+
+func (f *fakeClient) HeaderByHash(context.Context, string) (*migmon.Header, error) { return nil, nil }
+func (f *fakeClient) PeerCount(context.Context) (int, error)                       { return 0, nil }
 
 func (f *fakeClient) NodeInfo(context.Context) (string, error) {
 	return "enode://" + f.name, nil
@@ -134,7 +142,7 @@ func TestScheduleCoversHeldWindows(t *testing.T) {
 	genesis := time.Unix(1_000_000, 0)
 	fork := genesis.Add(1800 * time.Second)
 	sched, err := migsched.Resolve("composite", genesis, fork, migsched.Topology{
-		Heavy: 2, Lights: []int{3, 4}, HeavyShare: 0.4, SecondsPerSlot: 6,
+		Anchor: 1, Lights: []int{2, 3, 4}, Participants: 4, AnchorShare: 0.4, SecondsPerSlot: 6,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -152,3 +160,79 @@ type capture struct{ b []byte }
 func (c *capture) Write(p []byte) (int, error) { c.b = append(c.b, p...); return len(p), nil }
 func (c *capture) String() string              { return string(c.b) }
 func (c *capture) contains(s string) bool      { return strings.Contains(string(c.b), s) }
+
+// TestRunPostOpPartitions checks the exact disruptoor groups each post-op kind sends, and that
+// it heals: participants=4, lights=[2,3,4] so deep-pair takes the first two, short-light the first one.
+func TestRunPostOpPartitions(t *testing.T) {
+	tests := []struct {
+		kind       string
+		wantGroups [][]int
+	}{
+		{"deep-pair", [][]int{{1, 4}, {2, 3}}},
+		{"short-light", [][]int{{1, 3, 4}, {2}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.kind, func(t *testing.T) {
+			var puts [][]byte
+			var clears int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/webui/api/containers":
+					w.Write([]byte(`["c1"]`))
+				case r.Method == http.MethodPut && r.URL.Path == "/v1/state":
+					b, _ := io.ReadAll(r.Body)
+					puts = append(puts, b)
+					w.Write([]byte(`{}`))
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/state/clear":
+					clears++
+					w.Write([]byte(`{}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			d := disruptoor.New(srv.URL, 2*time.Second)
+			clients := []migmon.Client{
+				&fakeClient{name: "a", heads: 10, hashAt: map[uint64]string{10: "0xsame"}},
+				&fakeClient{name: "b", heads: 10, hashAt: map[uint64]string{10: "0xsame"}},
+			}
+			log := migmon.NewLog(io.Discard)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			if err := runPostOp(ctx, log, d, clients, tc.kind, []int{2, 3, 4}, 4, &held{}, 0, 0); err != nil {
+				t.Fatalf("runPostOp: %v", err)
+			}
+			if len(puts) != 1 {
+				t.Fatalf("PUT /v1/state calls = %d, want 1", len(puts))
+			}
+			if clears != 1 {
+				t.Fatalf("clear calls = %d, want 1", clears)
+			}
+			if got := partitionGroups(t, puts[0]); !reflect.DeepEqual(got, tc.wantGroups) {
+				t.Fatalf("groups = %v, want %v", got, tc.wantGroups)
+			}
+		})
+	}
+}
+
+// partitionGroups extracts the node-index lists disruptoor's PUT /v1/state body sent, in order.
+func partitionGroups(t *testing.T, body []byte) [][]int {
+	t.Helper()
+	var payload struct {
+		Partitions []struct {
+			Groups []struct {
+				NodeIndex []int `json:"node-index"`
+			} `json:"groups"`
+		} `json:"partitions"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decoding partition body: %v", err)
+	}
+	out := make([][]int, len(payload.Partitions[0].Groups))
+	for i, g := range payload.Partitions[0].Groups {
+		out[i] = g.NodeIndex
+	}
+	return out
+}

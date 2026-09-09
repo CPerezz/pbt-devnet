@@ -23,8 +23,9 @@ type lapManifest struct {
 		Name    string `json:"name"`
 		Outcome string `json:"outcome"` // pbtchaos's own per-scenario outcome
 	} `json:"scenarios"`
-	HandoverExpected bool  `json:"handover_expected"`
-	QuiescedAt       int64 `json:"quiesced_at"` // unix seconds, 0 = never quiesced
+	Requested        []string `json:"requested"` // scenario names the lap asked for, regardless of outcome
+	HandoverExpected bool     `json:"handover_expected"`
+	QuiescedAt       int64    `json:"quiesced_at"` // unix seconds, 0 = never quiesced
 }
 
 func loadManifest(path string) (*lapManifest, error) {
@@ -92,6 +93,18 @@ func (v *verifier) checkLapManifest(ctx context.Context) (verdict, string) {
 	for _, s := range m.Scenarios {
 		if s.Outcome != "ok" {
 			problems = append(problems, fmt.Sprintf("scenario %s ended %q, want ok", s.Name, s.Outcome))
+		}
+	}
+	for _, name := range m.Requested {
+		found := false
+		for _, s := range m.Scenarios {
+			if s.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			problems = append(problems, fmt.Sprintf("requested scenario %s has no recorded outcome", name))
 		}
 	}
 	if n := len(m.Scenarios); n > 0 {

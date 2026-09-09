@@ -97,13 +97,22 @@ func nodes(idx ...int) group {
 	return group{"node-index": ids, "client-type": {"execution", "beacon"}}
 }
 
-// Partition cuts p2p between the two groups in both directions. Engine API is untouched,
-// so each side keeps driving its own execution client and the two branches grow apart.
-func (d *Client) Partition(name string, a, b []int) error {
+// Partition cuts p2p between every pair of groups in both directions; two groups
+// is a plain split, more is an N-way one with each group its own island. Engine
+// API is untouched, so each side keeps driving its own execution client and the
+// branches grow apart.
+func (d *Client) Partition(name string, groups ...[]int) error {
+	if len(groups) < 2 {
+		return fmt.Errorf("partition %q needs at least two groups, got %d", name, len(groups))
+	}
+	sides := make([]any, len(groups))
+	for i, g := range groups {
+		sides[i] = nodes(g...)
+	}
 	_, err := d.do(http.MethodPut, "/v1/state", map[string]any{
 		"partitions": []any{map[string]any{
 			"name":      name,
-			"groups":    []any{nodes(a...), nodes(b...)},
+			"groups":    sides,
 			"scope":     []string{"el_p2p", "cl_p2p"},
 			"symmetric": true,
 		}},

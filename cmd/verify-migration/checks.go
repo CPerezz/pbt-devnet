@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -558,21 +559,6 @@ func (v *verifier) nodeLogFiles(node string) ([]string, error) {
 	return out, err
 }
 
-// grepAllLogs returns the first file under --logs-dir matching re.
-func (v *verifier) grepAllLogs(re *regexp.Regexp) (bool, string) {
-	found := ""
-	filepath.WalkDir(v.logsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || found != "" || d.IsDir() {
-			return nil
-		}
-		if fileContainsMatch(path, re) {
-			found = path
-		}
-		return nil
-	})
-	return found != "", found
-}
-
 // grepLighthouseLogs restricts the walk to files whose name mentions lighthouse.
 func (v *verifier) grepLighthouseLogs(re *regexp.Regexp) (bool, string) {
 	found := ""
@@ -1008,7 +994,8 @@ func (v *verifier) checkGenesisPins(ctx context.Context) (verdict, string) {
 }
 
 // checkPreForkDeepReorg asserts some admitted op entirely before the fork reorged
-// at depth >= 10. INCONCLUSIVE when none did.
+// at depth >= 10. A deep op isolates a pair, so each victim's window is judged on
+// its own; the op passes on whichever victim's branch qualifies. INCONCLUSIVE when none did.
 func (v *verifier) checkPreForkDeepReorg(ctx context.Context) (verdict, string) {
 	if v.skipChaos {
 		return verdictPass, "skipped (--skip-chaos)"
@@ -1019,7 +1006,7 @@ func (v *verifier) checkPreForkDeepReorg(ctx context.Context) (verdict, string) 
 	}
 	matched, _ := v.attributeWindows(dump, v.chaosWindows())
 	fork := time.Unix(dump.Fork, 0)
-	best, bestOp := 0, ""
+	best, bestOp, bestNode := 0, "", ""
 	for _, ow := range matched {
 		// Only ops entirely before the fork count; straddle-rewind judges the straddle's reorg.
 		if !time.Unix(ow.op.End, 0).Before(fork) {
@@ -1029,18 +1016,69 @@ func (v *verifier) checkPreForkDeepReorg(ctx context.Context) (verdict, string) 
 			continue
 		}
 		if ev := v.matchReorg(ow.window); ev.matched && ev.depth > best {
-			best, bestOp = ev.depth, ow.op.Name
+			best, bestOp, bestNode = ev.depth, ow.op.Name, ow.window.node
 		}
 	}
 	if best >= 10 {
-		return verdictPass, fmt.Sprintf("op %s reorged at depth %d (>= 10)", bestOp, best)
+		return verdictPass, fmt.Sprintf("op %s reorged at depth %d on %s (>= 10)", bestOp, best, bestNode)
 	}
 	return verdictInconclusive, fmt.Sprintf("no admitted op reorged at depth >= 10 (max observed %d)", best)
 }
 
-// checkStraddleRewind asserts an admitted straddle op spans the fork, the victim's
-// fork block was orphaned (istar-reorged), and the dropped branch is >= 6 deep.
-// INCONCLUSIVE when no straddle spans the fork, no orphan event, or no depth evidence.
+// Straddle heal Details the chaos driver writes when a victim's island produced no crossing to judge.
+const (
+	neverCrossedDetail = "never crossed the fork on its own branch"
+	unreachableDetail  = "unreachable during the hold"
+)
+
+// istarReorgedFor returns node's first istar-reorged event: its own fork block was orphaned.
+func (v *verifier) istarReorgedFor(node string) (migmon.Event, bool) {
+	for _, ev := range v.monitor {
+		if ev.Kind == migmon.EvIStarReorged && sameNode(ev.Node, node) {
+			return ev, true
+		}
+	}
+	return migmon.Event{}, false
+}
+
+// healSays reports whether a heal of node at or after from carries needle in its Detail.
+func (v *verifier) healSays(node string, from time.Time, needle string) bool {
+	for _, ev := range v.chaos {
+		if ev.Kind == migmon.EvHeal && sameNode(ev.Node, node) && !ev.Time.Before(from) && strings.Contains(ev.Detail, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// straddleNeverApplied reports whether the driver failed to partition a victim: a skip
+// "never applied" for it, or a "partition failed" warn from it inside [from, to].
+func (v *verifier) straddleNeverApplied(op string, victims []int, from, to time.Time) bool {
+	for _, ev := range v.chaos {
+		idx, ok := nodeIndex(ev.Node)
+		if !ok || !slices.Contains(victims, idx) {
+			continue
+		}
+		switch ev.Kind {
+		case migmon.EvSkip:
+			if ev.Detail == "never applied: "+op {
+				return true
+			}
+		case migmon.EvWarn:
+			if strings.HasPrefix(ev.Detail, "partition failed") && !ev.Time.Before(from) && !ev.Time.After(to) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// checkStraddleRewind asserts the admitted straddle op spanning the fork made every
+// victim orphan its own fork block (istar-reorged) while the anchor kept its own: each
+// island crossed alone, then rewound below I* onto the anchor's chain. Depth is
+// reported, not gated, since a 20% light builds a short branch. A victim whose heal
+// says it never crossed or was unreachable had no scenario to judge (INCONCLUSIVE); a
+// straddle the driver never applied is a run failure, not a missing scenario.
 func (v *verifier) checkStraddleRewind(ctx context.Context) (verdict, string) {
 	if v.skipChaos {
 		return verdictPass, "skipped (--skip-chaos)"
@@ -1057,7 +1095,7 @@ func (v *verifier) checkStraddleRewind(ctx context.Context) (verdict, string) {
 		if migsched.Class(o.Class) != migsched.ClassStraddle {
 			continue
 		}
-		start, end := time.Unix(o.Start, 0), time.Unix(o.End, 0)
+		start, end := time.Unix(o.Start, 0), time.Unix(o.Latest(), 0)
 		if !fork.Before(start) && !fork.After(end) {
 			straddle = &admitted[i]
 			break
@@ -1069,48 +1107,62 @@ func (v *verifier) checkStraddleRewind(ctx context.Context) (verdict, string) {
 	if len(straddle.Victims) == 0 {
 		return verdictFail, fmt.Sprintf("schedule straddle op %s has no victims", straddle.Name)
 	}
-	victimNode := fmt.Sprintf("node-%d", straddle.Victims[0])
-
-	reorged := false
-	for _, ev := range v.monitor {
-		if ev.Kind == migmon.EvIStarReorged && sameNode(ev.Node, victimNode) {
-			reorged = true
-			break
-		}
-	}
-	if !reorged {
-		return verdictInconclusive, fmt.Sprintf("straddle op %s admitted (window contains fork %s), but victim's fork block was never orphaned (no istar-reorged event)",
-			straddle.Name, fork.Format(time.RFC3339))
-	}
-
+	victims := append([]int(nil), straddle.Victims...)
+	sort.Ints(victims)
 	w := chaosWindow{
-		node:   victimNode,
 		from:   time.Unix(straddle.Start, 0),
-		to:     time.Unix(straddle.End, 0).Add(migmon.SplitGrace),
+		to:     time.Unix(straddle.Latest(), 0).Add(migmon.SplitGrace),
 		healed: true,
 	}
-	reorg := v.matchReorg(w)
-	// The parent walk on the victim's own chain data is the primary depth source;
-	// matchReorg is corroboration and fallback.
-	if orphans := v.orphanedForkBlocks(); len(orphans) > 0 {
-		if victim, ok := v.elByIndex(straddle.Victims[0]); ok {
-			if spec, known := migmon.SpecFor(victim.name); known && spec.ServesOrphans {
-				tip := v.victimTip(victimNode, w.from, w.to)
-				if depth, ancestor, err := v.walkOrphanBranch(ctx, victim, orphans[0].hash, tip); err == nil {
-					reorg = reorgEvidence{depth: depth, matched: true, ancestor: ancestor,
-						source: fmt.Sprintf("parent walk (corroboration: %s)", reorg.String())}
+	if v.straddleNeverApplied(straddle.Name, victims, w.from, w.to) {
+		return verdictFail, fmt.Sprintf("straddle op %s was never applied", straddle.Name)
+	}
+	var failed, unproduced, names, depths []string
+	if _, ok := v.istarReorgedFor(migsched.NodeName(dump.Anchor)); ok {
+		failed = append(failed, fmt.Sprintf("anchor node %d rewound across I*: an island won the heal", dump.Anchor))
+	}
+	for _, idx := range victims {
+		w.node = migsched.NodeName(idx)
+		orphaned, ok := v.istarReorgedFor(w.node)
+		if !ok {
+			switch {
+			case v.healSays(w.node, w.from, neverCrossedDetail):
+				unproduced = append(unproduced, fmt.Sprintf("victim %d never crossed the fork on its own branch (hold expired), nothing to rewind", idx))
+			case v.healSays(w.node, w.from, unreachableDetail):
+				unproduced = append(unproduced, fmt.Sprintf("victim %d was unreachable during the hold, nothing judged", idx))
+			default:
+				failed = append(failed, fmt.Sprintf("victim %d kept its own fork block (no istar-reorged event): its branch won the heal", idx))
+			}
+			continue
+		}
+		reorg := v.matchReorg(w)
+		// The victim's own chain data is the primary depth source; matchReorg corroborates.
+		if old := orphanHashRe.FindString(orphaned.Detail); old != "" {
+			if victim, ok := v.elByIndex(idx); ok {
+				if spec, known := migmon.SpecFor(victim.name); known && spec.ServesOrphans {
+					tip := v.victimTip(w.node, w.from, w.to)
+					if depth, ancestor, err := v.walkOrphanBranch(ctx, victim, old, tip); err == nil {
+						reorg = reorgEvidence{depth: depth, matched: true, ancestor: ancestor,
+							source: fmt.Sprintf("parent walk (corroboration: %s)", reorg.String())}
+					}
 				}
 			}
 		}
+		names = append(names, strconv.Itoa(idx))
+		if reorg.matched {
+			depths = append(depths, strconv.Itoa(reorg.depth))
+		} else {
+			depths = append(depths, "?")
+		}
 	}
-	if !reorg.matched {
-		return verdictInconclusive, fmt.Sprintf("straddle op %s: victim's fork block was orphaned but no matchable reorg depth evidence (%s)", straddle.Name, reorg.String())
+	if len(failed) > 0 {
+		return verdictFail, fmt.Sprintf("straddle op %s: %s", straddle.Name, strings.Join(append(failed, unproduced...), "; "))
 	}
-	if reorg.depth < 6 {
-		return verdictFail, fmt.Sprintf("straddle op %s dropped branch depth %d < 6 (%s)", straddle.Name, reorg.depth, reorg.String())
+	if len(unproduced) > 0 {
+		return verdictInconclusive, fmt.Sprintf("straddle op %s: %s", straddle.Name, strings.Join(unproduced, "; "))
 	}
-	return verdictPass, fmt.Sprintf("straddle op %s spans fork %s, victim's fork block orphaned, dropped branch depth %d (%s)",
-		straddle.Name, fork.Format(time.RFC3339), reorg.depth, reorg.String())
+	return verdictPass, fmt.Sprintf("straddle op %s spans fork %s; victims %s each orphaned their fork block and rewound across it (depths %s)",
+		straddle.Name, fork.Format(time.RFC3339), strings.Join(names, ","), strings.Join(depths, "/"))
 }
 
 // forkBlockRecord is one node's view of the fork block: height and hash.
@@ -1283,16 +1335,4 @@ func (v *verifier) checkOrphanGone(ctx context.Context) (verdict, string) {
 		return verdictFail, strings.Join(problems, "; ")
 	}
 	return verdictPass, fmt.Sprintf("%d orphaned post-fork block(s) confirmed non-canonical (null or superseded) across %d node(s)", len(orphans), len(v.els))
-}
-
-// grepELLogs searches only the execution clients' own log files.
-func (v *verifier) grepELLogs(re *regexp.Regexp) (bool, string) {
-	for _, node := range v.elNames() {
-		for _, f := range v.victimLogFiles(node) {
-			if fileContainsMatch(f, re) {
-				return true, f
-			}
-		}
-	}
-	return false, ""
 }
