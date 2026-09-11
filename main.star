@@ -352,8 +352,8 @@ def _genesis_field(plan, name, jq_filter, fmt):
 MIGRATION_PROFILES = ["none", "composite", "composite-smoke"]
 
 # Clients with a migration evidence contract (bootstrap shim, introspection RPCs,
-# registry entry). Erigon rejects any binaryTrieTime later than genesis; not ready yet.
-MIGRATION_READY_CLIENTS = ["geth"]
+# registry entry).
+MIGRATION_READY_CLIENTS = ["geth", "erigon"]
 
 
 def _weight_participants(participants, cfg):

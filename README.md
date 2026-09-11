@@ -119,9 +119,9 @@ to six live clients.
 ## The migration
 
 The `args/migration*.yaml` profiles test EIP-8347's live switch: the chain starts on the merkle
-trie, every geth converts and imports a binary snapshot at boot, and at `binaryTrieTime` the
-header root swaps while a shadow tree cross-checks the merkle side until finality closes the
-window.
+trie, every geth converts and imports a binary snapshot at boot, every erigon folds both tries
+from `erigon init` on (`COMMITMENT_HEX_BIN=true`), and at `binaryTrieTime` the header root swaps
+while a shadow tree cross-checks the merkle side until finality closes the window.
 
 ```
 kurtosis run . --enclave pbt --args-file args/migration-composite.yaml --privileged
