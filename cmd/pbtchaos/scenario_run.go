@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,17 +18,26 @@ import (
 // The margin matters. Sampling the actual tip picks a block that is seconds old and
 // barely attested, and normal fork choice can still replace it when the minority rejoins
 // -- which is ordinary tip churn, not the doomed branch winning.
-func majorityTip(ctx context.Context, majority []*el) (uint64, common.Hash) {
+// A zero hash comes with the reason: the majority forking among itself is a finding
+// about the mesh, not a missing number.
+func majorityTip(ctx context.Context, majority []*el) (uint64, common.Hash, string) {
 	n, err := lowestHead(ctx, majority)
-	if err != nil || n <= tipMargin {
-		return 0, common.Hash{}
+	if err != nil {
+		return 0, common.Hash{}, "majority head unreadable: " + err.Error()
+	}
+	if n <= tipMargin {
+		return 0, common.Hash{}, fmt.Sprintf("majority head %d is within %d blocks of genesis", n, tipMargin)
 	}
 	n -= tipMargin
 	same, seen := agreed(ctx, majority, n)
 	if !same {
-		return 0, common.Hash{}
+		why := fmt.Sprintf("the majority itself was forked at block %d:", n)
+		for _, e := range majority {
+			why += fmt.Sprintf(" %s=%s", e.name, short(seen[e.name]))
+		}
+		return 0, common.Hash{}, why
 	}
-	return n, seen[majority[0].name]
+	return n, seen[majority[0].name], ""
 }
 
 // tipMargin is how far below the majority's head the survival check anchors itself.
@@ -288,6 +298,19 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 	c.log.Info("scenario starting", "name", sc.name, "depth", depth,
 		"minority", minority.name, "majority", len(majority))
 
+	// The majority is only a majority while its consensus clients can see each other. A
+	// CL that lighthouse's peer scoring left with the victim as its sole peer becomes an
+	// island of its own the moment the victim is cut, and the "majority" forks 40/40:
+	// refuse now, with the cause, rather than measure that for four minutes.
+	if peers, byIndex := c.peerSummary(ctx); underPeered(byIndex, majorityNodes) {
+		res.Outcome = "inconclusive"
+		res.Detail = fmt.Sprintf("the consensus mesh is degraded before the partition (%s): a "+
+			"majority client with at most one peer would be cut off with the victim; "+
+			"restart the banned clients (make repeer) and rerun", peers)
+		c.log.Warn("mesh degraded; scenario refused", "name", sc.name, "peers", peers)
+		return res
+	}
+
 	if sc.setup != nil {
 		if err := sc.setup(ctx, r); err != nil {
 			res.Outcome = "error"
@@ -377,7 +400,11 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 
 	// Record the branch that is MEANT to survive, before healing, so survival is checked
 	// against a hash taken while the two branches still existed separately.
-	wantHeight, wantHash := majorityTip(ctx, majority)
+	wantHeight, wantHash, noAnchor := majorityTip(ctx, majority)
+	if noAnchor != "" {
+		peers, _ := c.peerSummary(ctx)
+		noAnchor += "; consensus peers " + peers
+	}
 
 	if err := c.d.Clear(); err != nil {
 		res.Outcome = "error"
@@ -438,8 +465,7 @@ func (c *chaos) runScenario(ctx context.Context, sc *scenario, depth uint64, min
 		// re-mined transaction will have restored the doomed state -- so the check would
 		// be meaningless rather than merely weaker.
 		res.Outcome = "inconclusive"
-		res.Detail = "could not record a settled majority block before the heal, so there is " +
-			"no branch-anchored height to verify against"
+		res.Detail = "no settled majority block to verify against before the heal: " + noAnchor
 		return res
 	}
 	if ok, lag := awaitHeight(ctx, c.els, wantHeight, 2*time.Minute); !ok {
@@ -606,6 +632,17 @@ func (t *headTracker) frozen() []string {
 // participantIndex pulls the node number out of a service name. ethereum-package names the
 // two halves of one participant el-3-besu-lighthouse and cl-3-lighthouse-besu, so the index is
 // what ties an execution client to its own consensus client.
+// underPeered reports whether any of the given participants' consensus clients has at
+// most one peer: one cut away from an island. Unknown counts are not held against it.
+func underPeered(byIndex map[string]int, participants []int) bool {
+	for _, n := range participants {
+		if p, ok := byIndex[strconv.Itoa(n)]; ok && p <= 1 {
+			return true
+		}
+	}
+	return false
+}
+
 func participantIndex(name string) string {
 	parts := strings.Split(name, "-")
 	if len(parts) < 2 {

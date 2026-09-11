@@ -1,175 +1,110 @@
 # pbt-devnet
 
-A differential devnet for the **EIP-8297 partitioned binary tree (PBT)**: two geth, two besu and
-two erigon nodes under test on the same Amsterdam-at-genesis chain, driven by real lighthouse
-consensus clients, with every execution client required to agree on every state root — and reorged
-on purpose to check they still agree afterwards.
+A Kurtosis devnet for the **EIP-8297 partitioned binary tree** and **EIP-8347**, the live
+migration onto it. Execution clients run one chain under real lighthouse consensus clients and
+must agree on every state root while the network is partitioned and reorged on purpose. It
+composes [ethpandaops/ethereum-package](https://github.com/ethpandaops/ethereum-package) with no
+patches: the tree comes in through supported configuration and a genesis-generator fork.
 
-The point is cross-implementation. Two instances of one binary agree by construction and prove
-nothing; three implementations agreeing is evidence the specification is unambiguous enough to
-implement three times. So the pairs are deliberately configured differently:
-
-| node | client | what makes it different |
+| scenario | command | what it tests |
 |---|---|---|
-| 1 | geth | **the bootnode** — never partitioned, and not one of the nodes under test |
-| 2 | geth | `--state.size-tracking` |
-| 3 | geth | archive, `--syncmode=full` |
-| 4 | besu | `--data-storage-format=BINARY` |
-| 5 | besu | also `--bonsai-limit-trie-logs-enabled=false` — keeps every trie log |
-| 6 | erigon | the tree, taken from the genesis |
-| 7 | erigon | also `--prune.include-commitment-history` — keeps the commitment history |
+| **tree at genesis** | `make tree-at-genesis` | EIP-8297: two geth, two besu and two erigon, each pair configured differently, start on the binary tree and stay in agreement through forced reorgs and state scenarios |
+| **live migration** | `make migration`, `make migration-smoke` | EIP-8347: four geth start on the merkle trie, build the tree in the background and switch at `binaryTrieTime`, with partitions before, across and after the switch |
 
-Erigon needs no trie configuration: it reads `binaryTrieTime` out of the genesis and records the
-tree, with blake3, when `erigon init` creates the datadir. That matters because its launcher runs
-`erigon init <genesis.json> && erigon ...` in one shell while `el_extra_params` extends only the
-second half — a flag would miss `init` entirely. `--prune.include-commitment-history` on node 7 is
-a flag rather than a genesis key because it is read at node start and not by `init`; it is a
-whole-datadir property from then on, and the node refuses to restart without it once the datadir
-carries it.
-
-Node 1 exists because ethereum-package launches the **first** participant with no `--boot-nodes`
-of its own and hands its ENR to everyone else. Partitioning that node strands it permanently — it
-returns with no peers and nothing to rediscover through, then sits at zero peers while every later
-scenario measures a starved node instead of a reorg. Giving the role to a node that is never
-disrupted (`pbt_chaos.protect_nodes`) keeps all six clients under test eligible.
-
-It composes [`ethpandaops/ethereum-package`](https://github.com/ethpandaops/ethereum-package)
-rather than launching clients itself, with **no patches to that package** — the binary tree is
-reached entirely through supported configuration.
+Args files: `args/tree-at-genesis.yaml`, `args/migration.yaml`, `args/migration-smoke.yaml`.
+`make help` lists every target, grouped.
 
 ## What you need
 
-Docker, [Kurtosis](https://docs.kurtosis.com/install) **1.20 or newer**, Python 3, and a JDK 25 for
-the besu build (`brew install openjdk@25`; it is keg-only and will not become your default java).
-Kurtosis 1.15.1 fails to interpret `ethereum-package` with `undefined: GpuConfig`; 1.20.0
-works. The first good version in between was not bisected. Erigon needs
-nothing beyond docker — `make build` clones and builds it like geth.
+Docker, [Kurtosis](https://docs.kurtosis.com/install) 1.20+ (1.15 cannot interpret
+ethereum-package), Python 3, Go, and a JDK 25 for the besu build (`brew install openjdk@25`,
+keg-only). `make build` clones the client forks beside this repo and builds the images the
+chosen args file needs: besu (two Gradle stages) and erigon only when a participant runs them.
 
-## Run
-
-```bash
-make besu     # once: besu-stateless -> mavenLocal, then besu installDist, then the image
-make up       # build the rest, start the devnet, follow the monitor
-make down     # stop and remove
-```
-
-`make besu` is separate because it is a two-stage Gradle build, not a `docker build`:
-
-```
-chain number=<n> hash=<block> state_root=<root> clients=4
-reorg observed client=el-2-geth-lighthouse height=<n> before=<hash> after=<hash>
-```
-
-**The devnet is not quiet by default** — chaos is on and reorgs happen without asking. Add a
-`pbt_chaos:` block with `enabled: false` to `args/devnet.yaml` for a baseline run; the file ships
-with no overrides, so every knob comes from `main.star`. Bare `make` lists every
-target; Ctrl-C detaches from the logs without stopping anything.
-
-## The UIs
+## Tree at genesis
 
 ```bash
-make ui       # prints the live URLs
+make tree-at-genesis   # build, start args/tree-at-genesis.yaml, follow the root monitor
+make down
 ```
 
-| | default | what it is for |
-|---|---|---|
-| dora | http://127.0.0.1:36000 | block explorer — slots, epochs, the chain itself |
-| spamoor | http://127.0.0.1:36002 | transaction spammer; its scenarios and throughput |
-| assertoor | http://127.0.0.1:36004 | block-proposal and EOA-transaction checks, plus upstream's synchronized-check by URL |
-| disruptoor | http://127.0.0.1:36006 | chaos control; `/containers` and `/events` |
-| pbtchaos | *(dynamic)* | scenario control: `GET /status`, `POST /scenario/{name}` |
+`pbtmonitor` follows every client's head and state root (`chain number=... state_root=... clients=N`)
+and prints `reorg observed ...` when one moves. Reorgs are on by default: `pbtchaos` cuts the next
+proposer's p2p around its slot every 15-30 blocks and runs state scenarios (`code-sole`,
+`code-shared`, `delegate`, `account`, `storage-add`, `storage-del`) that strand state on a doomed
+branch and check it is gone from every client after the heal. `make scenario NAME=... DEPTH=...`
+runs one by hand; `pbt_chaos: {enabled: false}` in the args gives a quiet baseline. Participant 1
+is the bootnode and is never partitioned; the per-node flags that make each pair differ are in
+`args/tree-at-genesis.yaml`.
 
-## Checking it works
+Lighthouse bans a peer it could not reach during a partition and the ban outlives the heal, so
+every cut leaves holes in the consensus mesh; `make repeer` restarts the clients holding bans and
+waits until every one sees the whole mesh again. The migration lap does this before each scenario;
+here it is on you, and `pbtchaos` refuses a scenario whose majority is already one cut from an
+island rather than measure a forked majority.
+
+## Live migration
 
 ```bash
-make status     # every client's head and state root, side by side
-make verify     # compare every client at the SAME block number  (BLOCKS=100)
-make diagnose   # where the chain split, and what the peers were doing
-make proposals  # who was due to propose each slot, and who missed
-make forks      # competing heads, how deep each branch is, and who is on which
+make migration                            # full lap, ~1 h, judged at the end
+make migration-smoke                      # ~45 min
+make up ARGS=args/migration.yaml          # the network alone: no restart, scenarios or verdict
 ```
 
-## Chaos
+The chain starts on the merkle trie with `binaryTrieTime` 1800 s (smoke: 780 s) after genesis.
+**I\*** is the first block whose timestamp is `>= binaryTrieTime`: headers before it carry the
+merkle root, from it on the binary root. Each geth builds the binary tree in the background from
+block-level access lists and, after I\*, keeps the merkle side as a shadow until the first
+post-fork block finalizes.
 
-**Reorgs happen on their own.** `pbtchaos` forces one every 15-30 blocks by cutting the p2p of
-whichever node proposes next, for the two slots around its duty. The node still builds its block —
-only publication is cut — so its own execution client takes that block as head while everyone else
-builds on the parent; when the isolation lifts, the loser unwinds. The doomed node **rotates**, so
-reorgs land on geth, besu and erigon alike; `make chaos-status` reports the tally per client. Its own
-jobs run through one queue, so two of them never overlap.
+The bootnode (participant 1) anchors 40% of the stake and is never partitioned, so every heal
+converges on its chain; the three lights hold 20% each. What a lap does:
 
-On top of that, scenarios strand **specific state** on a branch that is then abandoned. Each
-partitions the network, waits until the two sides genuinely disagree, sends its transactions to the
-minority's RPC only, holds for `DEPTH` blocks, heals, and verifies.
-
-| scenario | on the doomed branch | must be true after the heal |
+| phase | migration | migration-smoke |
 |---|---|---|
-| `code-sole` | unique bytecode, deployed once | no code on any client |
-| `code-shared` | the same bytecode a surviving account already holds | the survivor's copy still reads back |
-| `delegate` | 7702 delegations on fresh authorities | no code: back to a plain EOA |
-| `account` | fresh funded accounts | zero balance everywhere |
-| `storage-add` | slots written below and above `HEADER_STORAGE_OFFSET` (64) | both zero again |
-| `storage-del` | slots deleted that existed before the split | the values are back |
+| before I\* | two deep partitions on a pair of lights (40%: finality stalls, the pair still loses, depth >= 10), a short one on a light, node 4 restarted in the gap | one short |
+| across I\* | every light on its own island from I\*-120 s, healed at I\*+60 s once each has crossed on its own block (at I\*+180 s regardless): each light rewinds below I\* and re-crosses on the anchor's block | same |
+| after I\* | a partition inside the open migration window; once every client reports done, a deep pair, then the six state scenarios on the finished tree | a short, then the scenarios |
 
-`code-sole` and `code-shared` are the pair from
-[go-ethereum#30](https://github.com/CPerezz/go-ethereum/pull/30) — chunks go when the dead branch
-was their only writer, and stay when a surviving account still holds them — lifted from unit test
-to six live clients.
+`scripts/lap.sh` drives it (`ENCLAVE`, `ARGS`, `OUT=/tmp/<enclave>-lap`, `RESTART_NODE=0` skips
+the restart) and ends with the judge: one `PASS`/`FAIL`/`INCONCLUSIVE` line per check (fork block
+per node, per-victim straddle rewind, heals within their deadlines, orphaned fork blocks gone
+everywhere, shadow-root agreement, completion after the fork block finalized, the lap manifest),
+exit code = number of failures. Logs, JSONL, manifest and `summary.md` land in `OUT`.
 
-## The migration
+## Watching it
 
-The `args/migration*.yaml` profiles test EIP-8347's live switch: the chain starts on the merkle
-trie, every geth converts and imports a binary snapshot at boot, and at `binaryTrieTime` the
-header root swaps while a shadow tree cross-checks the merkle side until finality closes the
-window.
-
+```bash
+make ui           # every URL: the migration monitor, dora, spamoor, disruptoor, pbtchaos
+make ui-preview   # the monitor page on a synthetic lap, no enclave needed
 ```
-kurtosis run . --enclave pbt --args-file args/migration-composite.yaml --privileged
-kurtosis service logs pbt migration-monitor -f     # phases, roots, findings as JSONL
-make verify-migration ENCLAVE=pbt LOGS_DIR=... BINARY_TRIE_TIME=...
-```
-
-| profile | shape | takes |
-|---|---|---|
-| `migration-composite-smoke` | 4 nodes, all three phases: before, across, after | ~35 min |
-| `migration-composite` | 4 nodes, the whole lifecycle, before/across/after the fork | ~90 min |
-
-`make lap` runs one profile end to end. `migration-monitor` cross-checks shadow roots between
-nodes and serves the live view (`make ui`). `migration-chaos` schedules partitions around the
-fork. `migration-gate` holds the at-genesis reorg service until every client finishes
-migrating, then hands disruptoor over. `verify-migration` judges a finished run.
 
 ![the migration monitor on a synthetic lap](docs/migration-monitor.gif)
 
-The live view draws the chain on a slot axis: the canonical chain on lane 0, every competing
-branch on its own lane, blocks coloured by their primary root (MPT blue before I*, PBT orange
-after) and ringed by cross-node agreement on the *shadow* root - the PBT follower's root before
-I*, the reverse-direction MPT root after. Node chips ride their heads; a reorg leaves a rewind
-arrow to the common ancestor, a catch-up arrow along the winner and a ghost of the node at the
-tip it left. Partitions (from disruptoor) and the schedule (from the profile) sit on the same
-axis, so "which node was cut off when, and what did it cost" is one look. Hover a block for its
-roots, click to pin it in the inspector. `make ui-preview` shows the page on a synthetic lap
-without an enclave.
-
-The bootnode (participant 1) anchors the network with 40% of the stake and is never
-partitioned, so fork choice always brings the lights back onto its chain. Deep partitions
-isolate a pair of lights (40% together) to stall finality without letting them win, and the
-straddle isolates every light on its own island across I* and heals once each has crossed on
-its own block, so every test client is forced to rewind below I* and re-cross - the anchor
-never does.
+The migration monitor draws the chain on a slot axis: canonical chain on lane 0, every competing
+branch on its own lane, blocks coloured by their primary root (merkle blue before I\*, binary
+orange after) and ringed by cross-node agreement on the shadow root. Node chips ride their heads;
+a reorg leaves a rewind arrow to the common ancestor, a catch-up arrow along the winner and a ghost
+of the node at the tip it left. Partitions and the schedule sit on the same axis. Hover a block for
+its roots, click to pin it in the inspector. Dora is the consensus-side view (finality, proposers);
+`make status`, `make compare`, `make forks` and `make diagnose` answer the same questions from the
+terminal.
 
 ## Adding another execution client
 
-The migration profiles are geth-only today — `main.star` refuses any other client at plan
-time. Onboarding a client needs:
+The migration profiles are geth-only; `main.star` refuses any other client at plan time
+(`MIGRATION_READY_CLIENTS`). A client needs:
 
-1. **A scheduled-fork build**: the client must run from the merkle trie with `binaryTrieTime`
-   in the future and build the binary tree itself (geth's `pbt` branch does; the image is a
-   plain fork build).
-2. **An introspection adapter** (`migmon.Client`) reporting migration progress and shadow roots.
-3. **A registry entry** (`internal/migmon/registry.go`) describing its evidence contract.
-4. **A reorg log pattern** to corroborate a heal from the client's own log.
-5. **An args participant block**, optionally as `pbt_migration.anchor_node`.
+1. **A scheduled fork**: start on the merkle trie, read `binaryTrieTime` from genesis.json, switch
+   the header root at I\* as defined above, and execute I\* against a binary view of the parent's
+   state.
+2. **An introspection adapter** (`migmon.Client`): migration progress per direction and the shadow
+   root per block.
+3. **A registry entry** (`internal/migmon/registry.go`) with its evidence contract, and a reorg
+   log pattern to corroborate heals.
+4. **An args participant block**, and its image in `scripts/build-images.sh`.
 
-Erigon is not ready: its genesis validation rejects a future `binaryTrieTime`, and it has no
-follower or migration introspection. It runs only in `args/devnet.yaml`.
+With step 1 done and the client added to `MIGRATION_READY_CLIENTS`, the client-agnostic checks
+(`chain-before-fork`, `boundary-agreement`, `forkblock-convergence`) already tell whether it
+switches on the same block as geth. Erigon rejects a future `binaryTrieTime` and runs only at
+genesis.

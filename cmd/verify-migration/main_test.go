@@ -866,3 +866,39 @@ func TestCheckLapManifestRequested(t *testing.T) {
 		}
 	})
 }
+
+func injectEv(t *testing.T, inj migmon.Injection) migmon.Event {
+	t.Helper()
+	raw, err := json.Marshal(inj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return migmon.Event{Kind: migmon.EvInject, Node: inj.Side, Raw: raw}
+}
+
+// A victim tx the island had not mined before the heal can still be salvaged
+// onto the canonical chain later and overwrite the majority's slot. Its record
+// then has no island block, and its receipt alone is what excuses the overwrite.
+func TestCheckInjectedStateLateSalvageExcusesMajorityOverwrite(t *testing.T) {
+	els := []el{{name: "el1", url: "http://el1"}, {name: "el2", url: "http://el2"}}
+	const contract, slot = "0xc0ffee", "0x01"
+	const majorityVal, victimVal = "0xbb", "0xaa"
+	majority := migmon.Injection{Contract: contract, Slot: slot, Value: majorityVal, Side: "majority", TxHash: "0xm"}
+	victim := migmon.Injection{Contract: contract, Slot: slot, Value: victimVal, Side: "victim", TxHash: "0xv"} // no IslandBlock
+	fetch := fakeFetcher(t, map[string]json.RawMessage{
+		rpcKey("http://el1", "eth_getStorageAt", contract, slot, "latest"): json.RawMessage(`"` + victimVal + `"`),
+		rpcKey("http://el2", "eth_getStorageAt", contract, slot, "latest"): json.RawMessage(`"` + victimVal + `"`),
+		rpcKey("http://el1", "eth_getTransactionReceipt", "0xv"):           json.RawMessage(`{"blockHash":"0xlater"}`),
+	})
+
+	v := &verifier{els: els, fetch: fetch, chaos: []migmon.Event{injectEv(t, majority), injectEv(t, victim)}}
+	if r, evidence := v.checkInjectedState(context.Background()); r != verdictPass || !strings.Contains(evidence, "1 salvaged") {
+		t.Fatalf("want pass with 1 salvaged, got %s: %s", r, evidence)
+	}
+
+	// Without the victim's record there is nothing to explain the overwrite.
+	v = &verifier{els: els, fetch: fetch, chaos: []migmon.Event{injectEv(t, majority)}}
+	if r, evidence := v.checkInjectedState(context.Background()); r != verdictFail || !strings.Contains(evidence, "want majority value") {
+		t.Fatalf("want fail on the unexplained overwrite, got %s: %s", r, evidence)
+	}
+}
