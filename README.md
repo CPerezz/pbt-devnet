@@ -132,7 +132,6 @@ make verify-migration ENCLAVE=pbt LOGS_DIR=... BINARY_TRIE_TIME=...
 | profile | shape | takes |
 |---|---|---|
 | `migration-composite-smoke` | 4 nodes, all three phases: before, across, after | ~35 min |
-| `migration-erigon-smoke` | the smoke shape with erigon on participants 2 and 4 | ~40 min |
 | `migration-composite` | 4 nodes, the whole lifecycle, before/across/after the fork | ~90 min |
 
 `make lap` runs one profile end to end. `migration-monitor` cross-checks shadow roots between
