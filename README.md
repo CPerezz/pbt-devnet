@@ -24,13 +24,6 @@ Nethermind builds as `nethermind-pbt:local` directly from the `pbt-state` branch
 [`NethermindEth/nethermind`](https://github.com/NethermindEth/nethermind/tree/pbt-state)
 using Docker's Git build context; no local Nethermind checkout is needed.
 Its PBT backend is enabled explicitly, not by `binaryTrieTime`.
-To build only this image on an x86-64 host:
-
-```bash
-IMAGES=nethermind PBT_PLATFORM=linux/amd64 scripts/build-images.sh
-```
-
-This participant is only in the PBT-at-genesis profile; migration profiles remain geth-only.
 
 Erigon needs no trie configuration: it reads `binaryTrieTime` out of the genesis and records the
 tree, with blake3, when `erigon init` creates the datadir. That matters because its launcher runs
