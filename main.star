@@ -353,7 +353,7 @@ MIGRATION_PROFILES = ["none", "composite", "composite-smoke"]
 
 # Clients with a migration evidence contract (bootstrap shim, introspection RPCs,
 # registry entry). Erigon rejects any binaryTrieTime later than genesis; not ready yet.
-MIGRATION_READY_CLIENTS = ["geth"]
+MIGRATION_READY_CLIENTS = ["geth", "besu"]
 
 
 def _weight_participants(participants, cfg):

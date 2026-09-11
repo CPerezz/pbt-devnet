@@ -1,0 +1,113 @@
+# Full-lifecycle EIP-8347 migration devnet: chain starts on the merkle trie, three geth
+# nodes + one besu convert at boot and switch at binaryTrieTime = amsterdam_time + fork_offset_seconds;
+# reorgs run before, across, and after the fork. Non-pbt_* keys are ethereum-package schema.
+
+# Validator stake is rendered by main.star from pbt_migration.anchor_node: the bootnode
+# anchors 40% and is never partitioned; the lights it forces back onto its chain hold 20% each.
+participants:
+  # Participant 1 is the bootnode (no --boot-nodes of its own) and is never disrupted.
+  - el_type: geth
+    el_image: pbt-geth:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--cache.preimages", "--syncmode=full"]
+
+  - el_type: geth
+    el_image: pbt-geth:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--cache.preimages", "--syncmode=full"]
+
+  - el_type: geth
+    el_image: pbt-geth:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--cache.preimages", "--syncmode=full"]
+
+  - el_type: besu
+    el_image: besu-pbt:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+
+network_params:
+  # "kurtosis" is the only network name for which the geth launcher picks full sync.
+  network: "kurtosis"
+  preset: mainnet
+  seconds_per_slot: 6
+  genesis_delay: 60
+  fulu_fork_epoch: 0
+  gloas_fork_epoch: 0
+
+ethereum_genesis_generator_params:
+  # main.star injects PBT_OFFSET_SECONDS from pbt_migration.fork_offset_seconds.
+  image: pbt-egg:local
+  extra_env:
+    PBT: "true"
+
+# Order matters: published host ports are public_port_start + 2*index.
+additional_services:
+  - dora        # 36000  block explorer
+  - spamoor     # 36002  transaction spammer + UI
+  - assertoor   # 36004  test playbooks + UI
+  - disruptoor  # 36006  partition injection (needs `kurtosis run --privileged`)
+
+port_publisher:
+  additional_services:
+    enabled: true
+    public_port_start: 36000
+
+dora_params:
+  image: ethpandaops/dora:latest
+
+spamoor_params:
+  start_chainload: false
+  start_fuzzing: false
+  spammers:
+    - scenario: eoatx
+      name: "EOA baseline"
+      config: {throughput: 20, max_pending: 40, max_wallets: 40, base_fee: 20}
+    - scenario: deploytx
+      name: "Contract deploys (code-zone leaves)"
+      config: {throughput: 3, max_pending: 6, max_wallets: 10, base_fee: 20}
+    - scenario: setcodetx
+      name: "EIP-7702 delegations"
+      config: {throughput: 2, max_pending: 4, max_wallets: 10, base_fee: 20}
+    - scenario: storagespam
+      name: "Storage growth"
+      config: {throughput: 3, max_pending: 6, max_wallets: 10, base_fee: 20}
+
+assertoor_params:
+  run_stability_check: false
+  run_block_proposal_check: true
+  run_transaction_test: true
+  tests:
+    - https://raw.githubusercontent.com/ethpandaops/assertoor/master/playbooks/dev/synchronized-check.yaml
+
+disruptoor_params:
+  image: ethpandaops/disruptoor:latest
+
+### Everything below is ours, not ethereum-package's.
+
+# pbt_hammer: extra transaction load; off so spamoor is the only load.
+pbt_hammer:
+  enabled: false
+
+# pbt_monitor: same-height cross-client root comparison; genesis pin lives in verify/pins.yaml.
+pbt_monitor:
+  expected_genesis_root: ""
+
+# pbt_chaos: tree-at-genesis reorg service, gated until every client finishes migrating;
+# depth capped so a post-fork reorg stays healable.
+pbt_chaos:
+  gate: true
+  gate_max_depth: 8
+# pbt_migration: fork offset and chaos schedule. 1800s = 300 slots at 6s.
+pbt_migration:
+  enabled: true
+  fork_offset_seconds: 1800
+  chaos_profile: composite
+  post_op: deep-pair

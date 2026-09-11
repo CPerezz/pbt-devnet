@@ -77,6 +77,10 @@ CTX="$BESU/build/docker-ctx"
 rm -rf "$CTX" && mkdir -p "$CTX"
 cp -R "$DIST" "$CTX/besu"
 cp "$BESU/docker/Dockerfile" "$BESU/docker/pyroscope.properties" "$CTX/"
+if [[ ! -f "$CTX/pyroscope.jar" ]]; then
+  curl -fsSL -o "$CTX/pyroscope.jar" \
+    "https://github.com/grafana/pyroscope-java/releases/download/v2.6.0/pyroscope.jar"
+fi
 
 echo "==> $IMAGE ($PLATFORM)"
 docker build --platform "$PLATFORM" -t "$IMAGE" "$CTX"
