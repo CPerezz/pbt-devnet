@@ -1,13 +1,13 @@
 # pbt-devnet
 
 A differential devnet for the **EIP-8297 partitioned binary tree (PBT)**: two geth, two besu and
-two erigon nodes under test on the same Amsterdam-at-genesis chain, driven by real lighthouse
+two erigon nodes plus one Nethermind node under test on the same Amsterdam-at-genesis chain, driven by real lighthouse
 consensus clients, with every execution client required to agree on every state root — and reorged
 on purpose to check they still agree afterwards.
 
 The point is cross-implementation. Two instances of one binary agree by construction and prove
-nothing; three implementations agreeing is evidence the specification is unambiguous enough to
-implement three times. So the pairs are deliberately configured differently:
+nothing; four implementations agreeing is evidence the specification is unambiguous enough to
+implement four times. So the pairs are deliberately configured differently:
 
 | node | client | what makes it different |
 |---|---|---|
@@ -18,6 +18,19 @@ implement three times. So the pairs are deliberately configured differently:
 | 5 | besu | also `--bonsai-limit-trie-logs-enabled=false` — keeps every trie log |
 | 6 | erigon | the tree, taken from the genesis |
 | 7 | erigon | also `--prune.include-commitment-history` — keeps the commitment history |
+| 8 | nethermind | `--Pbt.Enabled=true`, `--Sync.FastSync=false` — PBT from genesis with full sync |
+
+Nethermind builds as `nethermind-pbt:local` directly from the `pbt-state` branch of
+[`NethermindEth/nethermind`](https://github.com/NethermindEth/nethermind/tree/pbt-state)
+using Docker's Git build context; no local Nethermind checkout is needed.
+Its PBT backend is enabled explicitly, not by `binaryTrieTime`.
+To build only this image on an x86-64 host:
+
+```bash
+IMAGES=nethermind PBT_PLATFORM=linux/amd64 scripts/build-images.sh
+```
+
+This participant is only in the PBT-at-genesis profile; migration profiles remain geth-only.
 
 Erigon needs no trie configuration: it reads `binaryTrieTime` out of the genesis and records the
 tree, with blake3, when `erigon init` creates the datadir. That matters because its launcher runs
@@ -31,7 +44,7 @@ Node 1 exists because ethereum-package launches the **first** participant with n
 of its own and hands its ENR to everyone else. Partitioning that node strands it permanently — it
 returns with no peers and nothing to rediscover through, then sits at zero peers while every later
 scenario measures a starved node instead of a reorg. Giving the role to a node that is never
-disrupted (`pbt_chaos.protect_nodes`) keeps all six clients under test eligible.
+disrupted (`pbt_chaos.protect_nodes`) keeps all seven clients under test eligible.
 
 It composes [`ethpandaops/ethereum-package`](https://github.com/ethpandaops/ethereum-package)
 rather than launching clients itself, with **no patches to that package** — the binary tree is

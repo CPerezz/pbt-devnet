@@ -61,7 +61,7 @@ build_from() {
 
 # IMAGES: comma list of images to build; default is everything. A scoped list like
 # IMAGES=geth,egg,tools skips broken/irrelevant checkouts for the others.
-IMAGES="${IMAGES:-geth,erigon,egg,tools}"
+IMAGES="${IMAGES:-geth,erigon,nethermind,egg,tools}"
 want() {
   case ",$IMAGES," in
   *",$1,"*) return 0 ;;
@@ -91,6 +91,14 @@ require_capability "erigon (EIP-8297)" "$ERIGON_SRC" 'ResolveErigonDBSettingsFor
   "execution/state/genesiswrite/genesis_write.go" "fix: git -C $ERIGON_SRC checkout binary-trie && git -C $ERIGON_SRC pull"
 build_from "erigon (EIP-8297)" "erigon-pbt:local" "$ERIGON_SRC" \
   "clone erigontech/erigon at branch binary-trie, or set PBT_ERIGON_SRC"
+fi
+
+if want nethermind; then
+echo "==> nethermind (EIP-8297) -> nethermind-pbt:local"
+echo "    source: https://github.com/NethermindEth/nethermind.git#pbt-state"
+docker build --platform "$PLATFORM" -t nethermind-pbt:local \
+  "https://github.com/NethermindEth/nethermind.git#pbt-state"
+echo
 fi
 
 if want egg; then

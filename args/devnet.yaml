@@ -1,7 +1,7 @@
-# PBT-at-genesis devnet, six clients under test. Non-pbt_* keys are ethereum-package schema.
+# PBT-at-genesis devnet, seven clients under test. Non-pbt_* keys are ethereum-package schema.
 
 participants:
-  # Pairs of each client; isolating one still leaves the majority above 2/3 for finality.
+  # Isolating one participant still leaves the majority above 2/3 for finality.
   # Participant 1 is the bootnode (no --boot-nodes of its own) and is never disrupted.
   - el_type: geth
     el_image: pbt-geth:local
@@ -51,6 +51,13 @@ participants:
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
     el_extra_params: ["--prune.include-commitment-history"]
+
+  - el_type: nethermind
+    el_image: nethermind-pbt:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--Pbt.Enabled=true", "--Sync.FastSync=false"]
 
 network_params:
   network: "kurtosis"
