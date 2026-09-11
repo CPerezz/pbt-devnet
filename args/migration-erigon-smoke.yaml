@@ -1,0 +1,102 @@
+# composite-smoke with erigon on participants 2 and 4: geth anchors, erigon takes the short
+# partition, the straddle across the fork, and lap.sh's post-fork restart.
+
+participants:
+  - el_type: geth
+    el_image: pbt-geth:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--cache.preimages", "--syncmode=full"]
+
+  - el_type: erigon
+    el_image: erigon-dual:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_env_vars: {COMMITMENT_HEX_BIN: "true"}
+
+  - el_type: geth
+    el_image: pbt-geth:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--cache.preimages", "--syncmode=full"]
+
+  - el_type: erigon
+    el_image: erigon-dual:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_env_vars: {COMMITMENT_HEX_BIN: "true"}
+    el_extra_params: ["--prune.include-commitment-history"]
+
+network_params:
+  network: "kurtosis"
+  preset: mainnet
+  seconds_per_slot: 6
+  genesis_delay: 60
+  fulu_fork_epoch: 0
+  gloas_fork_epoch: 0
+
+ethereum_genesis_generator_params:
+  image: pbt-egg:local
+  extra_env:
+    PBT: "true"
+
+additional_services:
+  - dora
+  - spamoor
+  - assertoor
+  - disruptoor
+
+port_publisher:
+  additional_services:
+    enabled: true
+    public_port_start: 36000
+
+dora_params:
+  image: ethpandaops/dora:latest
+
+spamoor_params:
+  start_chainload: false
+  start_fuzzing: false
+  spammers:
+    - scenario: eoatx
+      name: "EOA baseline"
+      config: {throughput: 20, max_pending: 40, max_wallets: 40, base_fee: 20}
+    - scenario: deploytx
+      name: "Contract deploys (code-zone leaves)"
+      config: {throughput: 3, max_pending: 6, max_wallets: 10, base_fee: 20}
+    - scenario: setcodetx
+      name: "EIP-7702 delegations"
+      config: {throughput: 2, max_pending: 4, max_wallets: 10, base_fee: 20}
+    - scenario: storagespam
+      name: "Storage growth"
+      config: {throughput: 3, max_pending: 6, max_wallets: 10, base_fee: 20}
+
+assertoor_params:
+  run_stability_check: false
+  run_block_proposal_check: true
+  run_transaction_test: true
+  tests:
+    - https://raw.githubusercontent.com/ethpandaops/assertoor/master/playbooks/dev/synchronized-check.yaml
+
+disruptoor_params:
+  image: ethpandaops/disruptoor:latest
+
+pbt_hammer:
+  enabled: false
+
+pbt_monitor:
+  expected_genesis_root: ""
+
+pbt_chaos:
+  gate: true
+  isolation: false
+
+pbt_migration:
+  enabled: true
+  fork_offset_seconds: 780
+  chaos_profile: composite-smoke
+  post_op: short-light

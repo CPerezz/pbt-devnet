@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 // The pre-fork fixture is a LIVE capture (S1, 2026-08-27): a migration-pre
@@ -72,5 +74,49 @@ func TestDecodeRefusesShapeless(t *testing.T) {
 	}
 	if _, err := DecodeProgress([]byte(`{"Phase":"done"}`)); err != nil {
 		t.Fatalf("terminal payload failed to decode: %v", err)
+	}
+}
+
+func TestErigonProgress(t *testing.T) {
+	fork := hexutil.Uint64(1000)
+	armed := erigonMigration{Mode: "hex+bin", ActivationTime: &fork}
+	stopped := armed
+	stopped.ShadowStopped = true
+	pre := &Header{Number: 7, Hash: "0x07", Time: 994}
+	post := &Header{Number: 9, Hash: "0x09", Time: 1006}
+	for _, tc := range []struct {
+		name            string
+		m               erigonMigration
+		head, finalized *Header
+		phase, bin, mer string
+	}{
+		{"before the fork", armed, pre, nil, PhaseRunning, DirSynced, "nil"},
+		{"after the fork", armed, post, pre, PhaseRunning, DirParked, DirSynced},
+		{"fork block finalized", armed, post, &Header{Number: 8, Time: 1000}, PhaseDone, "nil", "nil"},
+		{"shadow stopped", stopped, pre, nil, PhaseRunning, DirStalled, "nil"},
+		{"binary at genesis", erigonMigration{Mode: "bin"}, pre, nil, PhaseInactive, "nil", "nil"},
+	} {
+		raw, err := json.Marshal(erigonProgress(tc.m, tc.head, tc.finalized, "0xroot"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := DecodeProgress(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if p.Phase != tc.phase || dirPhase(p.Binary) != tc.bin || dirPhase(p.Merkle) != tc.mer {
+			t.Fatalf("%s: got %s binary=%s merkle=%s, want %s binary=%s merkle=%s",
+				tc.name, p.Phase, dirPhase(p.Binary), dirPhase(p.Merkle), tc.phase, tc.bin, tc.mer)
+		}
+		if p.Phase != PhaseRunning {
+			continue
+		}
+		live := p.Binary
+		if p.Merkle != nil {
+			live = p.Merkle
+		}
+		if uint64(live.Cursor) != tc.head.Number || live.CursorHash != tc.head.Hash || live.ShadowRoot != "0xroot" {
+			t.Fatalf("%s: live direction %+v does not carry the head %+v", tc.name, live, tc.head)
+		}
 	}
 }

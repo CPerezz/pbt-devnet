@@ -20,6 +20,10 @@ var Registry = map[string]ClientSpec{
 		ServesOrphans:      true,
 		ForbiddenWindowLog: `migration window`,
 	},
+	"erigon": {
+		Introspects:   true,
+		ServesOrphans: true,
+	},
 }
 
 // SpecFor returns the ClientSpec whose registry key appears as a substring
