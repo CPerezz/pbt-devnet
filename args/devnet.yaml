@@ -1,7 +1,7 @@
 # PBT-at-genesis devnet, seven clients under test. Non-pbt_* keys are ethereum-package schema.
 
 participants:
-  # Isolating one participant still leaves the majority above 2/3 for finality.
+  # Pairs of each client; isolating one still leaves the majority above 2/3 for finality.
   # Participant 1 is the bootnode (no --boot-nodes of its own) and is never disrupted.
   - el_type: geth
     el_image: pbt-geth:local

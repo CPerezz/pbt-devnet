@@ -21,8 +21,7 @@ implement four times. So the pairs are deliberately configured differently:
 | 8 | nethermind | `--Pbt.Enabled=true`, `--Sync.FastSync=false` — PBT from genesis with full sync |
 
 Nethermind builds as `nethermind-pbt:local` directly from the `pbt-state` branch of
-[`NethermindEth/nethermind`](https://github.com/NethermindEth/nethermind/tree/pbt-state)
-using Docker's Git build context; no local Nethermind checkout is needed.
+[`NethermindEth/nethermind`](https://github.com/NethermindEth/nethermind/tree/pbt-state).
 Its PBT backend is enabled explicitly, not by `binaryTrieTime`.
 
 Erigon needs no trie configuration: it reads `binaryTrieTime` out of the genesis and records the
