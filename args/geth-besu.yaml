@@ -1,0 +1,82 @@
+# PBT-at-genesis devnet: binaryTrieTime == amsterdamTime (no pbt_migration block).
+# For merkle-trie start + timestamp fork, use args/migration-geth-besu-smoke.yaml instead.
+# Non-pbt_* keys are ethereum-package schema.
+
+participants:
+  # Participant 1 is the bootnode (no --boot-nodes of its own) and is never disrupted.
+  - el_type: geth
+    el_image: pbt-geth:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+
+  - el_type: geth
+    el_image: pbt-geth:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--state.size-tracking"]
+
+  - el_type: besu
+    el_image: besu-pbt:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+
+  - el_type: besu
+    el_image: besu-pbt:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--bonsai-limit-trie-logs-enabled=false"]
+
+network_params:
+  network: "kurtosis"
+  preset: mainnet
+  seconds_per_slot: 6
+  genesis_delay: 20
+  fulu_fork_epoch: 0
+  gloas_fork_epoch: 0
+
+ethereum_genesis_generator_params:
+  image: pbt-egg:local
+  extra_env:
+    PBT: "true"
+
+additional_services:
+  - dora
+  - spamoor
+  - assertoor
+  - disruptoor
+
+port_publisher:
+  additional_services:
+    enabled: true
+    public_port_start: 36000
+
+dora_params:
+  image: ethpandaops/dora:latest
+
+spamoor_params:
+  start_chainload: false
+  start_fuzzing: false
+  spammers:
+    - scenario: eoatx
+      name: "EOA baseline"
+      config: {throughput: 20, max_pending: 40, max_wallets: 40, base_fee: 20}
+    - scenario: deploytx
+      name: "Contract deploys (code-zone leaves)"
+      config: {throughput: 3, max_pending: 6, max_wallets: 10, base_fee: 20}
+
+assertoor_params:
+  run_stability_check: false
+  run_block_proposal_check: true
+  run_transaction_test: true
+  tests:
+    - https://raw.githubusercontent.com/ethpandaops/assertoor/master/playbooks/dev/synchronized-check.yaml
+
+disruptoor_params:
+  image: ethpandaops/disruptoor:latest
+
+pbt_chaos:
+  enabled: false
