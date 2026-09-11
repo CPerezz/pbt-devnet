@@ -1,6 +1,6 @@
-# Full-lifecycle EIP-8347 migration devnet: chain starts on the merkle trie, four geth
-# nodes convert at boot and switch at binaryTrieTime = amsterdam_time + fork_offset_seconds;
-# reorgs run before, across, and after the fork. Non-pbt_* keys are ethereum-package schema.
+# Smoke EIP-8347 migration devnet: same shape as migration.yaml with a short fork
+# offset and one partition per phase (before, across, after); `make migration-smoke`
+# runs it in ~45 min. Non-pbt_* keys are ethereum-package schema.
 
 # Validator stake is rendered by main.star from pbt_migration.anchor_node: the bootnode
 # anchors 40% and is never partitioned; the lights it forces back onto its chain hold 20% each.
@@ -101,14 +101,14 @@ pbt_hammer:
 pbt_monitor:
   expected_genesis_root: ""
 
-# pbt_chaos: tree-at-genesis reorg service, gated until every client finishes migrating;
-# depth capped so a post-fork reorg stays healable.
+# pbt_chaos: gated reorg service runs one post-fork partition; no cadence afterwards.
 pbt_chaos:
   gate: true
-  gate_max_depth: 8
-# pbt_migration: fork offset and chaos schedule. 1800s = 300 slots at 6s.
+  isolation: false
+# pbt_migration: fork offset and chaos schedule. 780s: the straddling partition opens at
+# +690, after the first finalizable checkpoint.
 pbt_migration:
   enabled: true
-  fork_offset_seconds: 1800
-  chaos_profile: composite
-  post_op: deep-pair
+  fork_offset_seconds: 780
+  chaos_profile: composite-smoke
+  post_op: short-light

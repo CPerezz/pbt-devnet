@@ -153,3 +153,17 @@ func TestEligibleIsEveryNodeWhenNothingIsProtected(t *testing.T) {
 		t.Fatalf("eligible() = %v, want all four nodes", got)
 	}
 }
+
+func TestAMajorityClientWithOnePeerRefusesTheScenario(t *testing.T) {
+	// cl-1 peers only with the victim (node 3): cutting node 3 would island the anchor.
+	peers := map[string]int{"1": 1, "2": 2, "3": 2, "4": 3}
+	if !underPeered(peers, []int{1, 2, 4}) {
+		t.Fatal("a majority client with one peer must refuse the scenario")
+	}
+	if underPeered(peers, []int{2, 4}) {
+		t.Fatal("the under-peered node is not in this majority; nothing to refuse")
+	}
+	if underPeered(map[string]int{"2": 3}, []int{1, 2}) {
+		t.Fatal("an unknown peer count is not a degraded mesh")
+	}
+}
