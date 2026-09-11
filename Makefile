@@ -1,34 +1,42 @@
-# Entry point for the devnet. `make up` builds the images and starts it; everything else
-# either builds a piece of it or asks the running network a question.
+# Entry point for the devnet. Two scenarios: `make tree-at-genesis` (EIP-8297, the tree from
+# block 0) and `make migration` (EIP-8347, the live switch). Everything else builds a piece
+# of one or asks the running network a question.
 #
 # ENCLAVE and ARGS are overridable: `make up ENCLAVE=pbt2 ARGS=args/mine.yaml`.
 
 ENCLAVE ?= pbt
-BLOCKS  ?= 100
-ARGS    ?= args/devnet.yaml
-NAME    ?= code-shared
-DEPTH   ?= 10
+BLOCKS ?= 100
+ARGS ?= args/tree-at-genesis.yaml
+NAME ?= code-shared
+DEPTH ?= 10
 # Empty means "next node in pbtchaos's rotation", which is what spreads reorgs across
 # both client types.
 MINORITY ?=
-PINS     ?= verify/pins.yaml
-# No default: a per-run unix time with no sane guess. See `make verify-migration`.
-BINARY_TRIE_TIME ?=
-LOGS_DIR ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help up down logs sources build besu besu-image bin genesis check verify-migration lap ui-preview
+.PHONY: help tree-at-genesis migration migration-smoke up down logs ui ui-preview status \
+        compare forks proposals diagnose split heal repeer chaos-status scenario \
+        build sources bin genesis check
 
+# `## <group>: <text>` on a target line documents it; help groups them in first-seen order.
 help:
-	@echo "pbt-devnet — a differential test harness for EIP-8297 execution clients"
-	@echo ""
+	@echo "pbt-devnet — differential devnets for EIP-8297 (binary tree) and EIP-8347 (migration)"
 	@grep -hE '^[a-z][a-z-]*:.*## ' $(MAKEFILE_LIST) \
-	  | sed 's/:.*## /\t/' \
-	  | awk -F'\t' '{printf "  make %-8s %s\n", $$1, $$2}'
+	  | sed -E 's/^([a-z-]+):.*## ([A-Za-z ]+): (.*)/\2\t\1\t\3/' \
+	  | awk -F'\t' '$$1 != g {g = $$1; printf "\n%s\n", g} {printf "  make %-16s %s\n", $$2, $$3}'
 	@echo ""
 	@echo "  ENCLAVE=$(ENCLAVE)  ARGS=$(ARGS)"
 
-up: check build ## build the images and start the devnet, then follow the monitor
+tree-at-genesis: ## Scenarios: EIP-8297 - geth, besu and erigon on the tree from block 0, reorged on purpose
+	$(MAKE) up ARGS=args/tree-at-genesis.yaml
+
+migration: ## Scenarios: EIP-8347 - four geth switch to the tree at binaryTrieTime; one full lap, judged (~1 h)
+	$(MAKE) lap ARGS=args/migration.yaml
+
+migration-smoke: ## Scenarios: the short migration lap (~45 min)
+	$(MAKE) lap ARGS=args/migration-smoke.yaml
+
+up: check build ## Scenarios: start ARGS as a plain network and follow its monitor (no lap driver)
 	@kurtosis enclave rm -f $(ENCLAVE) >/dev/null 2>&1 || true
 	@# --privileged is for disruptoor only: it enters other containers' network namespaces
 	@# to apply partitions and latency, so it needs NET_ADMIN, the docker socket and the
@@ -36,18 +44,22 @@ up: check build ## build the images and start the devnet, then follow the monito
 	@# disruptoor from additional_services and this flag goes with it.
 	kurtosis run . --enclave $(ENCLAVE) --args-file $(ARGS) --privileged
 	@echo ""
-	@echo "==> following pbtmonitor. Ctrl-C detaches; the devnet keeps running."
+	@echo "==> following the monitor. Ctrl-C detaches; the devnet keeps running."
 	@echo "    'make down' stops it. Watch for lines beginning FINDING."
 	@# Ctrl-C is how you leave this, so a non-zero exit here is the normal case.
-	@kurtosis service logs $(ENCLAVE) pbtmonitor -f || true
+	@$(MAKE) logs || true
 
-down: ## stop and remove the devnet
+lap: check build
+	ENCLAVE=$(ENCLAVE) ARGS=$(ARGS) scripts/lap.sh
+
+down: ## Scenarios: stop and remove the enclave
 	-@kurtosis enclave rm -f $(ENCLAVE)
 
-logs: ## re-attach to the monitor
-	kurtosis service logs $(ENCLAVE) pbtmonitor -f
+logs: ## Scenarios: re-attach to the monitor (the migration monitor when present, else pbtmonitor)
+	@m=pbtmonitor; kurtosis enclave inspect $(ENCLAVE) 2>/dev/null | grep -q '\bmigration-monitor\b' && m=migration-monitor; \
+	kurtosis service logs $(ENCLAVE) $$m -f
 
-ui: ## print every web UI and API url
+ui: ## Watching: print every web UI and API url
 	@printf '%-12s %s\n' \
 	  dora       "$$(kurtosis port print $(ENCLAVE) dora http 2>/dev/null)" \
 	  spamoor    "$$(kurtosis port print $(ENCLAVE) spamoor http 2>/dev/null)" \
@@ -56,90 +68,61 @@ ui: ## print every web UI and API url
 	  pbtchaos   "$$(kurtosis port print $(ENCLAVE) pbtchaos http 2>/dev/null)" \
 	  migration  "$$(kurtosis port print $(ENCLAVE) migration-monitor http 2>/dev/null)"
 
-ui-preview: ## serve the migration monitor page on a synthetic lap (no enclave needed)
+ui-preview: ## Watching: the migration monitor page on a synthetic lap (no enclave needed)
 	@echo "==> http://127.0.0.1:8765/index.html?synthetic"
 	@python3 -m http.server 8765 --bind 127.0.0.1 -d cmd/migration-monitor/ui
 
-status: ## show every execution client's head and state root
+status: ## Watching: every execution client's head and state root
 	@scripts/pbt.py status $(ENCLAVE)
 
-verify: ## compare every client at the same block number (BLOCKS=100)
+compare: ## Watching: the same state root on every client at the same block (BLOCKS=100)
 	@scripts/pbt.py verify $(ENCLAVE) --blocks $(BLOCKS) --wait
 
-forks: ## competing heads, how deep each branch is, and who is on which
+forks: ## Watching: competing heads, how deep each branch is, and who is on which
 	@scripts/pbt.py forks $(ENCLAVE)
 
-proposals: ## who was due to propose each slot, and who missed
+proposals: ## Watching: who was due to propose each slot, and who missed
 	@scripts/pbt.py proposals $(ENCLAVE)
 
-diagnose: ## where did the chain split, and what were the peers doing then
+diagnose: ## Watching: where did the chain split, and what were the peers doing then
 	@scripts/pbt.py diagnose $(ENCLAVE)
 
-split: ## partition the network by hand: majority | last participant (el and cl)
+split: ## Chaos by hand: partition the network: majority | last participant (el and cl)
 	@scripts/pbt.py split $(ENCLAVE)
 
-heal: ## remove every partition and shaping rule
+heal: ## Chaos by hand: remove every partition and shaping rule
 	@scripts/pbt.py heal $(ENCLAVE)
 
-repeer: ## restart any consensus client left with no peers after a partition
+repeer: ## Chaos by hand: restart any consensus client that banned a peer or has none (lighthouse bans partitioned peers), wait for the mesh
 	@scripts/pbt.py repeer $(ENCLAVE)
 
-chaos-status: ## what pbtchaos is doing now, what is queued, and recent results
+chaos-status: ## Chaos by hand: what pbtchaos is doing now, what is queued, and recent results
 	@scripts/pbt.py chaos-status $(ENCLAVE)
 
-scenario: ## run one reorg scenario (NAME=code-shared DEPTH=20 [MINORITY=3])
+scenario: ## Chaos by hand: run one reorg scenario (NAME=code-shared DEPTH=20 [MINORITY=3])
 	@scripts/pbt.py scenario $(ENCLAVE) $(NAME) $(DEPTH) $(MINORITY)
 
-sources: ## clone the forks this builds from, if they are not already beside this repo
-	@scripts/sources.sh
-
-build: sources ## build every local image the package expects
+build: sources ## Building: every image ARGS needs (besu, two Gradle stages, only when a participant runs it)
 	scripts/build-images.sh $(ARGS)
 
-besu: sources ## build besu-pbt:local (two Gradle stages, then the image; needs JDK 25)
-	scripts/build-besu.sh
+sources: ## Building: clone the forks this builds from, if they are not already beside this repo
+	@scripts/sources.sh
 
-besu-image: ## rebuild besu-pbt:local from an existing build/install/besu
-	scripts/build-besu.sh --skip-gradle
-
-bin: ## build every command as a host binary into bin/
+bin: ## Building: every command as a host binary into bin/
 	@mkdir -p bin
 	go build -o bin/ ./cmd/...
 	@echo "==> $$(ls bin | tr '\n' ' ')"
 
-# Reads --el name=url straight from the running enclave (same el- prefix and
-# `kurtosis port print` lookup scripts/pbt.py itself uses), so this needs no new
-# plumbing in that script. LOGS_DIR and BINARY_TRIE_TIME have no sane default —
-# LOGS_DIR is where kurtosis logs are dumped and BINARY_TRIE_TIME is a per-run
-# value printed by main.star as "migration fork: binaryTrieTime=..." — so both
-# are required explicitly rather than guessed.
-verify-migration: bin ## verify a migration run (required: LOGS_DIR=dir BINARY_TRIE_TIME=unix; reads --el/--pins from ENCLAVE=$(ENCLAVE)/PINS=$(PINS))
-	@test -n "$(LOGS_DIR)" || { echo "LOGS_DIR=<dir> is required (verify-migration writes/reads migration-monitor and migration-chaos logs there)"; exit 1; }
-	@test -n "$(BINARY_TRIE_TIME)" || { echo "BINARY_TRIE_TIME=<unix> is required — see main.star's 'migration fork: binaryTrieTime=...' plan output"; exit 1; }
-	@mkdir -p $(LOGS_DIR)
-	kurtosis service logs $(ENCLAVE) migration-monitor -a > $(LOGS_DIR)/migration-monitor.jsonl 2>/dev/null || true
-	kurtosis service logs $(ENCLAVE) migration-chaos -a > $(LOGS_DIR)/migration-chaos.jsonl 2>/dev/null || true
-	@els="$$(cd scripts && python3 -c "import pbt; print(' '.join('--el ' + n + '=' + pbt.url('$(ENCLAVE)', n, 'rpc') for n in pbt.services('$(ENCLAVE)', 'el-')))")"; \
-	bin/verify-migration $$els \
-	  --monitor-jsonl $(LOGS_DIR)/migration-monitor.jsonl \
-	  --chaos-jsonl $(LOGS_DIR)/migration-chaos.jsonl \
-	  --logs-dir $(LOGS_DIR) \
-	  --pins $(PINS) \
-	  --binary-trie-time $(BINARY_TRIE_TIME)
-
-lap: check build ## run one migration lap end to end and judge it (ARGS=args/migration-composite.yaml)
-	ENCLAVE=$(ENCLAVE) ARGS=$(ARGS) scripts/lap.sh
-
-genesis: ## regenerate genesis/genesis.json and print its root (for single-client debugging)
+genesis: ## Building: regenerate genesis/genesis.json and print its root (for single-client debugging)
 	@mkdir -p bin
 	go build -o bin/gengenesis ./cmd/gengenesis
 	./bin/gengenesis --out genesis/genesis.json --gaslimit 200000000
 
-check: ## verify docker and kurtosis are present
+check:
 	@command -v docker >/dev/null 2>&1 || { \
 	  echo "docker not found. Install Docker Desktop, or OrbStack."; exit 1; }
 	@docker info >/dev/null 2>&1 || { \
 	  echo "docker is installed but not responding — start Docker and retry."; exit 1; }
 	@command -v kurtosis >/dev/null 2>&1 || { \
-	  echo "kurtosis not found:  brew install kurtosis-tech/tap/kurtosis-cli"; exit 1; }
+	  echo "kurtosis not found: brew install kurtosis-tech/tap/kurtosis-cli"; exit 1; }
 	@echo "==> docker and kurtosis are both present"

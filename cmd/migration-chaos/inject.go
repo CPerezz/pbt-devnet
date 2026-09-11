@@ -98,7 +98,9 @@ func (in *injector) splitWrites(ctx context.Context, log *migmon.Log) {
 		log.Emit(migmon.Event{Kind: migmon.EvInject, Node: inj.Side, Detail: fmt.Sprintf("slot %s = %s via %s island", inj.Slot, inj.Value, inj.Side), Raw: raw})
 	}
 
-	// Majority first: its values must win.
+	// Majority first: its values must win. A sent tx is evidence whatever the island
+	// did with it by the heal: the verifier judges its fate from the receipt later, so
+	// the record is emitted on send and the receipt wait only warns.
 	if c, err := ethclient.DialContext(ctx, in.majorityURL); err == nil {
 		for slot, val := range map[common.Hash]common.Hash{
 			injectionSlot:         majorityValue,
@@ -111,7 +113,6 @@ func (in *injector) splitWrites(ctx context.Context, log *migmon.Log) {
 			}
 			if _, err := waitReceipt(ctx, c, tx.Hash(), 45*time.Second); err != nil {
 				log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "majority injection receipt: " + err.Error()})
-				continue
 			}
 			emit(migmon.Injection{Contract: in.contract.Hex(), Slot: slot.Hex(), Value: val.Hex(), Side: "majority", TxHash: tx.Hash().Hex()})
 		}
@@ -120,16 +121,20 @@ func (in *injector) splitWrites(ctx context.Context, log *migmon.Log) {
 		log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "majority island dial: " + err.Error()})
 	}
 
-	// Victim side: the conflicting write.
+	// Victim side: the conflicting write. Without a receipt before the heal the island
+	// block is unknown, but the tx can still be salvaged onto the canonical chain later
+	// and overwrite the majority's slot, so the verifier needs its hash either way.
 	if c, err := ethclient.DialContext(ctx, in.victimURL); err == nil {
-		tx, err := in.send(ctx, c, in.victimKey, &in.contract, writeCall(injectionSlot, victimValue))
-		if err != nil {
+		if tx, err := in.send(ctx, c, in.victimKey, &in.contract, writeCall(injectionSlot, victimValue)); err != nil {
 			log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "victim injection: " + err.Error()})
-		} else if rcpt, err := waitReceipt(ctx, c, tx.Hash(), 45*time.Second); err != nil {
-			log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "victim injection receipt: " + err.Error()})
 		} else {
-			emit(migmon.Injection{Contract: in.contract.Hex(), Slot: injectionSlot.Hex(), Value: victimValue.Hex(),
-				Side: "victim", TxHash: tx.Hash().Hex(), IslandBlock: rcpt.BlockHash.Hex()})
+			inj := migmon.Injection{Contract: in.contract.Hex(), Slot: injectionSlot.Hex(), Value: victimValue.Hex(), Side: "victim", TxHash: tx.Hash().Hex()}
+			if rcpt, err := waitReceipt(ctx, c, tx.Hash(), 45*time.Second); err != nil {
+				log.Emit(migmon.Event{Kind: migmon.EvWarn, Detail: "victim injection receipt: " + err.Error()})
+			} else {
+				inj.IslandBlock = rcpt.BlockHash.Hex()
+			}
+			emit(inj)
 		}
 		c.Close()
 	} else {
