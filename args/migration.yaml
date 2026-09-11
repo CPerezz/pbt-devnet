@@ -1,7 +1,7 @@
-# Full-lifecycle EIP-8347 migration devnet: the chain starts on the merkle trie, four geth
-# nodes build the binary tree in the background and switch at binaryTrieTime = amsterdam_time
-# + fork_offset_seconds; reorgs run before, across and after the fork. `make migration` drives
-# it end to end. Non-pbt_* keys are ethereum-package schema.
+# Full-lifecycle EIP-8347 migration devnet: the chain starts on the merkle trie; geth on 1 and 3
+# builds the binary tree in the background, erigon on 2 and 4 folds both tries from init, and all
+# switch at binaryTrieTime = amsterdam_time + fork_offset_seconds; reorgs run before, across and
+# after the fork. `make migration` drives it end to end. Non-pbt_* keys are ethereum-package schema.
 
 # Validator stake is rendered by main.star from pbt_migration.anchor_node: the bootnode
 # anchors 40% and is never partitioned; the lights it forces back onto its chain hold 20% each.
@@ -14,12 +14,12 @@ participants:
     checkpoint_sync_enabled: false
     el_extra_params: ["--cache.preimages", "--syncmode=full"]
 
-  - el_type: geth
-    el_image: pbt-geth:local
+  - el_type: erigon
+    el_image: erigon-pbt:local
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    el_extra_params: ["--cache.preimages", "--syncmode=full"]
+    el_extra_env_vars: {COMMITMENT_HEX_BIN: "true"}
 
   - el_type: geth
     el_image: pbt-geth:local
@@ -28,12 +28,13 @@ participants:
     checkpoint_sync_enabled: false
     el_extra_params: ["--cache.preimages", "--syncmode=full"]
 
-  - el_type: geth
-    el_image: pbt-geth:local
+  - el_type: erigon
+    el_image: erigon-pbt:local
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    el_extra_params: ["--cache.preimages", "--syncmode=full"]
+    el_extra_env_vars: {COMMITMENT_HEX_BIN: "true"}
+    el_extra_params: ["--prune.include-commitment-history"]
 
 network_params:
   # "kurtosis" is the only network name for which the geth launcher picks full sync.

@@ -69,9 +69,64 @@ func NewClient(service, url string) Client {
 	switch ClientType(service) {
 	case "geth":
 		return rpc
+	case "erigon":
+		return &erigonClient{rpcClient: rpc}
 	default:
 		return noIntrospection{rpc}
 	}
+}
+
+type erigonClient struct {
+	*rpcClient
+	done atomic.Bool
+}
+
+type erigonMigration struct {
+	Mode           string          `json:"mode"`
+	ActivationTime *hexutil.Uint64 `json:"activationTime"`
+	ShadowStopped  bool            `json:"shadowStopped"`
+}
+
+func (c *erigonClient) Progress(ctx context.Context) (json.RawMessage, error) {
+	var m erigonMigration
+	if err := c.call(ctx, "debug_migrationProgress", &m); err != nil {
+		return nil, err
+	}
+	head, err := c.HeaderByTag(ctx, "latest")
+	if err != nil {
+		return nil, err
+	}
+	shadow := ""
+	if head != nil {
+		if shadow, err = c.ShadowRoot(ctx, head.Hash); err != nil {
+			return nil, err
+		}
+	}
+	finalized, _ := c.HeaderByTag(ctx, "finalized")
+	p := erigonProgress(m, head, finalized, shadow)
+	if p.Phase == PhaseDone || c.done.Load() {
+		c.done.Store(true)
+		p = MigrationProgress{Phase: PhaseDone}
+	}
+	return json.Marshal(p)
+}
+
+func erigonProgress(m erigonMigration, head, finalized *Header, shadow string) MigrationProgress {
+	if m.Mode != "hex+bin" || m.ActivationTime == nil || head == nil {
+		return MigrationProgress{Phase: PhaseInactive}
+	}
+	fork := uint64(*m.ActivationTime)
+	if finalized != nil && finalized.Time >= fork {
+		return MigrationProgress{Phase: PhaseDone}
+	}
+	live := &DirectionProgress{Phase: DirSynced, Cursor: FlexUint64(head.Number), CursorHash: head.Hash, ShadowRoot: shadow}
+	if m.ShadowStopped {
+		live.Phase, live.Error = DirStalled, "shadow commitment domain stopped"
+	}
+	if head.Time < fork {
+		return MigrationProgress{Phase: PhaseRunning, Binary: live}
+	}
+	return MigrationProgress{Phase: PhaseRunning, Binary: &DirectionProgress{Phase: DirParked}, Merkle: live}
 }
 
 // HasIntrospection reports whether a client can answer migration progress.
