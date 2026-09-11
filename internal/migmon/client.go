@@ -70,13 +70,16 @@ func NewClient(service, url string) Client {
 	case "geth":
 		return rpc
 	case "erigon":
-		return erigonClient{rpc}
+		return &erigonClient{rpcClient: rpc}
 	default:
 		return noIntrospection{rpc}
 	}
 }
 
-type erigonClient struct{ *rpcClient }
+type erigonClient struct {
+	*rpcClient
+	done atomic.Bool
+}
 
 type erigonMigration struct {
 	Mode           string          `json:"mode"`
@@ -84,7 +87,7 @@ type erigonMigration struct {
 	ShadowStopped  bool            `json:"shadowStopped"`
 }
 
-func (c erigonClient) Progress(ctx context.Context) (json.RawMessage, error) {
+func (c *erigonClient) Progress(ctx context.Context) (json.RawMessage, error) {
 	var m erigonMigration
 	if err := c.call(ctx, "debug_migrationProgress", &m); err != nil {
 		return nil, err
@@ -100,7 +103,12 @@ func (c erigonClient) Progress(ctx context.Context) (json.RawMessage, error) {
 		}
 	}
 	finalized, _ := c.HeaderByTag(ctx, "finalized")
-	return json.Marshal(erigonProgress(m, head, finalized, shadow))
+	p := erigonProgress(m, head, finalized, shadow)
+	if p.Phase == PhaseDone || c.done.Load() {
+		c.done.Store(true)
+		p = MigrationProgress{Phase: PhaseDone}
+	}
+	return json.Marshal(p)
 }
 
 func erigonProgress(m erigonMigration, head, finalized *Header, shadow string) MigrationProgress {
