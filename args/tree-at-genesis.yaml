@@ -1,4 +1,5 @@
-# PBT-at-genesis devnet, seven clients under test. Non-pbt_* keys are ethereum-package schema.
+# EIP-8297 devnet with the binary tree from genesis, seven clients under test; `make tree-at-genesis`
+# starts it. Non-pbt_* keys are ethereum-package schema.
 
 participants:
   # Pairs of each client; isolating one still leaves the majority above 2/3 for finality.

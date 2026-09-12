@@ -6,7 +6,7 @@
   forks          competing heads, how deep each branch is, and who is on which
   proposals      who was due to propose each slot, and who missed
   diagnose       where the chain split, and what the peers were doing then
-  repeer         restart any consensus client left with no peers
+  repeer         restart any consensus client that banned a peer or has none, wait for the mesh
   chaos-status   what pbtchaos is running, what is queued, and recent results
   scenario       ask pbtchaos to run one reorg scenario now
   split / heal   partition by hand, outside pbtchaos's queue
@@ -182,12 +182,12 @@ def cmd_status(a):
         roots.append(root)
 
     # Heads legitimately differ by a block or two, so this compares roots only as a hint.
-    # `make verify` is the real check: it compares the SAME block number.
+    # `make compare` is the real check: it compares the SAME block number.
     if len(set(roots)) == 1:
         print("all clients on the same root")
     else:
         print("roots differ at the tip — normal if the heads differ; "
-              "run 'make verify' to compare equal heights")
+              "run 'make compare' to compare equal heights")
 
 
 # ---------------------------------------------------------------- verify
@@ -587,29 +587,55 @@ def cmd_diagnose(a):
 
 # ---------------------------------------------------------------- repeer
 
-def cmd_repeer(a):
+def repeer(enclave, wait=120):
+    """Restart every consensus client whose peer table holds a banned peer or is empty,
+    then wait until each reports the full mesh. Lighthouse scores a peer down for every
+    request that times out while a partition is up and bans it below -50 (-100 is a
+    fatal penalty and never decays); the ban is in memory, so a restart is the cure.
+    Returns the number restarted."""
+    cls = services(enclave, "cl-")
     restarted = 0
-    for svc in services(a.enclave, "cl-"):
-        base = url(a.enclave, svc, "http")
+    for svc in cls:
+        base = url(enclave, svc, "http")
         if not base:
             continue
         data = get(base, "/eth/v1/node/peer_count", timeout=5)
-        peers = data["data"]["connected"] if data else "?"
-        if str(peers) == "0":
-            cid = sh("docker", "ps", "--filter", f"label=kurtosis_service_name={svc}",
-                     "--filter", f"label=kurtosis_enclave_name={a.enclave}",
-                     "--format", "{{.ID}}").split("\n")[0]
-            if cid:
-                print(f"==> {svc} has no peers; restarting")
-                sh("docker", "restart", cid)
-                restarted += 1
-        else:
+        peers = int(data["data"]["connected"]) if data else -1
+        known = get(base, "/lighthouse/peers", timeout=5) or []
+        banned = sum(1 for p in known
+                     if "banned" in json.dumps(p.get("peer_info", {}).get("connection_status", {})))
+        if peers != 0 and banned == 0:
             print(f"    {svc} peers={peers}")
-
+            continue
+        cid = sh("docker", "ps", "--filter", f"label=kurtosis_service_name={svc}",
+                 "--filter", f"label=kurtosis_enclave_name={enclave}",
+                 "--format", "{{.ID}}").split("\n")[0]
+        if not cid:
+            continue
+        print(f"==> {svc} peers={peers} banned={banned}; restarting")
+        sh("docker", "restart", cid)
+        restarted += 1
     if restarted == 0:
-        print("nothing to do: every consensus client has peers")
-    else:
-        print(f"restarted {restarted}; give them a slot or two, then: make diagnose")
+        print("nothing to do: every consensus client sees the whole mesh")
+        return 0
+    want = len(cls) - 1
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        time.sleep(5)
+        counts = []
+        for svc in cls:
+            base = url(enclave, svc, "http")  # the port moves across a restart
+            data = get(base, "/eth/v1/node/peer_count", timeout=5) if base else None
+            counts.append(int(data["data"]["connected"]) if data else -1)
+        if all(c >= want for c in counts):
+            print(f"restarted {restarted}; every consensus client has {want} peers again")
+            return restarted
+    print(f"restarted {restarted}; mesh still incomplete after {wait}s: peers={counts}")
+    return restarted
+
+
+def cmd_repeer(a):
+    repeer(a.enclave)
 
 
 # ---------------------------------------------------------------- chaos

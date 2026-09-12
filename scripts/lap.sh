@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ENCLAVE="${ENCLAVE:-pbt}"
-ARGS="${ARGS:-args/migration-composite.yaml}"
+ARGS="${ARGS:-args/migration.yaml}"
 OUT="${OUT:-/tmp/$ENCLAVE-lap}"
 # A consensus client the gate reports starved of peers outside any scheduled
 # partition is restarted, once per episode - the same remedy as `make repeer`,
@@ -119,6 +119,10 @@ if kurtosis service inspect "$ENCLAVE" migration-gate >/dev/null 2>&1; then
   done
   if [ "$handed_over" = 1 ]; then
     for s in $SCENARIOS; do
+      # Every partition so far left bans in lighthouse's peer tables; a majority
+      # client peered only with the victim would fork the majority 40/40. Whole
+      # mesh first, then cut exactly one node.
+      scripts/pbt.py repeer "$ENCLAVE" 2>&1 | { grep -E '^(==>|restarted)' || true; } | while read -r l; do say "$l"; done
       say "scenario $s at depth $SCENARIO_DEPTH"
       kurtosis service exec "$ENCLAVE" migration-gate \
         "wget -qO- --timeout=10 --post-data= 'http://127.0.0.1:$CHAOS_PORT/scenario/$s?depth=$SCENARIO_DEPTH'" >/dev/null 2>&1 || true

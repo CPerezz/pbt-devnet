@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build the local images the Kurtosis package expects. Besu is separate (two-stage
-# Gradle build): run `make besu` once, then `make up`.
+# Build the local images an args file needs: one per execution client it names
+# (pbt-geth, besu-pbt, erigon-pbt) plus the genesis generator and our tools.
 # Local tags only -- do not run kurtosis with --image-download always.
-# Usage: scripts/build-images.sh [args-file]
+# Usage: scripts/build-images.sh [args-file]   (IMAGES=geth,egg,tools overrides the list)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARGS="${1:-$ROOT/args/devnet.yaml}"
+ARGS="${1:-$ROOT/args/tree-at-genesis.yaml}"
 PLATFORM="${PBT_PLATFORM:-linux/arm64}"
 
 # Where the forks live. Defaults assume they sit beside this repo.
@@ -16,7 +16,6 @@ EGG_SRC="${PBT_EGG_SRC:-$ROOT/../egg-pbt}"
 
 echo "==> platform:  $PLATFORM"
 echo "==> args file: $ARGS"
-echo
 
 # Prints what a checkout actually is (commit + branch), not just that it built.
 provenance() {
@@ -59,9 +58,19 @@ build_from() {
   echo
 }
 
-# IMAGES: comma list of images to build; default is everything. A scoped list like
-# IMAGES=geth,egg,tools skips broken/irrelevant checkouts for the others.
-IMAGES="${IMAGES:-geth,erigon,nethermind,egg,tools}"
+# IMAGES defaults to what the args file names: a client image is built only when a
+# participant runs it, so the migration profiles never build besu or erigon.
+needed() {
+  local list="egg,tools"
+  grep -q 'el_image: *pbt-geth:local'   "$ARGS" && list="geth,$list"
+  grep -q 'el_image: *besu-pbt:local'   "$ARGS" && list="besu,$list"
+  grep -q 'el_image: *erigon-pbt:local' "$ARGS" && list="erigon,$list"
+  grep -q 'el_image: *nethermind-pbt:local' "$ARGS" && list="nethermind,$list"
+  echo "$list"
+}
+IMAGES="${IMAGES:-$(needed)}"
+echo "==> images:    $IMAGES"
+echo
 want() {
   case ",$IMAGES," in
   *",$1,"*) return 0 ;;
@@ -82,6 +91,12 @@ require_capability "geth (migration window)" "$GETH_SRC" 'MigrationWindowBlocks'
   "fix: git -C $GETH_SRC checkout pbt (needs the online state-migration merge)"
 build_from "geth (EIP-8297)" "pbt-geth:local" "$GETH_SRC" \
   "clone CPerezz/go-ethereum at branch pbt, or set PBT_GETH_SRC"
+echo
+fi
+
+if want besu; then
+# Two Gradle stages then a docker build, all in build-besu.sh; it needs a JDK 25 on the host.
+"$ROOT/scripts/build-besu.sh"
 echo
 fi
 
@@ -122,10 +137,4 @@ if want tools; then
   build_cmd pbt-migration-gate:local    migration-gate
 fi
 
-echo
-if docker image inspect besu-pbt:local >/dev/null 2>&1; then
-  echo "done. besu-pbt:local is present."
-else
-  echo "done — but besu-pbt:local is MISSING, and args/devnet.yaml expects it."
-  echo "  run 'make besu' (two Gradle stages, needs JDK 25), or drop the besu participant."
-fi
+echo "done."
