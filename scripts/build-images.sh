@@ -65,6 +65,7 @@ needed() {
   grep -q 'el_image: *pbt-geth:local'   "$ARGS" && list="geth,$list"
   grep -q 'el_image: *besu-pbt:local'   "$ARGS" && list="besu,$list"
   grep -q 'el_image: *erigon-pbt:local' "$ARGS" && list="erigon,$list"
+  grep -q 'el_image: *nethermind-pbt:local' "$ARGS" && list="nethermind,$list"
   echo "$list"
 }
 IMAGES="${IMAGES:-$(needed)}"
@@ -105,6 +106,14 @@ require_capability "erigon (EIP-8297)" "$ERIGON_SRC" 'ResolveErigonDBSettingsFor
   "execution/state/genesiswrite/genesis_write.go" "fix: git -C $ERIGON_SRC checkout binary-trie && git -C $ERIGON_SRC pull"
 build_from "erigon (EIP-8297)" "erigon-pbt:local" "$ERIGON_SRC" \
   "clone erigontech/erigon at branch binary-trie, or set PBT_ERIGON_SRC"
+fi
+
+if want nethermind; then
+echo "==> nethermind (EIP-8297) -> nethermind-pbt:local"
+echo "    source: https://github.com/NethermindEth/nethermind.git#pbt-state"
+docker build --platform "$PLATFORM" -t nethermind-pbt:local \
+  "https://github.com/NethermindEth/nethermind.git#pbt-state"
+echo
 fi
 
 if want egg; then

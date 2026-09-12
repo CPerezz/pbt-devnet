@@ -1,4 +1,4 @@
-# EIP-8297 devnet with the binary tree from genesis, six clients under test; `make tree-at-genesis`
+# EIP-8297 devnet with the binary tree from genesis, seven clients under test; `make tree-at-genesis`
 # starts it. Non-pbt_* keys are ethereum-package schema.
 
 participants:
@@ -52,6 +52,13 @@ participants:
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
     el_extra_params: ["--prune.include-commitment-history"]
+
+  - el_type: nethermind
+    el_image: nethermind-pbt:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--Pbt.Enabled=true", "--Sync.FastSync=false"]
 
 network_params:
   network: "kurtosis"

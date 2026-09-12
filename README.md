@@ -8,7 +8,7 @@ patches: the tree comes in through supported configuration and a genesis-generat
 
 | scenario | command | what it tests |
 |---|---|---|
-| **tree at genesis** | `make tree-at-genesis` | EIP-8297: two geth, two besu and two erigon, each pair configured differently, start on the binary tree and stay in agreement through forced reorgs and state scenarios |
+| **tree at genesis** | `make tree-at-genesis` | EIP-8297: two geth, two besu, two erigon and one Nethermind, with each pair configured differently, start on the binary tree and stay in agreement through forced reorgs and state scenarios |
 | **live migration** | `make migration`, `make migration-smoke` | EIP-8347: four geth start on the merkle trie, build the tree in the background and switch at `binaryTrieTime`, with partitions before, across and after the switch |
 
 Args files: `args/tree-at-genesis.yaml`, `args/migration.yaml`, `args/migration-smoke.yaml`.
@@ -42,6 +42,11 @@ every cut leaves holes in the consensus mesh; `make repeer` restarts the clients
 waits until every one sees the whole mesh again. The migration lap does this before each scenario;
 here it is on you, and `pbtchaos` refuses a scenario whose majority is already one cut from an
 island rather than measure a forked majority.
+
+Nethermind builds as `nethermind-pbt:local` directly from the `pbt-state` branch of
+[`NethermindEth/nethermind`](https://github.com/NethermindEth/nethermind/tree/pbt-state).
+Its PBT backend is enabled explicitly with `--Pbt.Enabled=true`, not by `binaryTrieTime`;
+`--Sync.FastSync=false` selects full sync.
 
 ## Live migration
 
