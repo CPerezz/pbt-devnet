@@ -226,6 +226,11 @@ func (c *collector) state(now uint64) apiState {
 			}
 			var cursor uint64
 			v.Phase, cursor, v.CursorHash = nodePhase(prog, c.forkTime, head.Time)
+			if !ns.rpc.Introspects() {
+				// Not the same as "unknown": this client has no progress to read, so
+				// the page must not show it the way it shows one that stopped answering.
+				v.Phase = "opaque"
+			}
 			if v.CursorHash != "" {
 				v.CursorNumber = cursor
 				if cursor < head.Number {
