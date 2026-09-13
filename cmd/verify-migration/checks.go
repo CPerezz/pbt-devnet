@@ -1159,7 +1159,10 @@ func (v *verifier) checkStraddleRewind(ctx context.Context) (verdict, string) {
 		if old := orphanHashRe.FindString(orphaned.Detail); old != "" {
 			if victim, ok := v.elByIndex(idx); ok {
 				if spec, known := migmon.SpecFor(victim.name); known && spec.ServesOrphans {
-					tip := v.victimTip(w.node, w.from, w.to)
+					// Heads recorded after the victim left its branch are canonical
+					// ones: the dropped branch ends where istar-reorged fired, and
+					// it held the orphaned block itself at least.
+					tip := max(v.victimTip(w.node, w.from, orphaned.Time), orphaned.Number)
 					if depth, ancestor, err := v.walkOrphanBranch(ctx, victim, old, tip); err == nil {
 						reorg = reorgEvidence{depth: depth, matched: true, ancestor: ancestor,
 							source: fmt.Sprintf("parent walk (corroboration: %s)", reorg.String())}

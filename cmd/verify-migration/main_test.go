@@ -12,6 +12,7 @@ import (
 
 	"github.com/CPerezz/pbt-devnet/internal/migmon"
 	"github.com/CPerezz/pbt-devnet/internal/migsched"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 func rpcKey(url, method string, params ...any) string {
@@ -337,6 +338,53 @@ func TestCheckStraddleRewindStraddle(t *testing.T) {
 		}
 		if !strings.Contains(evidence, "2,3,4") || !strings.Contains(evidence, "5/4/6") {
 			t.Fatalf("evidence %q missing per-victim names/depths", evidence)
+		}
+	})
+
+	// A victim that still serves its orphaned branch has the depth walked from its
+	// own chain data. The branch ends where the victim left it: heads it reached
+	// afterwards are canonical ones, and counting up to them reports the whole
+	// post-heal chain as a rewind.
+	t.Run("orphan-serving victim: depth spans its island, not the chain it rejoined", func(t *testing.T) {
+		const orphanHeight, ancestor, islandTip, laterHead = 500, 496, 503, 640
+		reorgedAt := testFork + 10
+		monitor := []migmon.Event{
+			istarReorgedEv("node-2", orphanHeight, testOldHash, testNewHash, reorgedAt),
+			istarReorgedEv("node-3", orphanHeight, testOldHash, testNewHash, reorgedAt),
+			istarReorgedEv("node-4", orphanHeight, testOldHash, testNewHash, reorgedAt),
+			headEv("el-2-geth-lighthouse", islandTip, reorgedAt-5),
+			headEv("el-2-geth-lighthouse", laterHead, reorgedAt+30),
+		}
+		// The orphaned branch runs 500 (testOldHash) down to 497 and joins the
+		// canonical chain at 496; canonical heights hold different hashes.
+		branchHash := func(h int) string {
+			if h == orphanHeight {
+				return testOldHash
+			}
+			return fmt.Sprintf("0x%064x", h)
+		}
+		responses := map[string]json.RawMessage{}
+		for h := orphanHeight; h > ancestor; h-- {
+			responses[rpcKey("http://el2", "eth_getBlockByHash", branchHash(h), false)] = heightBlockJSON(h, branchHash(h), branchHash(h-1))
+			responses[rpcKey("http://el2", "eth_getBlockByNumber", hexutil.EncodeUint64(uint64(h)), false)] = heightBlockJSON(h, testNewHash, testNewHash)
+		}
+		joinHash := branchHash(ancestor)
+		responses[rpcKey("http://el2", "eth_getBlockByHash", joinHash, false)] = heightBlockJSON(ancestor, joinHash, testNewHash)
+		responses[rpcKey("http://el2", "eth_getBlockByNumber", hexutil.EncodeUint64(ancestor), false)] = heightBlockJSON(ancestor, joinHash, testNewHash)
+
+		v := &verifier{
+			chaos:   []migmon.Event{scheduleEvent(t, withStraddle)},
+			monitor: monitor,
+			els:     []el{{name: "el-2-geth-lighthouse", url: "http://el2"}},
+			fetch:   fakeFetcher(t, responses),
+		}
+		r, evidence := v.checkStraddleRewind(context.Background())
+		if r != verdictPass {
+			t.Fatalf("want pass, got %s: %s", r, evidence)
+		}
+		// islandTip - ancestor = 7; counting to laterHead would claim 144.
+		if !strings.Contains(evidence, "7/") {
+			t.Fatalf("want victim 2 depth 7 from its island tip, got %q", evidence)
 		}
 	})
 
@@ -782,6 +830,18 @@ func TestCheckShadowSamplesOutsideWindowCounting(t *testing.T) {
 }
 
 // --- genesis-pins: pins pending logic ---------------------------------------------
+
+// heightBlockJSON is blockJSON for a block that has to sit at a known height.
+func heightBlockJSON(number int, hash, parent string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"number":%q,"hash":%q,"parentHash":%q,"stateRoot":%q,"timestamp":"0x0"}`,
+		hexutil.EncodeUint64(uint64(number)), hash, parent, testNewHash))
+}
+
+func headEv(node string, number uint64, tm int64) migmon.Event {
+	e := ev(migmon.EvHead, node, tm)
+	e.Number = number
+	return e
+}
 
 func blockJSON(hash, root string) json.RawMessage {
 	return json.RawMessage(fmt.Sprintf(`{"number":"0x0","hash":%q,"stateRoot":%q,"timestamp":"0x0"}`, hash, root))
