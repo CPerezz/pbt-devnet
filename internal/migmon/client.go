@@ -114,8 +114,10 @@ func (c *erigonClient) Progress(ctx context.Context) (json.RawMessage, error) {
 	p := erigonProgress(m, head, finalized, shadow)
 	if p.Phase == PhaseDone || c.done.Load() {
 		c.done.Store(true)
-		p = MigrationProgress{Phase: PhaseDone}
+		p.Phase = PhaseDone
 	}
+	// The payload is the shared shape, so its keys are this struct's tags rather
+	// than erigon's wire format; DecodeProgress reads either.
 	return json.Marshal(p)
 }
 
@@ -126,17 +128,21 @@ func erigonProgress(m erigonMigration, head, finalized *Header, shadow string) M
 	if m.Mode != "hex+bin" || m.ActivationTime == nil || head == nil {
 		return MigrationProgress{Phase: PhaseInactive}
 	}
+	phase := PhaseRunning
 	if finalized != nil && finalized.Time >= uint64(*m.ActivationTime) {
-		return MigrationProgress{Phase: PhaseDone}
+		// Erigon has no retirement: it keeps folding the shadow domain past the fork
+		// block's finality, so done is reported with the live direction it still has
+		// (registry: RetiresShadow false), not as a blank terminal state.
+		phase = PhaseDone
 	}
 	live := &DirectionProgress{Phase: DirSynced, Cursor: FlexUint64(head.Number), CursorHash: head.Hash, ShadowRoot: shadow}
 	if m.ShadowStopped {
 		live.Phase, live.Error = DirStalled, "shadow commitment domain stopped"
 	}
 	if !m.Flipped {
-		return MigrationProgress{Phase: PhaseRunning, Binary: live}
+		return MigrationProgress{Phase: phase, Binary: live}
 	}
-	return MigrationProgress{Phase: PhaseRunning, Binary: &DirectionProgress{Phase: DirParked}, Merkle: live}
+	return MigrationProgress{Phase: phase, Binary: &DirectionProgress{Phase: DirParked}, Merkle: live}
 }
 
 // HasIntrospection reports whether a client can answer migration progress.

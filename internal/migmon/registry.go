@@ -14,6 +14,11 @@ type ClientSpec struct {
 	ReorgLogPattern    string
 	ServesOrphans      bool   // eth_getBlockByHash still answers for orphaned blocks
 	ForbiddenWindowLog string // substring that must never appear during the forbidden window
+	// RetiresShadow: once the fork block finalizes the client stops maintaining the
+	// other tree, so a shadow root or an active direction after done is a regression.
+	// A client that keeps both (erigon folds both commitment domains until an error
+	// stops one) reports done with its shadow still live, and is not judged on it.
+	RetiresShadow bool
 }
 
 // Registry maps a client type to its ClientSpec, keyed by the short name in the service name.
@@ -24,6 +29,7 @@ var Registry = map[string]ClientSpec{
 		ReorgLogPattern:    `Chain reorg detected.*\bnumber=(?P<ancestor>\d+).*\bdrop=(?P<drop>\d+)`,
 		ServesOrphans:      true,
 		ForbiddenWindowLog: `migration window`,
+		RetiresShadow:      true,
 	},
 	"erigon": {
 		Introspects: true,
