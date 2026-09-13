@@ -38,6 +38,11 @@ var Registry = map[string]ClientSpec{
 		ReorgLogPattern: `Unwind Execution.*\bfrom=(?P<from>\d+).*\bto=(?P<to>\d+)`,
 		ServesOrphans:   true,
 	},
+	"besu": {
+		Introspects:     false,
+		ReorgLogPattern: `Chain reorg detected`,
+		ServesOrphans:   false,
+	},
 }
 
 // SpecFor returns the ClientSpec whose registry key appears as a substring
