@@ -353,13 +353,17 @@ func opOwns(op migsched.DumpOp, w chaosWindow) bool {
 
 var reorgDepthRe = regexp.MustCompile(`\(depth (\d+)\)`)
 
-// clientLogPatterns maps a client name (from "el-<n>-<client>-<cl>") to its reorg
-// log regexp with named captures "drop" and optional "ancestor". Unregistered
-// clients degrade to monitor-events-only corroboration.
-var clientLogPatterns = map[string]*regexp.Regexp{
-	// geth: number= is the common-ancestor height, drop= the dropped-branch length.
-	"geth": regexp.MustCompile(`Chain reorg detected.*\bnumber=(?P<ancestor>\d+).*\bdrop=(?P<drop>\d+)`),
-}
+// clientLogPatterns is every registry client's reorg log pattern, compiled once.
+// Unregistered clients degrade to monitor-events-only corroboration.
+var clientLogPatterns = func() map[string]*regexp.Regexp {
+	out := map[string]*regexp.Regexp{}
+	for client, spec := range migmon.Registry {
+		if spec.ReorgLogPattern != "" {
+			out[client] = regexp.MustCompile(spec.ReorgLogPattern)
+		}
+	}
+	return out
+}()
 
 // clientOf extracts the client name from an "el-<n>-<client>-<cl>" name; "node-<n>" yields "".
 func clientOf(node string) string {
@@ -508,32 +512,47 @@ type reorgLogMatch struct {
 	at       time.Time
 }
 
-// geth stamps lines "[MM-DD|HH:MM:SS.mmm]" in UTC without a year; ref supplies it.
+// geth and erigon both stamp lines "[MM-DD|HH:MM:SS.mmm]" in UTC without a year; ref supplies it.
 var logStampRe = regexp.MustCompile(`\[(\d\d)-(\d\d)\|(\d\d):(\d\d):(\d\d)\.\d+\]`)
 
-// logReorgMatches returns every line of f matching re, with its "drop", optional "ancestor", and timestamp.
+// logReorgMatches returns every line of f matching re, with its dropped-branch
+// length, common ancestor when the line carries one, and timestamp. A client
+// that logs the abandoned head and the unwind point instead of a length
+// ("from"/"to") has both derived from them.
 func logReorgMatches(f string, re *regexp.Regexp, ref time.Time) []reorgLogMatch {
 	data, err := os.ReadFile(f)
 	if err != nil {
 		return nil
 	}
-	dropIdx, ancestorIdx := re.SubexpIndex("drop"), re.SubexpIndex("ancestor")
-	if dropIdx < 0 {
+	idx := func(name string) int { return re.SubexpIndex(name) }
+	dropIdx, ancestorIdx, fromIdx, toIdx := idx("drop"), idx("ancestor"), idx("from"), idx("to")
+	if dropIdx < 0 && (fromIdx < 0 || toIdx < 0) {
 		return nil
 	}
 	var out []reorgLogMatch
 	for _, line := range strings.Split(string(data), "\n") {
 		m := re.FindStringSubmatch(line)
-		if m == nil || dropIdx >= len(m) {
+		if m == nil {
 			continue
 		}
-		drop, err := strconv.Atoi(m[dropIdx])
-		if err != nil {
-			continue
+		num := func(i int) (int, bool) {
+			if i < 0 || i >= len(m) || m[i] == "" {
+				return 0, false
+			}
+			v, err := strconv.Atoi(m[i])
+			return v, err == nil
 		}
-		row := reorgLogMatch{drop: drop}
-		if ancestorIdx >= 0 && ancestorIdx < len(m) && m[ancestorIdx] != "" {
-			row.ancestor, _ = strconv.Atoi(m[ancestorIdx])
+		var row reorgLogMatch
+		if drop, ok := num(dropIdx); ok {
+			row.drop = drop
+			row.ancestor, _ = num(ancestorIdx)
+		} else {
+			from, okFrom := num(fromIdx)
+			to, okTo := num(toIdx)
+			if !okFrom || !okTo || from <= to {
+				continue
+			}
+			row.drop, row.ancestor = from-to, to
 		}
 		if s := logStampRe.FindStringSubmatch(line); s != nil {
 			n := func(i int) int { v, _ := strconv.Atoi(s[i]); return v }

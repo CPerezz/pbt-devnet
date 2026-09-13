@@ -73,7 +73,7 @@ if [ -n "$RESTART_NODE" ] && [ "$RESTART_NODE" != "0" ]; then
   now=$(date +%s)
   if [ "$target" -gt "$now" ]; then sleep $((target - now)); fi
   svc=$(cd scripts && python3 -c "import pbt; print([n for n in pbt.services('$ENCLAVE','el-') if n.startswith('el-$RESTART_NODE-')][0])")
-  say "restarting $svc for ${RESTART_FOR}s (follower must recover its cursor)"
+  say "restarting $svc for ${RESTART_FOR}s (it must resume building the tree where it left off)"
   restart_at_unix=$(date +%s)
   kurtosis service stop "$ENCLAVE" "$svc" >/dev/null
   sleep "$RESTART_FOR"

@@ -76,14 +76,20 @@ func NewClient(service, url string) Client {
 	}
 }
 
+// erigonClient derives the migration phase erigon does not report: erigon folds
+// both tries and says which one is live, but has no notion of being finished, so
+// "done" is the fork block's finality, the same evidence geth retires on.
 type erigonClient struct {
 	*rpcClient
+	// done latches: finality never regresses, so a failed "finalized" read after
+	// the fork block settled must not report the migration as running again.
 	done atomic.Bool
 }
 
 type erigonMigration struct {
 	Mode           string          `json:"mode"`
 	ActivationTime *hexutil.Uint64 `json:"activationTime"`
+	Flipped        bool            `json:"flipped"`
 	ShadowStopped  bool            `json:"shadowStopped"`
 }
 
@@ -102,6 +108,8 @@ func (c *erigonClient) Progress(ctx context.Context) (json.RawMessage, error) {
 			return nil, err
 		}
 	}
+	// A missing "finalized" tag is normal before the first finality, and a
+	// transient read failure is not evidence the fork block unfinalized.
 	finalized, _ := c.HeaderByTag(ctx, "finalized")
 	p := erigonProgress(m, head, finalized, shadow)
 	if p.Phase == PhaseDone || c.done.Load() {
@@ -111,19 +119,21 @@ func (c *erigonClient) Progress(ctx context.Context) (json.RawMessage, error) {
 	return json.Marshal(p)
 }
 
+// erigonProgress maps erigon's dual-commitment state onto the shared shape: the
+// live direction is whichever trie erigon is not serving as the header root, and
+// flipped is erigon's own answer to which side of the fork the head sits on.
 func erigonProgress(m erigonMigration, head, finalized *Header, shadow string) MigrationProgress {
 	if m.Mode != "hex+bin" || m.ActivationTime == nil || head == nil {
 		return MigrationProgress{Phase: PhaseInactive}
 	}
-	fork := uint64(*m.ActivationTime)
-	if finalized != nil && finalized.Time >= fork {
+	if finalized != nil && finalized.Time >= uint64(*m.ActivationTime) {
 		return MigrationProgress{Phase: PhaseDone}
 	}
 	live := &DirectionProgress{Phase: DirSynced, Cursor: FlexUint64(head.Number), CursorHash: head.Hash, ShadowRoot: shadow}
 	if m.ShadowStopped {
 		live.Phase, live.Error = DirStalled, "shadow commitment domain stopped"
 	}
-	if head.Time < fork {
+	if !m.Flipped {
 		return MigrationProgress{Phase: PhaseRunning, Binary: live}
 	}
 	return MigrationProgress{Phase: PhaseRunning, Binary: &DirectionProgress{Phase: DirParked}, Merkle: live}

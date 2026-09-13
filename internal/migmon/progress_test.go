@@ -87,6 +87,9 @@ func TestErigonProgress(t *testing.T) {
 	armed := erigonMigration{Mode: "hex+bin", ActivationTime: &fork}
 	stopped := armed
 	stopped.ShadowStopped = true
+	// flipped is erigon's own "the head is at or past the fork".
+	armedPost, stoppedPost := armed, stopped
+	armedPost.Flipped, stoppedPost.Flipped = true, true
 	pre := &Header{Number: 7, Hash: "0x07", Time: 994}
 	post := &Header{Number: 9, Hash: "0x09", Time: 1006}
 	for _, tc := range []struct {
@@ -96,13 +99,13 @@ func TestErigonProgress(t *testing.T) {
 		phase, bin, mer string
 	}{
 		{"before the fork", armed, pre, nil, PhaseRunning, DirSynced, "nil"},
-		{"after the fork", armed, post, pre, PhaseRunning, DirParked, DirSynced},
-		{"fork block finalized", armed, post, &Header{Number: 8, Time: 1000}, PhaseDone, "nil", "nil"},
+		{"after the fork", armedPost, post, pre, PhaseRunning, DirParked, DirSynced},
+		{"fork block finalized", armedPost, post, &Header{Number: 8, Time: 1000}, PhaseDone, "nil", "nil"},
 		{"shadow stopped", stopped, pre, nil, PhaseRunning, DirStalled, "nil"},
 		{"binary at genesis", erigonMigration{Mode: "bin"}, pre, nil, PhaseInactive, "nil", "nil"},
-		{"no activation time", erigonMigration{Mode: "hex+bin"}, post, nil, PhaseInactive, "nil", "nil"},
+		{"no activation time", erigonMigration{Mode: "hex+bin", Flipped: true}, post, nil, PhaseInactive, "nil", "nil"},
 		{"no head", armed, nil, nil, PhaseInactive, "nil", "nil"},
-		{"shadow stopped after the fork", stopped, post, pre, PhaseRunning, DirParked, DirStalled},
+		{"shadow stopped after the fork", stoppedPost, post, pre, PhaseRunning, DirParked, DirStalled},
 	} {
 		raw, err := json.Marshal(erigonProgress(tc.m, tc.head, tc.finalized, "0xroot"))
 		if err != nil {
@@ -141,7 +144,7 @@ func TestErigonClientStaysDoneWhenFinalizedFails(t *testing.T) {
 		reply := map[string]any{"jsonrpc": "2.0", "id": req.ID}
 		switch {
 		case req.Method == "debug_migrationProgress":
-			reply["result"] = map[string]any{"mode": "hex+bin", "activationTime": "0x3e8"}
+			reply["result"] = map[string]any{"mode": "hex+bin", "activationTime": "0x3e8", "flipped": true}
 		case req.Method == "debug_shadowStateRoot":
 			reply["result"] = hash
 		case req.Params[0] == "latest":

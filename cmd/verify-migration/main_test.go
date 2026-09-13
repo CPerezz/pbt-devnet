@@ -611,6 +611,28 @@ func TestLogReorgMatchesExtractsDropAncestorAndTime(t *testing.T) {
 	}
 }
 
+// erigon logs the abandoned head and the unwind point instead of a length; the
+// dropped branch is their difference and the unwind point is the ancestor.
+func TestLogReorgMatchesDerivesDepthFromUnwindPoints(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "el-2-erigon-lighthouse.log")
+	writeFile(t, logPath,
+		"[INFO] [09-07|08:56:31.211] [4/8 Execution] Unwind Execution from=245 to=238\n"+
+			// An unwind to the head itself drops nothing and is not reorg evidence.
+			"[INFO] [09-07|08:57:01.000] [4/8 Execution] Unwind Execution from=250 to=250\n")
+	ref := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+	matches := logReorgMatches(logPath, clientLogPatterns["erigon"], ref)
+	if len(matches) != 1 {
+		t.Fatalf("want 1 match, got %d: %+v", len(matches), matches)
+	}
+	if matches[0].drop != 7 || matches[0].ancestor != 238 {
+		t.Fatalf("want drop=7 ancestor=238, got %+v", matches[0])
+	}
+	if want := time.Date(2026, 9, 7, 8, 56, 31, 0, time.UTC); !matches[0].at.Equal(want) {
+		t.Fatalf("want stamp %s, got %s", want, matches[0].at)
+	}
+}
+
 // A reorg line logged outside the window is not evidence for that window: a
 // stale deep-partition line must not vouch for a later straddle.
 func TestMatchReorgIgnoresLogLinesOutsideWindow(t *testing.T) {
