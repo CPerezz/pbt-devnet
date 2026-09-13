@@ -7,7 +7,7 @@ const NS = 'http://www.w3.org/2000/svg';
 const LANE_H = 38, BLOCK_R = 6, STRIP_ROW = 26, RIBBON_H = 22, AGREE_H = 8, AXIS_H = 18, TOP_PAD = 26;
 const FORMAT = { mpt: '#4c8dff', pbt: '#ff9a3c' };
 const OTHER = { mpt: 'pbt', pbt: 'mpt' };
-const PHASE = { following: '#9fd6a3', synced: '#2fa84f', parked: '#8d8d8d', window: '#ffc27a', done: '#ff8a1f', stalled: '#e0433d', unknown: '#c8c8c8' };
+const PHASE = { following: '#9fd6a3', synced: '#2fa84f', parked: '#8d8d8d', window: '#ffc27a', done: '#ff8a1f', stalled: '#e0433d', opaque: '#5a5a5a', unknown: '#c8c8c8' };
 const AGREE = { pending: '#8a8a8a', partial: '#8a8a8a', all: '#2fa84f', single: '#8a8a8a', split: '#e0433d', gone: 'none', none: 'none' };
 const SEGMENT_HUES = ['#2b2b2b', '#b04ad6', '#1eaaa0', '#d67f1e', '#d6478f', '#5e73d6'];
 const CLASS = { deep: '#b04ad6', short: '#1eaaa0', straddle: '#e0433d', window: '#d6478f', scenario: '#5e73d6' };

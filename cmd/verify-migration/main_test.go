@@ -698,7 +698,7 @@ func TestMatchReorgIgnoresLogLinesOutsideWindow(t *testing.T) {
 
 func TestMatchReorgUnknownClientDegrades(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "el-5-besu-lighthouse.log"), "some unrelated line\n")
+	writeFile(t, filepath.Join(dir, "el-5-nethermind-lighthouse.log"), "some unrelated line\n")
 	w := chaosWindow{node: "node-5", from: time.Unix(1000, 0), to: time.Unix(1100, 0), healed: true}
 	v := &verifier{logsDir: dir}
 	got := v.matchReorg(w)
@@ -1044,5 +1044,60 @@ func TestCheckNoConfiguredWindowUnjudgedIsInconclusive(t *testing.T) {
 	v.els = append(v.els, el{name: "el-1-geth-lighthouse", url: "http://el1"})
 	if r, evidence := v.checkNoConfiguredWindow(context.Background()); r != verdictPass {
 		t.Fatalf("want pass once a client declares the contract, got %s: %s", r, evidence)
+	}
+}
+
+// A besu line carries its own full timestamp instead of geth's bracketed one.
+// An unreadable stamp leaves the line unplaceable, so it would be dropped as
+// evidence for the window it belongs to.
+func TestLogReorgMatchesReadsBesuStamps(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "el-4-besu-lighthouse.log")
+	// Besu colours its output; the stamp arrives behind ANSI escapes.
+	writeFile(t, logPath,
+		"\x1b[m\x1b[2m2026-09-13 08:56:31.211+0000\x1b[m\x1b[2m | \x1b[mvert.x-worker-thread-0 | WARN  | "+
+			"DefaultBlockchain | Chain Reorganization +3 new / -2 old\n")
+	ref := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+	matches := logReorgMatches(logPath, clientLogPatterns["besu"], ref)
+	if len(matches) != 1 {
+		t.Fatalf("want 1 match, got %d", len(matches))
+	}
+	// The old chain is the branch that was dropped; the new one replaced it.
+	if matches[0].drop != 2 {
+		t.Fatalf("want drop=2, got %+v", matches[0])
+	}
+	if want := time.Date(2026, 9, 13, 8, 56, 31, 0, time.UTC); !matches[0].at.Equal(want) {
+		t.Fatalf("want stamp %s, got %s", want, matches[0].at)
+	}
+}
+
+// A client that cannot answer the shadow-root RPC never agrees with anyone, so
+// counting it would fail every lap it takes part in; with fewer than two
+// clients that can answer there is nothing to cross-check at all.
+func TestCheckShadowSamplesCountsOnlyReportingClients(t *testing.T) {
+	els := []el{
+		{name: "el-1-geth-lighthouse"}, {name: "el-2-geth-lighthouse"},
+		{name: "el-3-geth-lighthouse"}, {name: "el-4-besu-lighthouse"},
+	}
+	root := testNewHash
+	var monitor []migmon.Event
+	for i := range 12 {
+		e := ev(migmon.EvSample, "", testFork-int64(600-i))
+		e.Number = uint64(100 + i)
+		e.Roots = map[string]string{
+			"el-1-geth-lighthouse": root, "el-2-geth-lighthouse": root,
+			"el-3-geth-lighthouse": root, "el-4-besu-lighthouse": "",
+		}
+		monitor = append(monitor, e)
+	}
+	v := &verifier{els: els, monitor: monitor, skipChaos: true, smoke: true}
+	if r, evidence := v.checkShadowSamples(context.Background()); r != verdictPass {
+		t.Fatalf("three agreeing reporters and one opaque client: want pass, got %s: %s", r, evidence)
+	}
+
+	// One geth beside besu: agreement with nobody is not evidence.
+	v.els = []el{{name: "el-1-geth-lighthouse"}, {name: "el-4-besu-lighthouse"}}
+	if r, evidence := v.checkShadowSamples(context.Background()); r != verdictInconclusive {
+		t.Fatalf("one reporter: want inconclusive, got %s: %s", r, evidence)
 	}
 }

@@ -39,9 +39,17 @@ var Registry = map[string]ClientSpec{
 		ServesOrphans:   true,
 	},
 	"besu": {
-		Introspects:     false,
-		ReorgLogPattern: `Chain reorg detected`,
-		ServesOrphans:   false,
+		// No debug_migrationProgress or debug_shadowStateRoot: besu swaps the trie per
+		// header and has nothing to report about a background build.
+		Introspects: false,
+		// "Chain Reorganization +3 new / -2 old": the old-chain length is the branch
+		// that was dropped. Logged only above --reorg-logging-threshold, which the
+		// migration profiles set to 0.
+		ReorgLogPattern: `Chain Reorganization \+\d+ new / -(?P<drop>\d+) old`,
+		// Measured: besu still answered for an orphaned block the geth nodes had
+		// already dropped. Safe in both directions - a client that stops serving makes
+		// the parent walk error and fall back to its log.
+		ServesOrphans: true,
 	},
 }
 

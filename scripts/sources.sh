@@ -59,6 +59,6 @@ ensure "erigon"         https://github.com/erigontech/erigon \
 ensure "genesis-gen"    https://github.com/CPerezz/ethereum-genesis-generator \
        pbt                          "${PBT_EGG_SRC:-$ROOT/../egg-pbt}"            PBT_EGG_SRC
 ensure "besu"           https://github.com/CPerezz/besu \
-       fix/pbt-fcu-null-trie-node   "${PBT_BESU_ROOT:-$ROOT/../besu-pbt}"         PBT_BESU_ROOT
+       glamsterdam-devnet-8-pbt     "${PBT_BESU_ROOT:-$ROOT/../besu-pbt}"         PBT_BESU_ROOT
 ensure "besu-stateless" https://github.com/besu-eth/besu-stateless \
        feat/partitioned-binary-trie "${PBT_BESU_STATELESS:-$ROOT/../besu-stateless}" PBT_BESU_STATELESS

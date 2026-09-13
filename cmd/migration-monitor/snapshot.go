@@ -29,7 +29,7 @@ type nodeView struct {
 	HeadNumber     uint64 `json:"head_number"`
 	HeadSlot       uint64 `json:"head_slot"`
 	Segment        string `json:"segment"`
-	Phase          string `json:"phase"` // synced|following|parked|window|done|stalled|unknown
+	Phase          string `json:"phase"` // synced|following|parked|window|done|stalled|opaque|unknown
 	CursorNumber   uint64 `json:"cursor_number"`
 	CursorHash     string `json:"cursor_hash"`
 	Lag            uint64 `json:"lag"`

@@ -58,14 +58,26 @@ if [[ "$SKIP_GRADLE" -eq 0 ]]; then
       --console=plain -Dorg.gradle.java.installations.paths="$JDK25" )
 fi
 
+# Both of these build, and a besu missing either one fails in a way that looks
+# like the devnet's fault rather than the checkout's, so refuse instead.
+#
+# The trie has to be chosen per header: on the older branches it came from the
+# datadir's storage format, fixed at startup, and such a node keeps committing
+# merkle roots straight past binaryTrieTime.
+if ! grep -rq 'resolveTrieBranchType' "$BESU/ethereum/core/src/main/java" 2>/dev/null; then
+  echo "!! $BESU cannot migrate: no per-header trie switch (resolveTrieBranchType)." >&2
+  echo "   fix: git -C $BESU fetch && git -C $BESU checkout glamsterdam-devnet-8-pbt && git -C $BESU pull" >&2
+  echo "   then: git -C $STATELESS pull   # that branch needs a besu-stateless gradle is told to expect" >&2
+  exit 1
+fi
 # Without matkt/besu#31 (NPE fix), besu imports blocks but refuses every forkchoiceUpdated.
-if ! grep -q 'removeTrieNode(location)' \
-     "$BESU/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/mainnet/staterootcommitter/BinaryStateRootCommitter.java" 2>/dev/null; then
+# The call moved into the binary writer when the per-header switch landed, so match
+# the deletion itself rather than one file's signature.
+if ! grep -rq 'removeTrieNode(' \
+     "$BESU/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/mainnet/staterootcommitter" 2>/dev/null; then
   echo "!! $BESU does not contain the binary-trie deletion fix (matkt/besu#31)." >&2
-  echo "   Expected branch: fix/pbt-fcu-null-trie-node from https://github.com/CPerezz/besu" >&2
   echo "   Without it besu will import blocks and then refuse every forkchoiceUpdated." >&2
-  echo "   Continuing anyway in 5s; Ctrl-C to stop." >&2
-  sleep 5
+  exit 1
 fi
 
 DIST="$BESU/build/install/besu"
@@ -77,6 +89,9 @@ CTX="$BESU/build/docker-ctx"
 rm -rf "$CTX" && mkdir -p "$CTX"
 cp -R "$DIST" "$CTX/besu"
 cp "$BESU/docker/Dockerfile" "$BESU/docker/pyroscope.properties" "$CTX/"
+# The Dockerfile COPYs the agent from the build context rather than ADDing it from
+# GitHub, and only besu's own distDocker task stages it; this builds the image by
+# hand, so fetch it here. Same release build.gradle pins.
 if [[ ! -f "$CTX/pyroscope.jar" ]]; then
   curl -fsSL -o "$CTX/pyroscope.jar" \
     "https://github.com/grafana/pyroscope-java/releases/download/v2.6.0/pyroscope.jar"

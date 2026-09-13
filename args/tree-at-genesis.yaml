@@ -30,15 +30,15 @@ participants:
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    # Do not combine with el_storage_type: archive, which forces FOREST and conflicts with BINARY.
-    el_extra_params: ["--data-storage-format=BINARY"]
+    # No --data-storage-format: the tree is chosen from binaryTrieTime, which is
+    # genesis here, and BINARY is not a storage format on this branch any more.
 
   - el_type: besu
     el_image: besu-pbt:local
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    el_extra_params: ["--data-storage-format=BINARY", "--bonsai-limit-trie-logs-enabled=false"]
+    el_extra_params: ["--bonsai-limit-trie-logs-enabled=false"]
 
   - el_type: erigon
     el_image: erigon-pbt:local

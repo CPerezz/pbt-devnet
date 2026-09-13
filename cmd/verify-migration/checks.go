@@ -512,8 +512,32 @@ type reorgLogMatch struct {
 	at       time.Time
 }
 
-// geth and erigon both stamp lines "[MM-DD|HH:MM:SS.mmm]" in UTC without a year; ref supplies it.
-var logStampRe = regexp.MustCompile(`\[(\d\d)-(\d\d)\|(\d\d):(\d\d):(\d\d)\.\d+\]`)
+// A reorg line only counts as evidence for an op if it can be placed inside the
+// op's window, so every client's stamp has to be readable. geth and erigon write
+// "[MM-DD|HH:MM:SS.mmm]" in UTC with no year, which ref supplies; besu writes a
+// full "2026-09-13 13:58:46.388+0000".
+var (
+	logStampRe = regexp.MustCompile(`\[(\d\d)-(\d\d)\|(\d\d):(\d\d):(\d\d)\.\d+\]`)
+	// Unanchored: besu colours its output, so the stamp is behind ANSI escapes.
+	besuStampRe   = regexp.MustCompile(`(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}[+-]\d{4})`)
+	besuStampForm = "2006-01-02 15:04:05.000-0700"
+)
+
+// logStampAt reads a line's timestamp, or the zero time when no known format
+// matches: an unplaceable line is not evidence.
+func logStampAt(line string, ref time.Time) time.Time {
+	if s := logStampRe.FindStringSubmatch(line); s != nil {
+		n := func(i int) int { v, _ := strconv.Atoi(s[i]); return v }
+		return time.Date(ref.UTC().Year(), time.Month(n(1)), n(2), n(3), n(4), n(5), 0, time.UTC)
+	}
+	if s := besuStampRe.FindStringSubmatch(line); s != nil {
+		// Second resolution, like the bracketed form: windows carry 30s of slop.
+		if t, err := time.Parse(besuStampForm, s[1]); err == nil {
+			return t.UTC().Truncate(time.Second)
+		}
+	}
+	return time.Time{}
+}
 
 // logReorgMatches returns every line of f matching re, with its dropped-branch
 // length, common ancestor when the line carries one, and timestamp. A client
@@ -554,10 +578,7 @@ func logReorgMatches(f string, re *regexp.Regexp, ref time.Time) []reorgLogMatch
 			}
 			row.drop, row.ancestor = from-to, to
 		}
-		if s := logStampRe.FindStringSubmatch(line); s != nil {
-			n := func(i int) int { v, _ := strconv.Atoi(s[i]); return v }
-			row.at = time.Date(ref.UTC().Year(), time.Month(n(1)), n(2), n(3), n(4), n(5), 0, time.UTC)
-		}
+		row.at = logStampAt(line, ref)
 		out = append(out, row)
 	}
 	return out
@@ -879,13 +900,36 @@ func (v *verifier) checkNoConfiguredWindow(ctx context.Context) (verdict, string
 	return boolVerdict(len(problems) == 0), evidence
 }
 
+// shadowReporters is every execution client except the ones whose registry
+// entry says they cannot answer the shadow-root RPC. A client with no entry
+// stays in: it may answer, and holding the run to it is the safe direction.
+func (v *verifier) shadowReporters() []string {
+	var out []string
+	for _, name := range v.elNames() {
+		if spec, known := migmon.SpecFor(name); known && !spec.Introspects {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
 // checkShadowSamples asserts zero root-mismatch criticals, other criticals only
 // inside waiver windows (±30s), and >= 10 agreeing samples outside chaos.
 // INCONCLUSIVE (full mode) when < 50 agreeing samples or < 4 in [I*-40, I*+10].
+//
+// Only clients whose registry entry answers the shadow-root RPC are counted: a
+// node that cannot report one never agrees, and holding the run to every EL
+// would fail a lap for containing a client like besu. Fewer than two reporters
+// leaves nothing to cross-check, which is inconclusive rather than a pass.
 func (v *verifier) checkShadowSamples(ctx context.Context) (verdict, string) {
 	windows := v.chaosWindows()
 	const slop = 30 * time.Second
-	names := v.elNames()
+	names := v.shadowReporters()
+	if len(names) < 2 {
+		return verdictInconclusive, fmt.Sprintf("only %d of %d execution client(s) can report a shadow root: nothing to cross-check",
+			len(names), len(v.elNames()))
+	}
 
 	samples, good, outsideGood, anyNonNullSamples := 0, 0, 0, 0
 	// goodNearBoundary counts agreeing samples in the boundary band [I*-40, I*+10].
