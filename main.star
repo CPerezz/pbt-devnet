@@ -351,8 +351,7 @@ def _genesis_field(plan, name, jq_filter, fmt):
 
 MIGRATION_PROFILES = ["none", "composite", "composite-smoke"]
 
-# Clients with a migration evidence contract (bootstrap shim, introspection RPCs,
-# registry entry).
+# Clients with a migration evidence contract (introspection RPCs, registry entry).
 MIGRATION_READY_CLIENTS = ["geth", "erigon"]
 
 

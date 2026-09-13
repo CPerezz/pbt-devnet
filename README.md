@@ -9,7 +9,7 @@ patches: the tree comes in through supported configuration and a genesis-generat
 | scenario | command | what it tests |
 |---|---|---|
 | **tree at genesis** | `make tree-at-genesis` | EIP-8297: two geth, two besu and two erigon, each pair configured differently, start on the binary tree and stay in agreement through forced reorgs and state scenarios |
-| **live migration** | `make migration`, `make migration-smoke` | EIP-8347: four geth start on the merkle trie, build the tree in the background and switch at `binaryTrieTime`, with partitions before, across and after the switch |
+| **live migration** | `make migration`, `make migration-smoke` | EIP-8347: two geth and two erigon start on the merkle trie, build the tree in the background and switch at `binaryTrieTime`, with partitions before, across and after the switch |
 
 Args files: `args/tree-at-genesis.yaml`, `args/migration.yaml`, `args/migration-smoke.yaml`.
 `make help` lists every target, grouped.
@@ -53,9 +53,10 @@ make up ARGS=args/migration.yaml          # the network alone: no restart, scena
 
 The chain starts on the merkle trie with `binaryTrieTime` 1800 s (smoke: 780 s) after genesis.
 **I\*** is the first block whose timestamp is `>= binaryTrieTime`: headers before it carry the
-merkle root, from it on the binary root. Each geth builds the binary tree in the background from
-block-level access lists and, after I\*, keeps the merkle side as a shadow until the first
-post-fork block finalizes.
+merkle root, from it on the binary root. Each client builds the binary tree in the background -
+geth from block-level access lists, erigon by folding both commitment domains from `erigon init`
+(`COMMITMENT_HEX_BIN=true`) - and after I\* keeps the merkle side as a shadow until the first
+post-fork block finalizes. Participants 1 and 3 run geth, 2 and 4 erigon.
 
 The bootnode (participant 1) anchors 40% of the stake and is never partitioned, so every heal
 converges on its chain; the three lights hold 20% each. What a lap does:
@@ -92,7 +93,7 @@ terminal.
 
 ## Adding another execution client
 
-The migration profiles are geth-only; `main.star` refuses any other client at plan time
+The migration profiles run geth and erigon; `main.star` refuses any other client at plan time
 (`MIGRATION_READY_CLIENTS`). A client needs:
 
 1. **A scheduled fork**: start on the merkle trie, read `binaryTrieTime` from genesis.json, switch
@@ -100,11 +101,10 @@ The migration profiles are geth-only; `main.star` refuses any other client at pl
    state.
 2. **An introspection adapter** (`migmon.Client`): migration progress per direction and the shadow
    root per block.
-3. **A registry entry** (`internal/migmon/registry.go`) with its evidence contract, and a reorg
-   log pattern to corroborate heals.
+3. **A registry entry** (`internal/migmon/registry.go`) with its evidence contract, including the
+   reorg log pattern that corroborates heals.
 4. **An args participant block**, and its image in `scripts/build-images.sh`.
 
 With step 1 done and the client added to `MIGRATION_READY_CLIENTS`, the client-agnostic checks
 (`chain-before-fork`, `boundary-agreement`, `forkblock-convergence`) already tell whether it
-switches on the same block as geth. Erigon rejects a future `binaryTrieTime` and runs only at
-genesis.
+switches on the same block as the others.
