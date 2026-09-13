@@ -100,7 +100,8 @@ func TestErigonProgress(t *testing.T) {
 	}{
 		{"before the fork", armed, pre, nil, PhaseRunning, DirSynced, "nil"},
 		{"after the fork", armedPost, post, pre, PhaseRunning, DirParked, DirSynced},
-		{"fork block finalized", armedPost, post, &Header{Number: 8, Time: 1000}, PhaseDone, "nil", "nil"},
+		// Erigon never retires: done still carries the shadow it keeps folding.
+		{"fork block finalized", armedPost, post, &Header{Number: 8, Time: 1000}, PhaseDone, DirParked, DirSynced},
 		{"shadow stopped", stopped, pre, nil, PhaseRunning, DirStalled, "nil"},
 		{"binary at genesis", erigonMigration{Mode: "bin"}, pre, nil, PhaseInactive, "nil", "nil"},
 		{"no activation time", erigonMigration{Mode: "hex+bin", Flipped: true}, post, nil, PhaseInactive, "nil", "nil"},
@@ -119,7 +120,7 @@ func TestErigonProgress(t *testing.T) {
 			t.Fatalf("%s: got %s binary=%s merkle=%s, want %s binary=%s merkle=%s",
 				tc.name, p.Phase, dirPhase(p.Binary), dirPhase(p.Merkle), tc.phase, tc.bin, tc.mer)
 		}
-		if p.Phase != PhaseRunning {
+		if p.Phase == PhaseInactive {
 			continue
 		}
 		live := p.Binary

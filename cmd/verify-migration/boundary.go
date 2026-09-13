@@ -45,6 +45,10 @@ func (v *verifier) checkCompletion(ctx context.Context) (verdict, string) {
 	forkT := time.Unix(int64(v.T), 0)
 	var problems, notes []string
 	for _, node := range nodes {
+		// Only a client that declares it retires the other tree can be held to
+		// "nothing runs after done"; one that keeps folding both reports its live
+		// direction past done by design, and is judged on the rest.
+		spec, _ := migmon.SpecFor(node)
 		var firstDone, finalAt time.Time
 		postDone := 0
 		for _, ev := range v.monitor {
@@ -76,6 +80,8 @@ func (v *verifier) checkCompletion(ctx context.Context) (verdict, string) {
 			switch {
 			case p.Phase != migmon.PhaseDone:
 				problems = append(problems, fmt.Sprintf("%s: regressed from done to %q at %s", node, p.Phase, ev.Time.Format(time.RFC3339)))
+			case !spec.RetiresShadow:
+				continue
 			case migmon.Active(p.Binary) || migmon.Active(p.Merkle):
 				problems = append(problems, fmt.Sprintf("%s: a direction is active again at %s, after done", node, ev.Time.Format(time.RFC3339)))
 			case p.Binary != nil && p.Binary.ShadowRoot != "":
@@ -94,6 +100,9 @@ func (v *verifier) checkCompletion(ctx context.Context) (verdict, string) {
 			problems = append(problems, fmt.Sprintf("%s reported done %.0fs BEFORE its fork block finalized", node, finalAt.Sub(firstDone).Seconds()))
 		case firstDone.After(forkT.Add(doneDeadlineAfterFork)):
 			problems = append(problems, fmt.Sprintf("%s reported done more than %s after the fork", node, doneDeadlineAfterFork))
+		case !spec.RetiresShadow:
+			notes = append(notes, fmt.Sprintf("%s done %.0fs after fork, %.0fs after its fork block finalized, %d post-done polls (keeps both trees: retirement unjudged)",
+				node, firstDone.Sub(forkT).Seconds(), firstDone.Sub(finalAt).Seconds(), postDone))
 		default:
 			notes = append(notes, fmt.Sprintf("%s done %.0fs after fork, %.0fs after its fork block finalized, %d clean post-done polls",
 				node, firstDone.Sub(forkT).Seconds(), firstDone.Sub(finalAt).Seconds(), postDone))

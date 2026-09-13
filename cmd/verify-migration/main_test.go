@@ -984,3 +984,65 @@ func TestCheckInjectedStateLateSalvageExcusesMajorityOverwrite(t *testing.T) {
 		t.Fatalf("want fail on the unexplained overwrite, got %s: %s", r, evidence)
 	}
 }
+
+// progressEv carries a client's migration progress as the monitor records it.
+func progressEv(t *testing.T, node string, tm int64, p migmon.MigrationProgress) migmon.Event {
+	t.Helper()
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := ev(migmon.EvProgress, node, tm)
+	e.Raw = raw
+	return e
+}
+
+// Only a client whose registry entry says it retires the other tree may be
+// failed for still holding a shadow root after done. Erigon keeps folding both
+// commitment domains by design, so the same payload is a regression for geth
+// and a reported difference for erigon.
+func TestCheckCompletionRetirementIsJudgedPerClientContract(t *testing.T) {
+	const fork = testFork
+	doneWithShadow := migmon.MigrationProgress{
+		Phase:  migmon.PhaseDone,
+		Binary: &migmon.DirectionProgress{Phase: migmon.DirParked, ShadowRoot: testNewHash},
+	}
+	for _, tc := range []struct {
+		node string
+		want verdict
+	}{
+		{"el-1-geth-lighthouse", verdictFail},
+		{"el-2-erigon-lighthouse", verdictPass},
+	} {
+		v := &verifier{T: uint64(fork), monitor: []migmon.Event{
+			{Kind: migmon.EvIStarFinal, Node: tc.node, Number: 500, Time: time.Unix(fork+10, 0)},
+			progressEv(t, tc.node, fork+20, migmon.MigrationProgress{Phase: migmon.PhaseDone}),
+			progressEv(t, tc.node, fork+30, doneWithShadow),
+		}}
+		r, evidence := v.checkCompletion(context.Background())
+		if r != tc.want {
+			t.Fatalf("%s: want %s, got %s: %s", tc.node, tc.want, r, evidence)
+		}
+		if tc.want == verdictPass && !strings.Contains(evidence, "retirement unjudged") {
+			t.Fatalf("%s: a non-retiring client's evidence must say so, got %q", tc.node, evidence)
+		}
+	}
+}
+
+// With no client declaring a window-log contract nothing is read, and a pass
+// would claim a property no client was checked against.
+func TestCheckNoConfiguredWindowUnjudgedIsInconclusive(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "el-2-erigon-lighthouse.log"), "[INFO] [09-07|08:56:31.211] nothing to see\n")
+	v := &verifier{logsDir: dir, els: []el{{name: "el-2-erigon-lighthouse", url: "http://el2"}}}
+	if r, evidence := v.checkNoConfiguredWindow(context.Background()); r != verdictInconclusive {
+		t.Fatalf("want inconclusive with no contract to check, got %s: %s", r, evidence)
+	}
+
+	// A geth node in the same run gives the check teeth again.
+	writeFile(t, filepath.Join(dir, "el-1-geth-lighthouse.log"), "[INFO] [09-07|08:56:31.211] nothing to see\n")
+	v.els = append(v.els, el{name: "el-1-geth-lighthouse", url: "http://el1"})
+	if r, evidence := v.checkNoConfiguredWindow(context.Background()); r != verdictPass {
+		t.Fatalf("want pass once a client declares the contract, got %s: %s", r, evidence)
+	}
+}

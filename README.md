@@ -101,8 +101,12 @@ The migration profiles run geth and erigon; `main.star` refuses any other client
    state.
 2. **An introspection adapter** (`migmon.Client`): migration progress per direction and the shadow
    root per block.
-3. **A registry entry** (`internal/migmon/registry.go`) with its evidence contract, including the
-   reorg log pattern that corroborates heals.
+3. **A registry entry** (`internal/migmon/registry.go`) with its evidence contract: the reorg log
+   pattern that corroborates heals, whether orphaned blocks stay readable by hash, and whether the
+   client retires the other tree once the fork block finalizes. Checks scope themselves to what a
+   client declares, so a missing entry weakens the verdict rather than inventing a failure: geth
+   retires its shadow, erigon keeps folding both commitment domains, and both are judged on their
+   own contract.
 4. **An args participant block**, and its image in `scripts/build-images.sh`.
 
 With step 1 done and the client added to `MIGRATION_READY_CLIENTS`, the client-agnostic checks

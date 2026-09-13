@@ -843,6 +843,7 @@ func (v *verifier) progressNodes() []string {
 func (v *verifier) checkNoConfiguredWindow(ctx context.Context) (verdict, string) {
 	var problems, notes []string
 
+	judged := 0
 	if v.logsDir == "" {
 		problems = append(problems, "no --logs-dir given")
 	} else {
@@ -853,6 +854,7 @@ func (v *verifier) checkNoConfiguredWindow(ctx context.Context) (verdict, string
 				notes = append(notes, fmt.Sprintf("%s: no registered window-log contract", node))
 				continue
 			}
+			judged++
 			re := regexp.MustCompile(`(?i)` + spec.ForbiddenWindowLog)
 			for _, f := range v.victimLogFiles(node) {
 				if fileContainsMatch(f, re) {
@@ -869,6 +871,10 @@ func (v *verifier) checkNoConfiguredWindow(ctx context.Context) (verdict, string
 	evidence := strings.Join(append(problems, notes...), "; ")
 	if evidence == "" {
 		evidence = "no configured-window mention in any client log"
+	}
+	if len(problems) == 0 && judged == 0 {
+		// Nothing was read: passing would claim a property no client declared.
+		return verdictInconclusive, evidence
 	}
 	return boolVerdict(len(problems) == 0), evidence
 }
