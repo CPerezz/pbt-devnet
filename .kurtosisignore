@@ -12,6 +12,7 @@ docs/
 /gengenesis
 /migration-*
 /verify-migration
+/*.jsonl
 
 # The repository history is the largest thing here by far and the package never reads it.
 .git/
