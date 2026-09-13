@@ -351,8 +351,9 @@ def _genesis_field(plan, name, jq_filter, fmt):
 
 MIGRATION_PROFILES = ["none", "composite", "composite-smoke"]
 
-# Clients with a migration evidence contract (introspection RPCs, registry entry).
-MIGRATION_READY_CLIENTS = ["geth", "erigon"]
+# Clients with a migration evidence contract (a registry entry, and the introspection
+# RPCs when the client has them).
+MIGRATION_READY_CLIENTS = ["geth", "erigon", "besu"]
 
 
 def _weight_participants(participants, cfg):

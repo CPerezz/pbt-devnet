@@ -27,13 +27,16 @@ participants:
     checkpoint_sync_enabled: false
     el_extra_params: ["--cache.preimages", "--syncmode=full"]
 
-  - el_type: erigon
-    el_image: erigon-pbt:local
+  # Participant 4 is besu: it starts on the merkle trie like the others and switches
+  # at binaryTrieTime. No --data-storage-format: that fixes the format for the whole
+  # datadir at startup, which is what makes a node unable to migrate. The threshold
+  # is besu's reorg logging gate, default 6, above the depth of most heals here.
+  - el_type: besu
+    el_image: besu-pbt:local
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    el_extra_env_vars: {COMMITMENT_HEX_BIN: "true"}
-    el_extra_params: ["--prune.include-commitment-history"]
+    el_extra_params: ["--reorg-logging-threshold=0"]
 
 network_params:
   # "kurtosis" is the only network name for which the geth launcher picks full sync.
