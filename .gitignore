@@ -14,3 +14,7 @@ __pycache__/
 /pbthammer
 /migration-*
 /verify-migration
+
+# omp writes a session transcript into the working directory when a session is
+# forked; it is not part of the package and must never be committed.
+/*.jsonl
