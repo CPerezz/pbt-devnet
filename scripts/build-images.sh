@@ -13,6 +13,8 @@ PLATFORM="${PBT_PLATFORM:-linux/arm64}"
 GETH_SRC="${PBT_GETH_SRC:-$ROOT/../go-ethereum}"
 ERIGON_SRC="${PBT_ERIGON_SRC:-$ROOT/../erigon-pbt}"
 EGG_SRC="${PBT_EGG_SRC:-$ROOT/../egg-pbt}"
+# Nethermind builds from GitHub unless a local checkout is named.
+NETHERMIND_SRC="${PBT_NETHERMIND_SRC:-}"
 
 echo "==> platform:  $PLATFORM"
 echo "==> args file: $ARGS"
@@ -109,10 +111,15 @@ build_from "erigon (EIP-8297)" "erigon-pbt:local" "$ERIGON_SRC" \
 fi
 
 if want nethermind; then
+if [[ -n "$NETHERMIND_SRC" ]]; then
+build_from "nethermind (EIP-8297)" "nethermind-pbt:local" "$NETHERMIND_SRC" \
+  "set PBT_NETHERMIND_SRC to a NethermindEth/nethermind checkout, or unset it to build from GitHub"
+else
 echo "==> nethermind (EIP-8297) -> nethermind-pbt:local"
 echo "    source: https://github.com/NethermindEth/nethermind.git#pbt-state"
 docker build --platform "$PLATFORM" -t nethermind-pbt:local \
   "https://github.com/NethermindEth/nethermind.git#pbt-state"
+fi
 echo
 fi
 
