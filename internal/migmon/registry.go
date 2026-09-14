@@ -51,6 +51,16 @@ var Registry = map[string]ClientSpec{
 		// the parent walk error and fall back to its log.
 		ServesOrphans: true,
 	},
+	// Same debug_migrationProgress / debug_shadowStateRoot wire shape as geth; its block
+	// tree keeps every branch, so orphans stay readable by hash. No reorg log line carries
+	// the depth, and no window log to forbid: corroboration comes from the monitor alone.
+	// Measured: reports done when the fork block finalizes, with both directions and
+	// the shadow root gone from then on.
+	"nethermind": {
+		Introspects:   true,
+		ServesOrphans: true,
+		RetiresShadow: true,
+	},
 }
 
 // SpecFor returns the ClientSpec whose registry key appears as a substring

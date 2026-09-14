@@ -67,7 +67,7 @@ func ClientType(service string) string {
 func NewClient(service, url string) Client {
 	rpc := &rpcClient{name: service, url: url, http: &http.Client{Timeout: 10 * time.Second}}
 	switch ClientType(service) {
-	case "geth":
+	case "geth", "nethermind":
 		return rpc
 	case "erigon":
 		return &erigonClient{rpcClient: rpc}

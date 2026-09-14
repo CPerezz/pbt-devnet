@@ -353,7 +353,7 @@ MIGRATION_PROFILES = ["none", "composite", "composite-smoke"]
 
 # Clients with a migration evidence contract (a registry entry, and the introspection
 # RPCs when the client has them).
-MIGRATION_READY_CLIENTS = ["geth", "erigon", "besu"]
+MIGRATION_READY_CLIENTS = ["geth", "erigon", "besu", "nethermind"]
 
 
 def _weight_participants(participants, cfg):

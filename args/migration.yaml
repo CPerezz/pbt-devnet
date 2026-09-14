@@ -1,6 +1,6 @@
-# Full-lifecycle EIP-8347 migration devnet: the chain starts on the merkle trie; geth on 1 and 3
-# builds the binary tree in the background, erigon on 2 folds both tries from init, besu on 4
-# swaps per header, and all switch at binaryTrieTime = amsterdam_time + fork_offset_seconds;
+# Full-lifecycle EIP-8347 migration devnet: the chain starts on the merkle trie; geth on 1
+# builds the binary tree in the background, erigon on 2 folds both tries from init, Nethermind
+# on 3 mirrors flat state into its PBT backend, besu on 4 swaps per header, and all switch at binaryTrieTime = amsterdam_time + fork_offset_seconds;
 # reorgs run before, across and after the fork. `make migration` drives it end to end.
 # Non-pbt_* keys are ethereum-package schema.
 
@@ -22,12 +22,15 @@ participants:
     checkpoint_sync_enabled: false
     el_extra_env_vars: {COMMITMENT_HEX_BIN: "true"}
 
-  - el_type: geth
-    el_image: pbt-geth:local
+  # Participant 3 is Nethermind: flat (merkle) state mirrored into its PBT backend
+  # before I*, PBT alone from I* on, with the PBT anchor bootstrapped from the MPT
+  # genesis allocation rather than an exported snapshot.
+  - el_type: nethermind
+    el_image: nethermind-pbt:local
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    el_extra_params: ["--cache.preimages", "--syncmode=full"]
+    el_extra_params: ["--Pbt.MigrationEnabled=true", "--Pbt.MigrationGenesisBootstrap=true", "--Sync.FastSync=false"]
 
   # Participant 4 is besu: it starts on the merkle trie like the others and switches
   # at binaryTrieTime. No --data-storage-format: that fixes the format for the whole
