@@ -215,7 +215,7 @@ func (c *collector) state(now uint64) apiState {
 	nodes := make([]nodeView, 0, len(c.states))
 	for i, ns := range c.states {
 		node := i + 1
-		v := nodeView{ID: node, Name: ns.name, Phase: "unknown", IStar: "none", CLPeers: -1, Status: "ok"}
+		v := nodeView{ID: node, Name: ns.name, Client: migmon.ClientType(ns.name), Phase: "unknown", IStar: "none", CLPeers: -1, Status: "ok"}
 		if head, ok := c.lin.byHash[c.lin.heads[node]]; ok {
 			v.Head, v.HeadNumber, v.HeadSlot = head.Hash, head.Number, c.slotOf(head.Time)
 			v.Segment = c.lin.segmentOf(head.Hash)

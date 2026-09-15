@@ -25,6 +25,7 @@ type apiState struct {
 type nodeView struct {
 	ID             int    `json:"id"`
 	Name           string `json:"name"`
+	Client         string `json:"client"` // execution implementation, for its mark on the chip
 	Head           string `json:"head"`
 	HeadNumber     uint64 `json:"head_number"`
 	HeadSlot       uint64 `json:"head_slot"`
