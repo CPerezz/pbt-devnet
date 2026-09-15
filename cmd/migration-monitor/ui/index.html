@@ -73,6 +73,10 @@
   #clients td.warn { background: #fff4e0; color: #8a5a00; }
   #clients tr.row-bad td:first-child { box-shadow: inset 3px 0 0 #e0433d; }
   #clients tr.row-warn td:first-child { box-shadow: inset 3px 0 0 #ffb020; }
+  #clients tr.row-ok td:first-child { box-shadow: inset 3px 0 0 #2fa84f; }
+  /* nothing wrong, but nothing to cross-check either (a client with no shadow RPC) */
+  #clients tr.row-partial td:first-child { box-shadow: inset 3px 0 0 rgba(47,168,79,0.35); }
+  #clients tr.row-absent td:first-child { box-shadow: inset 3px 0 0 #c8c8c8; }
   #clients td.phase::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; background: var(--dot, #c8c8c8); }
   #clients .mark { width: 12px; height: 12px; vertical-align: -1px; margin-right: 5px; color: #333; }
   #clients tr:hover td { background: #f6f8fa; }

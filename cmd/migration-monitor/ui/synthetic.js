@@ -193,7 +193,11 @@ export function syntheticLap(nowSlot) {
       headBlock = blocks.find(b => b.hash === strandedAt[n].hash) || headBlock;
     }
     headBlock = headBlock || blocks[0];
-    const phase = nowSlot < T ? (n === 3 && nowSlot < 20 ? 'following' : 'synced') : (nowSlot < T + 60 ? 'window' : 'done');
+    // besu has no migration RPC, so it has no phase to report - the live page
+    // shows it as opaque for the whole lap, never as a phase it cannot know.
+    const phase = CLIENTS[n - 1] === 'besu' ? 'opaque'
+      : nowSlot < T ? (n === 3 && nowSlot < 20 ? 'following' : 'synced')
+        : (nowSlot < T + 60 ? 'window' : 'done');
     const lag = nowSlot < T ? (n === 3 ? 3 : 0) : 0;
     return {
       id: n, name: `el-${n}-${CLIENTS[n - 1]}-lighthouse`, client: CLIENTS[n - 1], head: headBlock.hash, head_number: headBlock.number, head_slot: headBlock.slot,
