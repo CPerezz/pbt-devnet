@@ -60,6 +60,9 @@
   .agree-split { color: #e0433d; } .agree-all { color: #1f8a3c; } #tip .agree-all { color: #7fe08a; } #tip .agree-split { color: #ff8f8f; }
   #bottom { display: grid; grid-template-columns: minmax(620px, 1.7fr) minmax(280px, 1fr); gap: 12px; padding: 0 12px 16px; align-items: start; }
   #bottom > * { background: #fff; border: 1px solid #e6e6e6; border-radius: 4px; padding: 8px 10px; }
+  /* Two card columns; only the rail is sticky, so the inspector scrolls with the table it belongs to. */
+  #left { display: grid; gap: 10px; align-content: start; background: none; border: 0; padding: 0; }
+  #left > * { background: #fff; border: 1px solid #e6e6e6; border-radius: 4px; padding: 8px 10px; }
   #rail { position: sticky; top: 44px; max-height: calc(100vh - 56px); overflow: auto; display: grid; gap: 10px; align-content: start; background: none; border: 0; padding: 0; }
   #rail > * { background: #fff; border: 1px solid #e6e6e6; border-radius: 4px; padding: 8px 10px; }
   #clients { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
@@ -84,13 +87,15 @@
   .cap { margin-top: 6px; color: #666; font-size: 11px; font-variant-numeric: tabular-nums; }
   #bottom h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: #555; }
   details.alerts summary { cursor: pointer; color: #555; font-weight: 600; }
+  /* The alerts grow all lap; let them scroll rather than stretch the column. */
+  details.alerts ul { max-height: 230px; overflow: auto; margin: 4px 0 0; padding-left: 18px; }
   details.alerts li { font-variant-numeric: tabular-nums; } details.alerts li.critical { color: #c22; }
   details.alerts li.expected { color: #777; } details.alerts li.expected::after { content: ' · expected'; }
   #block .card-head { margin-bottom: 4px; }
   #block .kv { display: grid; grid-template-columns: 120px 1fr; gap: 6px; padding: 2px 0; border-top: 1px solid #f0f0f0; }
   #block .kv > span:first-child { color: #555; }
   #block .placeholder { color: #888; }
-  #moves { list-style: none; padding: 0; margin: 0; }
+  #moves { list-style: none; padding: 0; margin: 0; max-height: 230px; overflow: auto; }
   #moves li { padding: 2px 0; cursor: pointer; border-top: 1px solid #f0f0f0; } #moves li:hover { background: #f6f6f6; }
   #controls { display: flex; gap: 10px; align-items: center; color: #555; margin: 4px 12px 10px; }
   #controls input[type=range] { width: 320px; }
@@ -124,9 +129,11 @@
 <div id="root"></div>
 <div id="controls"></div>
 <div id="bottom">
-  <div id="clients-panel"><h3>clients at one height</h3></div>
-  <div id="rail">
+  <div id="left">
+    <div id="clients-panel"><h3>clients at one height</h3></div>
     <div id="block"><span class="placeholder">hover a block for its roots; click to pin</span></div>
+  </div>
+  <div id="rail">
     <div><details class="alerts" id="alerts" open><summary>alerts</summary><ul></ul></details></div>
     <div><h3>head moves</h3><ul id="moves"></ul></div>
   </div>
