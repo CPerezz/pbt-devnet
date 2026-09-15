@@ -13,7 +13,7 @@ import (
 // The page is static and polls /api/state; synthetic.js (the review-time lap
 // generator) is served by `make ui-preview` only.
 //
-//go:embed ui/index.html ui/river.js
+//go:embed ui/index.html ui/river.js ui/clients.js
 var uiFS embed.FS
 
 // serveHTTP starts the live page in the background; a bind failure is a
