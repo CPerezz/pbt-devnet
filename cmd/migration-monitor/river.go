@@ -39,6 +39,7 @@ type collector struct {
 	finalized map[int]uint64 // slot of each node's finalized block
 	alerts    []alert
 	partsDown bool
+	cmpFired  map[string]bool // dissent findings already emitted, per node/height
 
 	alertsMu sync.Mutex // Write runs inside Log.Emit, which the tick calls: its own lock
 	pending  []alert
@@ -108,7 +109,7 @@ func (c *collector) tick(ctx context.Context, log *migmon.Log) {
 	c.lin.prune(now)
 	c.judgeAlerts()
 	c.seq++
-	if raw, err := json.Marshal(c.state(now)); err == nil {
+	if raw, err := json.Marshal(c.state(ctx, log, now)); err == nil {
 		c.doc.Store(&raw)
 	} else {
 		log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: "monitor", Detail: "encoding the page document: " + err.Error()})
@@ -206,7 +207,7 @@ func nodeIndex(service string) int {
 
 // state assembles the document. Agreement is judged per block against the
 // live holders of its segment that still run a shadow (introspect, not done).
-func (c *collector) state(now uint64) apiState {
+func (c *collector) state(ctx context.Context, log *migmon.Log, now uint64) apiState {
 	segs := c.lin.segments()
 	orphaned := map[string]bool{}
 	for _, s := range segs {
@@ -293,11 +294,13 @@ func (c *collector) state(now uint64) apiState {
 	}
 	alerts := append([]alert(nil), c.alerts...)
 	sort.SliceStable(alerts, func(i, j int) bool { return alerts[i].Slot < alerts[j].Slot })
+	reorgs := nonNil(c.lin.reorgs())
 	return apiState{
 		Seq: c.seq, NowSlot: now, SlotSeconds: c.slotSeconds, ForkSlot: c.slotOf(c.forkTime), FinalizedSlot: finalized,
 		Truncated: c.lin.truncated,
-		Nodes:     nodes, Segments: nonNil(segs), Blocks: nonNil(blocks), Reorgs: nonNil(c.lin.reorgs()),
+		Nodes:     nodes, Segments: nonNil(segs), Blocks: nonNil(blocks), Reorgs: reorgs,
 		Partitions: nonNil(parts), Schedule: nonNil(c.sched), Alerts: nonNil(alerts),
+		Compare: c.compare(ctx, log, nodes, reorgs, now),
 	}
 }
 
