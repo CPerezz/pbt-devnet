@@ -97,9 +97,13 @@ orange after) and ringed by cross-node agreement on the shadow root. Node chips 
 each carrying its client's mark and its participant number;
 a reorg leaves a rewind arrow to the common ancestor, a catch-up arrow along the winner and a ghost
 of the node at the tip it left. Partitions and the schedule sit on the same axis. Hover a block for
-its roots, click to pin it in the inspector. Dora is the consensus-side view (finality, proposers);
-`make status`, `make compare`, `make forks` and `make diagnose` answer the same questions from the
-terminal.
+its roots, click to pin it in the inspector. Below the chain, the client table puts every
+participant side by side **at one height** - its hash there, its header root, its shadow root, the
+block it crossed I\* on - because comparing each client at its own head reports a one-block lead as
+a disagreement. Agreement is never coloured; a cell turns red only for a disagreement nobody asked
+for, and amber while the node is partitioned or still settling after a heal. Dora is the
+consensus-side view (finality, proposers); `make status`, `make compare`, `make forks` and
+`make diagnose` answer the same questions from the terminal.
 
 ## Adding another execution client
 
