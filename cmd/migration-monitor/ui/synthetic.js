@@ -150,8 +150,64 @@ export function syntheticLap(nowSlot) {
   });
   for (const s of segments) if (s.state === 'live' && s.id !== 's0') s.holders = nodeViews.filter(v => v.segment === s.id).map(v => v.id);
 
+  // The client table, with every cell state scripted somewhere in the lap so
+  // a review can see them all without an enclave: besu never reports a shadow
+  // root (noinspect), node 4 goes unreachable at 200, node 2 falls behind at
+  // 168, an unexpected shadow dissent at 150-160 and an unexpected header
+  // dissent at 330-345, plus whichever nodes are partitioned (expected).
+  const compare = (() => {
+    const introspects = { 1: true, 2: true, 3: true, 4: false }; // besu has no migration RPC
+    const eligible = nodeViews.filter(v => v.status === 'ok' && !v.isolated && v.phase !== 'stalled');
+    const empty = { height: 0, ref: '', ref_source: 'none', hash_agree: 0, hash_judged: 0, shadow_agree: 0, shadow_judged: 0, shadow_classes: 0, rows: [] };
+    if (!eligible.length) return empty;
+    const height = Math.max(0, Math.min(...eligible.map(v => v.head_number)) - 2);
+    const refBlock = blocks.filter(b => b.segment === 's0' && b.number <= height).slice(-1)[0];
+    if (!refBlock) return empty;
+    const refShadow = hex(refBlock.format === 'mpt' ? 'pbt-shadow' : 'mpt-shadow', height);
+    const refHeader = hex('hdr', height);
+
+    const rows = nodeViews.map(v => {
+      const r = {
+        node: v.id, ahead: v.head_number - height, hash: refBlock.hash, header_root: refHeader,
+        shadow_root: introspects[v.id] ? refShadow : '', expected: false, why: '',
+        hash_state: 'agree', header_state: 'agree',
+        shadow_state: introspects[v.id] ? 'agree' : 'noinspect',
+        istar_state: v.istar === 'none' ? 'unjudged' : 'agree', verdict: 'ok',
+      };
+      if (v.status !== 'ok') {
+        Object.assign(r, { hash: '', header_root: '', shadow_root: '', hash_state: 'unreachable', header_state: 'unreachable', shadow_state: 'unreachable', verdict: 'absent' });
+      } else if (v.isolated) {
+        Object.assign(r, {
+          hash: hex('island', height + v.id), header_root: hex('island-hdr', height + v.id),
+          shadow_root: introspects[v.id] ? hex('island-shadow', height + v.id) : '',
+          hash_state: 'dissent', header_state: 'unjudged', shadow_state: introspects[v.id] ? 'unjudged' : 'noinspect',
+          verdict: 'fork', expected: true, why: 'isolated',
+        });
+      } else if (v.id === 2 && nowSlot >= 168 && nowSlot < 176) {
+        Object.assign(r, { ahead: -2, hash: '', header_root: '', shadow_root: '', hash_state: 'behind', header_state: 'behind', shadow_state: 'behind', verdict: 'absent' });
+      } else if (v.id === 2 && nowSlot >= 150 && nowSlot < 160) {
+        Object.assign(r, { shadow_root: hex('wrong-shadow', height), shadow_state: 'dissent', verdict: 'shadow-dissent' });
+      } else if (v.id === 3 && nowSlot >= 330 && nowSlot < 345) {
+        Object.assign(r, { header_root: hex('wrong-hdr', height), header_state: 'dissent', verdict: 'header-dissent' });
+      } else if (introspects[v.id] && nowSlot % 17 === 0) {
+        Object.assign(r, { shadow_root: '', shadow_state: 'pending', verdict: 'partial' }); // the asker has not got there yet
+      } else if (!introspects[v.id]) {
+        r.verdict = 'partial';
+      }
+      return r;
+    });
+    const judged = (k) => rows.filter(r => r[k] === 'agree' || r[k] === 'dissent');
+    const shadows = new Set(rows.filter(r => r.shadow_state === 'agree' || r.shadow_state === 'dissent').map(r => r.shadow_root));
+    return {
+      height, ref: refBlock.hash, ref_source: 'anchor',
+      hash_agree: rows.filter(r => r.hash_state === 'agree').length, hash_judged: judged('hash_state').length,
+      shadow_agree: rows.filter(r => r.shadow_state === 'agree').length, shadow_judged: judged('shadow_state').length,
+      shadow_classes: shadows.size, rows,
+    };
+  })();
+
   return {
     seq: nowSlot, now_slot: nowSlot, slot_seconds: SLOT_SECONDS, fork_slot: T, finalized_slot: finalized,
-    nodes: nodeViews, segments, blocks, reorgs, partitions, schedule, alerts,
+    nodes: nodeViews, segments, blocks, reorgs, partitions, schedule, alerts, compare,
   };
 }

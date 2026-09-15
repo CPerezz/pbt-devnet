@@ -58,8 +58,26 @@
   .muted { color: #888; } .bad { color: #e0433d; } .ok { color: #1f8a3c; }
   #tip .bad { color: #ff8f8f; } #tip .muted { color: #aaa; }
   .agree-split { color: #e0433d; } .agree-all { color: #1f8a3c; } #tip .agree-all { color: #7fe08a; } #tip .agree-split { color: #ff8f8f; }
-  #bottom { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(560px, 1.4fr); gap: 12px; padding: 0 12px 16px; align-items: start; }
+  #bottom { display: grid; grid-template-columns: minmax(620px, 1.7fr) minmax(280px, 1fr); gap: 12px; padding: 0 12px 16px; align-items: start; }
   #bottom > * { background: #fff; border: 1px solid #e6e6e6; border-radius: 4px; padding: 8px 10px; }
+  #rail { position: sticky; top: 44px; max-height: calc(100vh - 56px); overflow: auto; display: grid; gap: 10px; align-content: start; background: none; border: 0; padding: 0; }
+  #rail > * { background: #fff; border: 1px solid #e6e6e6; border-radius: 4px; padding: 8px 10px; }
+  #clients { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  #clients th { text-align: left; font-weight: 600; color: #555; font-size: 11px; padding: 2px 6px; border-bottom: 1px solid #e6e6e6; white-space: nowrap; }
+  #clients td { padding: 3px 6px; border-bottom: 1px solid #f2f2f2; white-space: nowrap; }
+  #clients td.mono { font-family: ui-monospace, monospace; font-size: 11px; }
+  #clients td.agreed { color: #333; } #clients td.muted { color: #999; }
+  /* Colour is exception-only: agreement is counted in the caption, never
+     painted, so a red cell keeps meaning something. */
+  #clients td.bad { background: #fdecec; color: #b3261e; font-weight: 600; }
+  #clients td.warn { background: #fff4e0; color: #8a5a00; }
+  #clients tr.row-bad td:first-child { box-shadow: inset 3px 0 0 #e0433d; }
+  #clients tr.row-warn td:first-child { box-shadow: inset 3px 0 0 #ffb020; }
+  #clients td.phase::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; background: var(--dot, #c8c8c8); }
+  #clients .mark { width: 12px; height: 12px; vertical-align: -1px; margin-right: 5px; color: #333; }
+  #clients tr:hover td { background: #f6f8fa; }
+  #clients tr.row-bad:hover td { background: #fbe0e0; } #clients tr.row-warn:hover td { background: #ffeecc; }
+  .cap { margin-top: 6px; color: #666; font-size: 11px; font-variant-numeric: tabular-nums; }
   #bottom h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: #555; }
   details.alerts summary { cursor: pointer; color: #555; font-weight: 600; }
   details.alerts li { font-variant-numeric: tabular-nums; } details.alerts li.critical { color: #c22; }
@@ -102,22 +120,24 @@
 <div id="root"></div>
 <div id="controls"></div>
 <div id="bottom">
-  <div>
-    <details class="alerts" id="alerts" open><summary>alerts</summary><ul></ul></details>
-    <h3 style="margin-top:10px">head moves</h3>
-    <ul id="moves"></ul>
+  <div id="clients-panel"><h3>clients at one height</h3></div>
+  <div id="rail">
+    <div id="block"><span class="placeholder">hover a block for its roots; click to pin</span></div>
+    <div><details class="alerts" id="alerts" open><summary>alerts</summary><ul></ul></details></div>
+    <div><h3>head moves</h3><ul id="moves"></ul></div>
   </div>
-  <div id="block"><span class="placeholder">hover a block for its roots; click to pin</span></div>
 </div>
 <div id="tip"></div>
 <script type="module">
   import { River } from './river.js';
+  import { renderClients } from './clients.js';
   const root = document.getElementById('root');
   const river = new River(root, { tip: document.getElementById('tip'), block: document.getElementById('block'), moves: document.getElementById('moves') });
   window.river = river; // debugging handle
   const params = new URLSearchParams(location.search);
   const synthetic = params.has('synthetic');
 
+  let lastUnexpected = 0;
   function paint(s) {
     river.render(s);
     const secs = s.now_slot * s.slot_seconds;
@@ -126,12 +146,17 @@
     document.getElementById('k-final').textContent = `slot ${s.finalized_slot}`;
     const spine = s.segments.find(x => x.lane === 0);
     document.getElementById('k-head').textContent = spine ? `#${spine.blocks}` : '–';
+    renderClients(document.getElementById('clients-panel'), s);
     const ul = document.querySelector('#alerts ul'); ul.replaceChildren();
     for (const a of s.alerts.slice().reverse()) {
       const li = document.createElement('li'); li.className = a.kind + (a.expected ? ' expected' : '');
       li.textContent = `slot ${a.slot} · node ${a.node} · ${a.detail}`; ul.appendChild(li);
     }
-    document.querySelector('#alerts summary').textContent = `alerts (${s.alerts.filter(a => !a.expected).length} unexpected, ${s.alerts.length} total)`;
+    const unexpected = s.alerts.filter(a => !a.expected).length;
+    document.querySelector('#alerts summary').textContent = `alerts (${unexpected} unexpected, ${s.alerts.length} total)`;
+    // Open on a NEW unexpected alert; never close a panel the reader opened.
+    if (unexpected > lastUnexpected) document.getElementById('alerts').open = true;
+    lastUnexpected = unexpected;
   }
 
   if (synthetic) {

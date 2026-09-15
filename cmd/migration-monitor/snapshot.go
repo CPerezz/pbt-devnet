@@ -20,6 +20,37 @@ type apiState struct {
 	Partitions    []partition  `json:"partitions"`
 	Schedule      []scheduleOp `json:"schedule"`
 	Alerts        []alert      `json:"alerts"`
+	Compare       compareView  `json:"compare"`
+}
+
+// compareView is every client's answer at ONE height, judged: the page's
+// client table. Cells carry their own state rather than a value the page has
+// to interpret, so "this client has no such RPC" never renders as a fault.
+type compareView struct {
+	Height        uint64       `json:"height"`
+	Ref           string       `json:"ref"`        // reference hash; "" = nothing judged this tick
+	RefSource     string       `json:"ref_source"` // anchor|majority|none
+	HashAgree     int          `json:"hash_agree"`
+	HashJudged    int          `json:"hash_judged"`
+	ShadowAgree   int          `json:"shadow_agree"`
+	ShadowJudged  int          `json:"shadow_judged"`
+	ShadowClasses int          `json:"shadow_classes"` // distinct shadow roots among judged cells
+	Rows          []compareRow `json:"rows"`
+}
+
+type compareRow struct {
+	Node        int       `json:"node"`
+	Ahead       int64     `json:"ahead"` // head - height; negative = behind the comparison
+	Hash        string    `json:"hash"`
+	HeaderRoot  string    `json:"header_root"`
+	ShadowRoot  string    `json:"shadow_root"`
+	HashState   cellState `json:"hash_state"`
+	HeaderState cellState `json:"header_state"`
+	ShadowState cellState `json:"shadow_state"`
+	IStarState  cellState `json:"istar_state"`
+	Verdict     string    `json:"verdict"`
+	Expected    bool      `json:"expected"` // a disagreement the devnet asked for
+	Why         string    `json:"why"`      // what makes it expected
 }
 
 type nodeView struct {
