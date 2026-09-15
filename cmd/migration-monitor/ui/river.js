@@ -18,7 +18,29 @@ const CLASS_DOC = {
   window: 'Window partition: isolation inside the open migration window (after I*, while the reverse MPT direction still runs). Checks the shadow MPT root survives a reorg.',
   scenario: 'Post-fork scenario: the chaos driver writes state on a doomed two-node island, heals it, and checks that state is gone from every client afterwards.',
 };
-const CHIP_R = 9;
+const CHIP_R = 11;
+
+// Client marks, each the project's own: the ethereum diamond for geth, and the
+// symbol every other client ships. They are drawn at ~16px, where interior
+// detail is lost but the silhouettes stay distinct, and every chip keeps its
+// participant number in a corner badge.
+// White is the house ink, but it disappears on the pale fills (window, unknown),
+// so the mark falls back to dark whenever white's contrast against the disc drops
+// too low. Computed rather than listed: a new phase colour cannot silently
+// produce an illegible chip.
+const luminance = hex => {
+  const c = i => { const v = parseInt(hex.slice(i, i + 2), 16) / 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+  return 0.2126 * c(1) + 0.7152 * c(3) + 0.0722 * c(5);
+};
+const glyphInk = phase => (1.05 / (luminance(PHASE[phase] || PHASE.unknown) + 0.05) < 2 ? '#1a1a1a' : '#fff');
+
+const LOGOS = {
+  geth: { box: '0 0 1920 1920', body: '<polygon points="959.8,80.7 420.1,976.3 959.8,1295.4 1499.6,976.3"/><polygon points="420.1,1078.7 959.8,1839.3 1499.6,1078.7 959.8,1397.6"/>' },
+  besu: { box: '0.93 0.07 68.65 95.22', body: '<path d="M69.58,39.36 L69.58,39.13 C69.58,36.65 67.57,34.63 65.08,34.63 L64.85,34.63 C63.87,34.63 62.97,34.94 62.24,35.47 L39.87,22.56 C39.88,22.45 39.89,22.33 39.89,22.22 L39.89,21.99 C39.89,19.51 37.88,17.49 35.39,17.49 L35.16,17.49 C32.68,17.49 30.66,19.5 30.66,21.99 L30.66,22.22 C30.66,22.33 30.67,22.45 30.68,22.56 L8.31,35.47 C8.05,35.29 7.78,35.13 7.48,35 L7.48,8.93 C9.09,8.2 10.21,6.59 10.21,4.71 C10.21,2.15 8.13,0.07 5.57,0.07 C3.01,0.07 0.93,2.15 0.93,4.71 C0.93,6.59 2.05,8.21 3.66,8.93 L3.66,35 C2.07,35.69 0.95,37.28 0.95,39.13 L0.95,39.36 C0.95,41.21 2.07,42.79 3.66,43.49 L3.66,69.29 C2.07,69.98 0.95,71.57 0.95,73.42 L0.95,73.65 C0.95,76.13 2.96,78.15 5.45,78.15 L5.68,78.15 C6.65,78.15 7.55,77.84 8.29,77.31 L30.66,90.22 C30.65,90.33 30.64,90.44 30.64,90.56 L30.64,90.79 C30.64,93.27 32.65,95.29 35.14,95.29 L35.37,95.29 C37.85,95.29 39.87,93.28 39.87,90.79 L39.87,90.56 C39.87,90.44 39.86,90.33 39.85,90.22 L62.23,77.3 C62.97,77.83 63.87,78.14 64.84,78.14 L65.07,78.14 C67.55,78.14 69.57,76.13 69.57,73.64 L69.57,73.41 C69.57,71.56 68.45,69.98 66.86,69.28 L66.86,43.48 C68.46,42.79 69.58,41.21 69.58,39.36 Z M63.06,68.57 C60.93,65.08 57.31,61.29 52.88,57.61 C51.86,58.42 50.82,59.22 49.77,60 C55.44,64.65 59.09,68.96 60.58,72 C60.43,72.44 60.35,72.92 60.35,73.41 L60.35,73.64 C60.35,73.75 60.36,73.87 60.37,73.98 L38,86.89 C37.43,86.48 36.75,86.2 36.02,86.1 C33.19,81.42 30.48,70.81 30.48,56.38 C30.48,54.14 30.55,52 30.67,49.96 C29.39,49.32 28.16,48.73 26.97,48.2 C26.77,50.89 26.67,53.64 26.67,56.38 C26.67,67.99 28.45,79.69 31.9,86.52 L11.3,74.62 C15.15,74.62 20.16,73.43 25.75,71.25 C25.57,69.97 25.42,68.66 25.3,67.34 C17.93,70.33 12.26,71.25 9.25,70.64 C8.79,70.05 8.19,69.58 7.5,69.28 L7.5,43.48 C8.2,43.18 8.8,42.7 9.26,42.12 C13.87,41.2 24.68,43.84 38.26,51.96 C40.07,53.04 41.78,54.14 43.39,55.23 C44.54,54.43 45.62,53.63 46.64,52.85 C44.57,51.4 42.41,50.01 40.21,48.69 C29.06,42.03 18.27,38.15 11.31,38.14 L31.92,26.24 C30.11,29.83 28.76,34.76 27.89,40.31 C29.07,40.8 30.28,41.33 31.51,41.9 C32.55,34.84 34.27,29.59 36.04,26.66 C36.77,26.56 37.45,26.28 38.02,25.87 L60.39,38.78 C60.38,38.89 60.37,39 60.37,39.12 L60.37,39.35 C60.37,39.85 60.45,40.32 60.6,40.77 C58.26,45.54 50.62,53.41 38.26,60.8 C36.34,61.95 34.47,62.99 32.66,63.92 C32.76,65.34 32.89,66.7 33.03,68 C35.38,66.83 37.78,65.51 40.2,64.07 C50.05,58.18 59.11,50.66 63.07,44.2 L63.07,68.57 L63.06,68.57 Z" stroke="currentColor" stroke-width="3.5" stroke-linejoin="round"/>' },
+  erigon: { box: '0 0 1024 1024', body: '<polygon points="512 576 288 480 416 617.14 288 672 288 960 512 720 736 960 736 672 608 617.14 736 480 512 576"/><polygon points="736 416 512 64 288 416 512 512 736 416"/>' },
+  nethermind: { box: '0 0 160 81', body: '<path d="M152.844 27.4198L131.751 33.9283C129.055 26.9958 122.21 22.1786 114.346 22.4355C110.704 22.5545 107.354 23.7533 104.579 25.6996L88.3179 10.4044C95.071 4.42228 103.877 0.66362 113.6 0.345997C129.415 -0.170665 143.39 8.55138 150.331 21.641C150.344 21.6696 150.362 21.698 150.375 21.7224C150.689 22.3211 150.994 22.9241 151.279 23.5361C151.863 24.7968 152.382 26.0805 152.84 27.4158L152.844 27.4198Z"/><path d="M67.393 69.4134C61.688 74.7241 54.415 78.3977 46.289 79.6477C45.4874 79.7755 44.6715 79.8708 43.8546 79.9496C43.3599 80.0021 42.8641 80.0381 42.3638 80.0661C42 80.0864 41.6315 80.0987 41.2716 80.1146C41.0313 80.1198 40.7866 80.121 40.5461 80.122C40.3348 80.1255 40.1278 80.1329 39.9158 80.1241C39.783 80.1232 39.6546 80.1262 39.5216 80.1212C39.3059 80.1208 39.0943 80.1202 38.8821 80.1072C38.3379 80.092 37.7971 80.0641 37.2518 80.0283C36.9148 80.0098 36.581 79.9745 36.2475 79.9434C35.9514 79.9143 35.6594 79.885 35.363 79.8518C35.2335 79.8342 35.1124 79.8202 34.9828 79.8026C34.7405 79.7705 34.494 79.7387 34.2555 79.7023C19.7107 77.5669 7.54583 67.5493 2.53369 53.9312L23.5467 46.8945C26.3691 53.8352 33.3644 58.5525 41.27 58.1108C44.8755 57.9094 48.1693 56.6556 50.8871 54.6712L67.385 69.418L67.393 69.4134Z"/><path d="M22.2614 41.1133C22.0143 36.6906 23.3843 32.555 25.8555 29.2741L9.26597 14.4453C7.48608 16.5888 5.92838 18.9231 4.61514 21.4013L3.96542 22.6897C2.57121 25.5746 1.51978 28.6559 0.848569 31.8611C0.144781 35.2257 -0.137448 38.7119 0.06298 42.2996C0.234544 45.3706 0.745369 48.3522 1.58464 51.1994L22.6967 44.153C22.4715 43.1664 22.3194 42.1507 22.2612 41.1091L22.2614 41.1133Z"/><path d="M39.2629 22.1012C40.309 22.0428 41.3356 22.0808 42.3415 22.1946L46.8779 0.567432C43.9549 0.0673437 40.9338 -0.108012 37.8452 0.064548C34.2686 0.264366 30.8219 0.93374 27.567 1.99044C24.443 3.01495 21.4936 4.41944 18.7686 6.12651L17.6005 6.89663C15.271 8.4821 13.1237 10.2854 11.1919 12.3089L27.764 27.122C30.7671 24.2302 34.7769 22.356 39.2673 22.1051L39.2629 22.1012Z"/><path d="M54.744 29.3463L56.1314 30.6453L70.7842 14.295C69.9186 13.2778 69.0008 12.2925 68.0399 11.3511L66.8106 10.2091C66.8106 10.2091 66.8099 10.1967 66.7975 10.1974C64.3571 8.01601 61.6301 6.12428 58.7072 4.58763L57.4903 3.96321C55.035 2.77774 52.4022 1.83023 49.6845 1.14453L45.1553 22.7506C49.0194 23.8366 52.3817 26.1862 54.7401 29.3507L54.744 29.3463Z"/><path d="M100.479 51.2404L98.6555 49.4609L83.6406 65.4714C84.4783 66.5085 85.3606 67.5152 86.299 68.462L87.5019 69.6446C87.5019 69.6446 87.5143 69.6442 87.5147 69.6566C89.9205 71.8934 92.5865 73.8483 95.473 75.4522L96.6746 76.088C99.1189 77.346 101.712 78.3548 104.413 79.0991L109.447 57.6367C105.833 56.4832 102.706 54.2203 100.479 51.2363L100.479 51.2404Z"/><path d="M127.097 53.7737C124.035 56.5701 119.999 58.3339 115.529 58.4799C114.411 58.5164 113.315 58.4446 112.249 58.2847L107.215 79.7388C110.126 80.3065 113.142 80.5517 116.23 80.4508C119.81 80.3339 123.271 79.7445 126.55 78.7634C129.697 77.8115 132.678 76.4757 135.442 74.8322L136.627 74.0893C138.993 72.5582 141.181 70.805 143.159 68.8268L127.097 53.7695L127.097 53.7737Z"/><path d="M153.668 30.1722L132.574 36.6725C132.795 37.709 132.933 38.7773 132.969 39.8696C133.114 44.3216 131.629 48.4458 129.054 51.6778L145.133 66.7346C146.962 64.6329 148.573 62.3353 149.944 59.8882L150.623 58.6151C152.084 55.7633 153.223 52.7066 153.967 49.5012C154.737 46.1667 155.096 42.6881 154.978 39.0967C154.877 36.006 154.436 33.0299 153.663 30.1641L153.668 30.1722Z"/>' },
+};
+
 
 const el = (tag, attrs = {}, parent) => {
   const n = document.createElementNS(NS, tag);
@@ -66,6 +88,10 @@ export class River {
       el('rect', { width: 2, height: 6, fill }, p);
     };
     hatch('hatch', 'rgba(0,0,0,0.18)'); hatch('hatch-red', 'rgba(224,67,61,0.55)');
+    for (const [client, logo] of Object.entries(LOGOS)) {
+      const sym = el('symbol', { id: 'logo-' + client, viewBox: logo.box, fill: 'currentColor' }, this.defs);
+      sym.innerHTML = logo.body;
+    }
     const marker = (id, color) => {
       const m = el('marker', { id, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, this.defs);
       el('path', { d: 'M0,0 L10,5 L0,10 z', fill: color }, m);
@@ -302,7 +328,12 @@ export class River {
       // ghost of the node at the tip it left
       const ghost = el('g', { class: 'ghost', transform: `translate(${xo + 16},${yo})` }, g);
       el('circle', { r: CHIP_R - 1, class: 'ghost-body' }, ghost);
-      el('text', { y: 4, 'text-anchor': 'middle', class: 'ghost-label' }, ghost).textContent = r.node;
+      const ghostClient = (s.nodes.find(n => n.id === r.node) || {}).client;
+      if (LOGOS[ghostClient]) {
+        const gs = CHIP_R * 1.3;
+        el('use', { href: '#logo-' + ghostClient, class: 'ghost-logo', x: -gs / 2, y: -gs / 2, width: gs, height: gs }, ghost);
+        el('text', { x: CHIP_R - 2, y: CHIP_R, 'text-anchor': 'middle', class: 'ghost-label small' }, ghost).textContent = r.node;
+      } else el('text', { y: 4, 'text-anchor': 'middle', class: 'ghost-label' }, ghost).textContent = r.node;
       if (xn - xa >= 110) {
         const label = el('text', { x: xn - 8, y: yc + (side > 0 ? 12 : -5), class: 'move-label', 'text-anchor': 'end' }, g);
         label.textContent = `${r.node} ⤺${r.depth} ▸+${r.added}${r.crosses_istar ? ' ↩I*' : ''}`;
@@ -334,7 +365,15 @@ export class River {
           chip = el('g', { id, class: 'chip', 'data-tip': 'node:' + n.id }, g);
           el('circle', { r: CHIP_R, class: 'chip-body' }, chip);
           el('circle', { r: CHIP_R + 3, class: 'chip-istar' }, chip);
-          el('text', { class: 'chip-label', y: 4, 'text-anchor': 'middle' }, chip).textContent = n.id;
+          if (LOGOS[n.client]) {
+            const s = CHIP_R * 1.5;
+            el('use', { href: '#logo-' + n.client, class: 'chip-logo', x: -s / 2, y: -s / 2, width: s, height: s }, chip);
+            const badge = el('g', { class: 'chip-badge' }, chip);
+            el('circle', { r: 5.5, cx: CHIP_R - 1, cy: CHIP_R - 1, class: 'chip-badge-body' }, badge);
+            el('text', { x: CHIP_R - 1, y: CHIP_R + 1.6, 'text-anchor': 'middle', class: 'chip-badge-label' }, badge).textContent = n.id;
+          } else {
+            el('text', { class: 'chip-label', y: 4, 'text-anchor': 'middle' }, chip).textContent = n.id;
+          }
           chip.setAttribute('transform', `translate(${x},${y})`);
         }
         // slide only when the head moved; pan/zoom re-renders snap
@@ -343,6 +382,8 @@ export class River {
         chip.setAttribute('transform', `translate(${x},${y})`);
         const body = chip.querySelector('.chip-body');
         body.setAttribute('fill', PHASE[n.phase] || PHASE.unknown);
+        const logo = chip.querySelector('.chip-logo');
+        if (logo) logo.setAttribute('color', glyphInk(n.phase));
         body.setAttribute('stroke', seg ? segHue(seg) : '#222');
         body.classList.toggle('unreachable', n.status !== 'ok');
         chip.querySelector('.chip-istar').setAttribute('class', 'chip-istar ' + n.istar);
@@ -405,7 +446,8 @@ export class River {
       }
       const label = el('g', { class: 'strip-label', transform: `translate(6,${y + 15})` }, g);
       el('rect', { x: -4, y: -12, width: 168, height: 17, rx: 3, fill: 'rgba(255,255,255,0.85)' }, label);
-      el('text', { class: 'strip-text' }, label).textContent = `${n.id}  #${n.head_number}  lag ${n.lag}`;
+      if (LOGOS[n.client]) el('use', { href: '#logo-' + n.client, class: 'strip-logo', x: -2, y: -10, width: 11, height: 11 }, label);
+      el('text', { class: 'strip-text', x: LOGOS[n.client] ? 13 : 0 }, label).textContent = `${n.id}  #${n.head_number}  lag ${n.lag}`;
       this.peerBars(label, 118, n.el_peers, 3, '#4c8dff'); this.peerBars(label, 144, n.cl_peers, 3, '#8a5cff');
       if (n.status !== 'ok') el('rect', { x: 0, y, width, height: STRIP_ROW - 3, fill: 'url(#hatch-red)', rx: 3 }, g);
     });

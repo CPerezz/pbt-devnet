@@ -22,6 +22,8 @@ export function syntheticLap(nowSlot) {
   const T = 300, FINALITY_LAG = 30, SLOT_SECONDS = 6;
   const stake = { 1: 0.2, 2: 0.4, 3: 0.2, 4: 0.2 };
   const nodes = [1, 2, 3, 4];
+  // The migration profile's own layout, so the preview shows the marks the live page does.
+  const CLIENTS = ['geth', 'erigon', 'geth', 'besu'];
 
   const plan = [
     { name: 'deep-1', class: 'deep', victims: [2], start: 40, end: 72 },
@@ -139,7 +141,7 @@ export function syntheticLap(nowSlot) {
     const phase = nowSlot < T ? (n === 3 && nowSlot < 20 ? 'following' : 'synced') : (nowSlot < T + 60 ? 'window' : 'done');
     const lag = nowSlot < T ? (n === 3 ? 3 : 0) : 0;
     return {
-      id: n, name: `el-${n}-geth-lighthouse`, head: headBlock.hash, head_number: headBlock.number, head_slot: headBlock.slot, segment: seg.id,
+      id: n, name: `el-${n}-${CLIENTS[n - 1]}-lighthouse`, client: CLIENTS[n - 1], head: headBlock.hash, head_number: headBlock.number, head_slot: headBlock.slot, segment: seg.id,
       phase, cursor_number: headBlock.number - lag, cursor_hash: headBlock.hash, lag, cursor_detached: false,
       istar: nowSlot < T ? 'none' : (finalized >= T ? 'final' : (istarByNode[n] || 'provisional')),
       el_peers: isolated ? 0 : 3, cl_peers: isolated ? 0 : 3, finalized_slot: isolated ? Math.max(0, seg.first_slot - 5) : finalized,

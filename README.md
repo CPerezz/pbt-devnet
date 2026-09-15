@@ -84,7 +84,8 @@ make ui-preview   # the monitor page on a synthetic lap, no enclave needed
 
 The migration monitor draws the chain on a slot axis: canonical chain on lane 0, every competing
 branch on its own lane, blocks coloured by their primary root (merkle blue before I\*, binary
-orange after) and ringed by cross-node agreement on the shadow root. Node chips ride their heads;
+orange after) and ringed by cross-node agreement on the shadow root. Node chips ride their heads,
+each carrying its client's mark and its participant number;
 a reorg leaves a rewind arrow to the common ancestor, a catch-up arrow along the winner and a ghost
 of the node at the tip it left. Partitions and the schedule sit on the same axis. Hover a block for
 its roots, click to pin it in the inspector. Dora is the consensus-side view (finality, proposers);
