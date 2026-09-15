@@ -15,9 +15,23 @@ const PHASE = {
   done: '#ff8a1f', stalled: '#e0433d', opaque: '#5a5a5a', unknown: '#c8c8c8',
 };
 
+// What the client's own migration RPC says it is doing. Before I* the binary
+// direction decides the phase, after I* the merkle one, which is why the same
+// word means a different tree on each side of the fork (feeds.go:179-240).
+const PHASE_DOC = {
+  following: 'Before I*: building the binary tree in the background, still behind the head.',
+  synced: 'Before I*: the binary tree is built and keeping up with the head.',
+  parked: 'Nothing is being built - the deciding direction is idle.',
+  window: 'After I*: the binary tree is now the primary root AND the merkle tree is still kept as a shadow. The retirement window is open, which is the only time the two can be cross-checked.',
+  done: 'Retired: the client dropped the other tree, which geth does once its fork block finalizes.',
+  stalled: 'The migration direction reported an error and stopped.',
+  opaque: 'This client has no migration RPC at all, so it has no phase to report. Not the same as "unknown".',
+  unknown: 'The client stopped answering, so nothing is known about its phase.',
+};
+
 const COLS = [
   ['client', 'which implementation, and the participant number it runs as'],
-  ['phase', 'where this client is in the migration'],
+  ['phase', 'what the client migration RPC says it is doing: before I* the binary direction decides, after I* the merkle one. Hover a cell for that phase.'],
   ['head', 'its head, and how far that is from the compared height'],
   ['hash', 'its canonical block hash at the compared height'],
   ['header root', 'the root in that block header - the primary root (MPT before I*, PBT after)'],
@@ -26,6 +40,18 @@ const COLS = [
   ['peers', 'EL / CL peer counts'],
   ['verdict', 'the worst thing true of this row'],
 ];
+
+// Verdict -> the bar on the row's left edge. `exception` splits by whether the
+// devnet asked for the disagreement.
+const ROW_BAR = {
+  ok: 'row-ok',
+  partial: 'row-partial',
+  absent: 'row-absent',
+  fork: 'exception',
+  'header-dissent': 'exception',
+  'shadow-dissent': 'exception',
+  'istar-dissent': 'exception',
+};
 
 // State -> cell rendering. Values absent for a reason read as that reason;
 // only a real disagreement gets a fill.
@@ -109,6 +135,7 @@ function paintRow(tr, n, r, c) {
   setText(phase, n.phase + (n.isolated ? ' · cut off' : ''));
   phase.style.setProperty('--dot', PHASE[n.phase] || '#c8c8c8');
   setClass(phase, 'phase');
+  phase.title = (PHASE_DOC[n.phase] || '') + (n.isolated ? '\nCut off right now: this node is a partition victim.' : '');
 
   const ahead = r.ahead === undefined ? '' : r.ahead === 0 ? 'at' : r.ahead > 0 ? `+${r.ahead}` : `${r.ahead}`;
   setText(head, n.head_number ? `#${n.head_number} ${ahead}` : '–');
@@ -127,9 +154,12 @@ function paintRow(tr, n, r, c) {
   setClass(verdict, r.verdict && r.verdict !== 'ok' && r.verdict !== 'partial' ? (r.expected ? 'warn' : 'bad') : 'muted');
   verdict.title = r.why || '';
 
-  // The row itself carries the exception so a glance down the table finds it.
-  setClass(tr, r.verdict && r.verdict !== 'ok' && r.verdict !== 'partial' && r.verdict !== 'absent'
-    ? (r.expected ? 'row-warn' : 'row-bad') : '');
+  // The bar on the left states the row at a glance: green nothing wrong, pale
+  // green nothing wrong but nothing cross-checkable either, grey no answer,
+  // amber a disagreement the devnet asked for, red one nobody asked for.
+  setClass(tr, ROW_BAR[r.verdict] === undefined ? ''
+    : ROW_BAR[r.verdict] === 'exception' ? (r.expected ? 'row-warn' : 'row-bad')
+      : ROW_BAR[r.verdict]);
 }
 
 function cell(td, value, state, r) {
