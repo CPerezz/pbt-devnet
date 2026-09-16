@@ -89,7 +89,7 @@ make ui           # every URL: the migration monitor, dora, spamoor, disruptoor,
 make ui-preview   # the monitor page on a synthetic lap, no enclave needed
 ```
 
-![the migration monitor on a synthetic lap](docs/migration-monitor.gif)
+![the monitor through I\* and the post-fork scenarios, on a synthetic lap](docs/migration-monitor.gif)
 
 The migration monitor draws the chain on a slot axis: canonical chain on lane 0, every competing
 branch on its own lane, blocks coloured by their primary root (merkle blue before I\*, binary
