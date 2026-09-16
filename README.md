@@ -45,8 +45,9 @@ island rather than measure a forked majority.
 
 Nethermind builds as `nethermind-pbt:local` directly from the `pbt-state` branch of
 [`NethermindEth/nethermind`](https://github.com/NethermindEth/nethermind/tree/pbt-state), or from
-a local checkout named by `PBT_NETHERMIND_SRC`. Here its PBT backend is enabled explicitly with
-`--Pbt.Enabled=true`, not by `binaryTrieTime`; `--Sync.FastSync=false` selects full sync.
+a local checkout named by `PBT_NETHERMIND_SRC`. `--Pbt.Enabled=true` switches its PBT backend on in
+every profile; the chainspec decides the mode - binary tree from genesis here, a flat-to-PBT
+migration when `binaryTrieTime` is after genesis. `--Sync.FastSync=false` selects full sync.
 
 ## Live migration
 
@@ -61,9 +62,10 @@ The chain starts on the merkle trie with `binaryTrieTime` 1800 s (smoke: 780 s) 
 merkle root, from it on the binary root. Each client builds the binary tree in the background -
 geth from block-level access lists, erigon by folding both commitment domains from `erigon init`
 (`COMMITMENT_HEX_BIN=true`), Nethermind by mirroring its flat state into the PBT backend
-(`--Pbt.MigrationEnabled`, anchor bootstrapped from the genesis allocation), besu by swapping the
-trie per header - and geth keeps the merkle side as a shadow after I\* until the first post-fork
-block finalizes. Participants 1 and 3 run geth, 2 erigon, 4 besu, 5 Nethermind.
+(`--Pbt.Enabled`, the chainspec's `binaryTrieTime` selecting the migration, anchor bootstrapped
+from the genesis allocation), besu by swapping the trie per header - and geth and Nethermind keep
+the merkle side as a shadow after I\* until the first post-fork block finalizes. Participants 1 and 3
+run geth, 2 erigon, 4 besu, 5 Nethermind.
 
 The bootnode (participant 1) anchors 29% of the stake and is never partitioned, so every heal
 converges on its chain; the four lights hold 18% each. What a lap does:
