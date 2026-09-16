@@ -1,11 +1,13 @@
-# Full-lifecycle EIP-8347 migration devnet: the chain starts on the merkle trie; geth on 1
-# builds the binary tree in the background, erigon on 2 folds both tries from init, Nethermind
-# on 3 mirrors flat state into its PBT backend, besu on 4 swaps per header, and all switch at binaryTrieTime = amsterdam_time + fork_offset_seconds;
+# Full-lifecycle EIP-8347 migration devnet: the chain starts on the merkle trie; geth on 1 and 3
+# builds the binary tree in the background, erigon on 2 folds both tries from init, besu on 4
+# swaps per header, Nethermind on 5 mirrors flat state into its PBT backend, and all switch at
+# binaryTrieTime = amsterdam_time + fork_offset_seconds;
 # reorgs run before, across and after the fork. `make migration` drives it end to end.
 # Non-pbt_* keys are ethereum-package schema.
 
 # Validator stake is rendered by main.star from pbt_migration.anchor_node: the bootnode
-# anchors 40% and is never partitioned; the lights it forces back onto its chain hold 20% each.
+# anchors 29% (224 validators) and is never partitioned; the four lights it forces back onto
+# its chain hold 18% each (136), so a pair (35%) still stalls finality without winning a heal.
 participants:
   # Participant 1 is the bootnode (no --boot-nodes of its own) and is never disrupted.
   - el_type: geth
@@ -22,15 +24,12 @@ participants:
     checkpoint_sync_enabled: false
     el_extra_env_vars: {COMMITMENT_HEX_BIN: "true"}
 
-  # Participant 3 is Nethermind: flat (merkle) state mirrored into its PBT backend
-  # before I*, PBT alone from I* on, with the PBT anchor bootstrapped from the MPT
-  # genesis allocation rather than an exported snapshot.
-  - el_type: nethermind
-    el_image: nethermind-pbt:local
+  - el_type: geth
+    el_image: pbt-geth:local
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    el_extra_params: ["--Pbt.MigrationEnabled=true", "--Pbt.MigrationGenesisBootstrap=true", "--Sync.FastSync=false"]
+    el_extra_params: ["--cache.preimages", "--syncmode=full"]
 
   # Participant 4 is besu: it starts on the merkle trie like the others and switches
   # at binaryTrieTime. No --data-storage-format: that fixes the format for the whole
@@ -42,6 +41,16 @@ participants:
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
     el_extra_params: ["--reorg-logging-threshold=0"]
+
+  # Participant 5 is Nethermind: flat (merkle) state mirrored into its PBT backend
+  # before I*, PBT alone from I* on, with the PBT anchor bootstrapped from the MPT
+  # genesis allocation rather than an exported snapshot.
+  - el_type: nethermind
+    el_image: nethermind-pbt:local
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    checkpoint_sync_enabled: false
+    el_extra_params: ["--Pbt.MigrationEnabled=true", "--Pbt.MigrationGenesisBootstrap=true", "--Sync.FastSync=false"]
 
 network_params:
   # "kurtosis" is the only network name for which the geth launcher picks full sync.
@@ -118,6 +127,8 @@ pbt_chaos:
 # pbt_migration: fork offset and chaos schedule. 1800s = 300 slots at 6s.
 pbt_migration:
   enabled: true
+  anchor_validators: 224
+  light_validators: 136
   fork_offset_seconds: 1800
   chaos_profile: composite
   post_op: deep-pair
