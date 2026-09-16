@@ -9,7 +9,7 @@ patches: the tree comes in through supported configuration and a genesis-generat
 | scenario | command | what it tests |
 |---|---|---|
 | **tree at genesis** | `make tree-at-genesis` | EIP-8297: two geth, two besu, two erigon and one Nethermind, with each pair configured differently, start on the binary tree and stay in agreement through forced reorgs and state scenarios |
-| **live migration** | `make migration`, `make migration-smoke` | EIP-8347: geth, erigon, Nethermind and besu start on the merkle trie, build the tree in the background and switch at `binaryTrieTime`, with partitions before, across and after the switch |
+| **live migration** | `make migration`, `make migration-smoke` | EIP-8347: two geth, erigon, besu and Nethermind start on the merkle trie, build the tree in the background and switch at `binaryTrieTime`, with partitions before, across and after the switch |
 
 Args files: `args/tree-at-genesis.yaml`, `args/migration.yaml`, `args/migration-smoke.yaml`.
 `make help` lists every target, grouped.
@@ -63,14 +63,14 @@ geth from block-level access lists, erigon by folding both commitment domains fr
 (`COMMITMENT_HEX_BIN=true`), Nethermind by mirroring its flat state into the PBT backend
 (`--Pbt.MigrationEnabled`, anchor bootstrapped from the genesis allocation), besu by swapping the
 trie per header - and geth keeps the merkle side as a shadow after I\* until the first post-fork
-block finalizes. Participant 1 runs geth, 2 erigon, 3 Nethermind, 4 besu.
+block finalizes. Participants 1 and 3 run geth, 2 erigon, 4 besu, 5 Nethermind.
 
-The bootnode (participant 1) anchors 40% of the stake and is never partitioned, so every heal
-converges on its chain; the three lights hold 20% each. What a lap does:
+The bootnode (participant 1) anchors 29% of the stake and is never partitioned, so every heal
+converges on its chain; the four lights hold 18% each. What a lap does:
 
 | phase | migration | migration-smoke |
 |---|---|---|
-| before I\* | two deep partitions on a pair of lights (40%: finality stalls, the pair still loses, depth >= 10), a short one on a light, node 4 restarted in the gap | one short |
+| before I\* | two deep partitions on a pair of lights (35%: finality stalls, the pair still loses, depth >= 10), a short one on a light, node 4 restarted in the gap | one short |
 | across I\* | every light on its own island from I\*-120 s, healed at I\*+60 s once each has crossed on its own block (at I\*+180 s regardless): each light rewinds below I\* and re-crosses on the anchor's block | same |
 | after I\* | a partition inside the open migration window; once every client reports done, a deep pair, then the six state scenarios on the finished tree | a short, then the scenarios |
 
@@ -100,7 +100,7 @@ terminal.
 
 ## Adding another execution client
 
-The migration profiles run geth, erigon, Nethermind and besu; `main.star` refuses any other client at plan time
+The migration profiles run geth, erigon, besu and Nethermind; `main.star` refuses any other client at plan time
 (`MIGRATION_READY_CLIENTS`). A client needs:
 
 1. **A scheduled fork**: start on the merkle trie, read `binaryTrieTime` from genesis.json, switch

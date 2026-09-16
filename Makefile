@@ -30,7 +30,7 @@ help:
 tree-at-genesis: ## Scenarios: EIP-8297 - geth, besu and erigon on the tree from block 0, reorged on purpose
 	$(MAKE) up ARGS=args/tree-at-genesis.yaml
 
-migration: ## Scenarios: EIP-8347 - geth, erigon, Nethermind and besu switch to the tree at binaryTrieTime; one full lap, judged (~1 h)
+migration: ## Scenarios: EIP-8347 - two geth, erigon, besu and Nethermind switch to the tree at binaryTrieTime; one full lap, judged (~1 h)
 	$(MAKE) lap ARGS=args/migration.yaml
 
 migration-smoke: ## Scenarios: the short migration lap (~45 min)
