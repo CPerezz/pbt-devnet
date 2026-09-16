@@ -40,14 +40,16 @@ participants:
     el_extra_params: ["--reorg-logging-threshold=0"]
 
   # Participant 5 is Nethermind: flat (merkle) state mirrored into its PBT backend
-  # before I*, PBT alone from I* on, with the PBT anchor bootstrapped from the MPT
-  # genesis allocation rather than an exported snapshot.
+  # before I*; PBT canonical from I* on, with the merkle side kept as a shadow until
+  # the fork block finalizes (EIP-8347 wants both trees through the transition window),
+  # and the PBT anchor bootstrapped from the MPT genesis allocation rather than an
+  # exported snapshot.
   - el_type: nethermind
     el_image: nethermind-pbt:local
     cl_type: lighthouse
     cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
     checkpoint_sync_enabled: false
-    el_extra_params: ["--Pbt.MigrationEnabled=true", "--Pbt.MigrationGenesisBootstrap=true", "--Sync.FastSync=false"]
+    el_extra_params: ["--Pbt.Enabled=true", "--Pbt.MigrationGenesisBootstrap=true", "--Sync.FastSync=false"]
 
 network_params:
   # "kurtosis" is the only network name for which the geth launcher picks full sync.
