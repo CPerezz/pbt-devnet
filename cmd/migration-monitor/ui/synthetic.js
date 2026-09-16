@@ -1,28 +1,32 @@
-// Synthetic lap: a scripted four-node migration run that exercises every
+// Synthetic lap: a scripted five-node migration run that exercises every
 // glyph the page draws. Deterministic (seeded), so a review compares the
 // same picture; produces the same snapshot shape /api/state will serve.
 //
 // The schedule below is not invented: it is what
 // migsched.Resolve("composite", genesis, genesis+1800s, {anchor 1, lights
-// 2,3,4}) actually returns for the devnet's own defaults, slot for slot.
-// Stake likewise - the anchor holds 256 validators against 128 per light
-// (main.star DEFAULT_MIGRATION), so no light outweighs it and a pair stalls
-// finality without winning.
+// 2,3,4,5}) actually returns for the devnet's own defaults, slot for slot.
+// Stake likewise - the anchor holds 224 validators against 136 per light
+// (args/migration.yaml), so no light outweighs it and a pair of them (35%)
+// stalls finality without being able to win the heal.
+//
+// The client layout is the migration profile's own: geth on 1 and 3, erigon
+// on 2, besu on 4, Nethermind on 5. Besu reports no migration progress, so it
+// reads `opaque` for the whole lap rather than a phase it cannot know.
 //
 // Timeline (slots, 6s each), I* at 300: deep on the pair 2+3 (40-71) and the
 // pair 3+4 (90-121), each pair sharing ONE branch; short on node 2 (131-156);
 // node 4 restarted at 180, the lap's crash drill; the straddle (280-310)
 // isolating every light from everyone INCLUDING each other, so each crosses
-// I* on its own block - four candidates, three orphaned; window partition on
+// I* on its own block - five candidates, four orphaned; window partition on
 // node 3 (350-375); then the post-quiesce scenarios, which are unscheduled
 // and so reach the page as class `scenario` with no planned band.
 //
 // Divergence is lazy, as it is on the wire: a cut-off node keeps the head it
 // had and only leaves the canonical chain when it proposes. In the lap this
-// page mirrors, the straddle isolated 2, 3 and 4 in the same instant and
-// their heads peeled off 1, 4 and 5 slots later.
+// page mirrors, the straddle isolated every light in the same instant and
+// their heads peeled off one to five slots later.
 //
-// One injected shadow-root split at block #150 (node 4 dissents).
+// One injected shadow-root split at block #150 (node 5 dissents).
 
 export function syntheticLap(nowSlot) {
   let seed = 7;
@@ -36,24 +40,25 @@ export function syntheticLap(nowSlot) {
   };
 
   const T = 300, FINALITY_LAG = 30, SLOT_SECONDS = 6;
-  const stake = { 1: 0.4, 2: 0.2, 3: 0.2, 4: 0.2 };
-  const nodes = [1, 2, 3, 4];
+  // 224 validators on the anchor, 136 on each of the four lights: 768 total.
+  const stake = { 1: 224 / 768, 2: 136 / 768, 3: 136 / 768, 4: 136 / 768, 5: 136 / 768 };
+  const nodes = [1, 2, 3, 4, 5];
   // The migration profile's own layout, so the preview shows the marks the live page does.
-  const CLIENTS = ['geth', 'erigon', 'geth', 'besu'];
+  const CLIENTS = ['geth', 'erigon', 'geth', 'besu', 'nethermind'];
 
   // The five scheduled ops, verbatim from the resolver.
   const plan = [
     { name: 'mig-composite-1', class: 'deep', victims: [2, 3], start: 40, end: 71 },
     { name: 'mig-composite-2', class: 'deep', victims: [3, 4], start: 90, end: 121 },
     { name: 'mig-composite-3', class: 'short', victims: [2], start: 131, end: 156 },
-    { name: 'mig-composite-4', class: 'straddle', victims: [2, 3, 4], start: 280, end: 310, mutual: true },
+    { name: 'mig-composite-4', class: 'straddle', victims: [2, 3, 4, 5], start: 280, end: 310, mutual: true },
     { name: 'mig-composite-5', class: 'window', victims: [3], start: 350, end: 375 },
   ];
   // Post-quiesce scenarios: pbtchaos isolates one node in rotation to a bounded
   // depth. They are not in the schedule, which is exactly why the monitor
   // classes them `scenario` (feeds.go:151-162) - so they get no planned band.
   const unscheduled = [
-    { name: 'code-sole', class: 'scenario', victims: [4], start: 400, end: 413 },
+    { name: 'code-sole', class: 'scenario', victims: [5], start: 400, end: 413 },
     { name: 'account', class: 'scenario', victims: [2], start: 430, end: 443 },
     { name: 'storage-del', class: 'scenario', victims: [3], start: 460, end: 473 },
   ];
@@ -165,20 +170,25 @@ export function syntheticLap(nowSlot) {
 
   // Shadow roots: everything ≥12 slots old that the majority holds agrees,
   // fresher blocks are partial/pending; one injected dissent for the legend.
+  // besu has no shadow RPC, so it never reports one - counting it as a holder
+  // that simply has not answered yet would make a permanent contract look like
+  // a transient gap.
+  const reportsShadow = (n) => CLIENTS[n - 1] !== 'besu';
   for (const b of blocks) {
     const age = nowSlot - b.slot;
     const seg = segments.find(s => s.id === b.segment);
     const shadow = hex(b.format === 'mpt' ? 'pbt-shadow' : 'mpt-shadow', b.number);
     if (seg.state === 'orphaned') { b.agreement = 'gone'; continue; }
-    const holders = seg.holders;
+    const holders = seg.holders.filter(reportsShadow);
+    if (holders.length === 0) { b.agreement = 'pending'; continue; } // only besu holds it: nothing to cross-check
     if (holders.length === 1) { b.agreement = age > 4 ? 'single' : 'pending'; if (age > 4) b.shadow_roots[holders[0]] = shadow; continue; }
     if (age > 12) { b.agreement = 'all'; holders.forEach(n => b.shadow_roots[n] = shadow); }
     else if (age > 4) { b.agreement = 'partial'; holders.slice(0, 2).forEach(n => b.shadow_roots[n] = shadow); }
   }
   const splitAt = blocks.find(b => b.segment === 's0' && b.number === 150);
   if (splitAt) {
-    splitAt.agreement = 'split'; splitAt.shadow_roots[4] = hex('x', 150); splitAt.dissent = [4];
-    alerts.push({ slot: splitAt.slot, kind: 'critical', node: 4, expected: false, detail: 'PBT shadow root mismatch at block #150 (node 4 vs majority)' });
+    splitAt.agreement = 'split'; splitAt.shadow_roots[5] = hex('x', 150); splitAt.dissent = [5];
+    alerts.push({ slot: splitAt.slot, kind: 'critical', node: 5, expected: false, detail: 'PBT shadow root mismatch at block #150 (node 5 vs majority)' });
   }
 
   const finalized = Math.max(0, nowSlot - FINALITY_LAG);
@@ -219,7 +229,7 @@ export function syntheticLap(nowSlot) {
   // 168, an unexpected shadow dissent at 150-160 and an unexpected header
   // dissent at 330-345, plus whichever nodes are partitioned (expected).
   const compare = (() => {
-    const introspects = { 1: true, 2: true, 3: true, 4: false }; // besu has no migration RPC
+    const introspects = { 1: true, 2: true, 3: true, 4: false, 5: true }; // besu has no migration RPC
     const eligible = nodeViews.filter(v => v.status === 'ok' && !v.isolated && v.phase !== 'stalled');
     const empty = { height: 0, ref: '', ref_source: 'none', hash_agree: 0, hash_judged: 0, shadow_agree: 0, shadow_judged: 0, shadow_classes: 0, rows: [] };
     if (!eligible.length) return empty;
