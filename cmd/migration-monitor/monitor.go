@@ -346,9 +346,9 @@ func (w *splitWatch) observe(now time.Time, split bool, height uint64, detail st
 
 // sampleOnce drains queued heights first (reorg/fork-burst events), then
 // draws one random-depth sample behind the shallowest head.
-func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState, split *splitWatch, q *resampleQueue) {
+func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState, split *splitWatch, q *resampleQueue, off *offline) {
 	for _, h := range q.drain() {
-		sampleAt(ctx, log, states, split, q, h)
+		sampleAt(ctx, log, states, split, q, h, off)
 	}
 
 	var minHead uint64
@@ -365,15 +365,20 @@ func sampleOnce(ctx context.Context, log *migmon.Log, states []*nodeState, split
 	if depth > minHead {
 		return // nothing this deep in the chain yet
 	}
-	sampleAt(ctx, log, states, split, q, minHead-depth)
+	sampleAt(ctx, log, states, split, q, minHead-depth, off)
 }
 
 // sampleAt fetches every node's canonical hash and shadow root at height
-// and runs root-mismatch/reorg/null-persistence over the results.
-func sampleAt(ctx context.Context, log *migmon.Log, states []*nodeState, split *splitWatch, q *resampleQueue, height uint64) {
+// and runs root-mismatch/reorg/null-persistence over the results. A node
+// the offline swap has down or rewound is skipped: its silence or a stale
+// root here is expected, not a finding.
+func sampleAt(ctx context.Context, log *migmon.Log, states []*nodeState, split *splitWatch, q *resampleQueue, height uint64, off *offline) {
 	samples := make([]migmon.NodeSample, 0, len(states))
 	roots := make(map[string]string, len(states))
-	for _, ns := range states {
+	for i, ns := range states {
+		if off.quiet(i + 1) {
+			continue
+		}
 		hdr, err := ns.rpc.HeaderByNumber(ctx, height)
 		if err != nil || hdr == nil {
 			log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: ns.name, Number: height, Detail: fmt.Sprintf("sample header fetch: %v", err)})

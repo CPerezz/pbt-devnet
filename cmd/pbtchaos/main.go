@@ -213,11 +213,13 @@ type result struct {
 
 func main() {
 	var els, cls, keys, protect cli.MultiFlag
+	var observers cli.IntsFlag
 	api := flag.String("disruptoor", "", "disruptoor base URL (required)")
 	flag.Var(&els, "el", "execution client as name=rpcURL (repeatable)")
 	flag.Var(&cls, "cl", "consensus client as name=beaconURL (repeatable)")
 	flag.Var(&keys, "key", "prefunded sender private key (repeatable)")
 	flag.Var(&protect, "protect-node", "1-based node index never to disrupt (repeatable)")
+	flag.Var(&observers, "observer", "1-based index of a non-validating node; every partition keeps it with the majority (repeatable)")
 	listen := flag.String("listen", ":7800", "control API listen address")
 	slotSeconds := flag.Duration("slot-seconds", 12*time.Second, "seconds per slot")
 	validatorsPer := flag.Uint64("validators-per-node", 128, "validators assigned to each participant")
@@ -262,6 +264,7 @@ func main() {
 	}
 
 	d := disruptoor.New(*api, 15*time.Second)
+	d.Observers = observers
 	// A selector matching nothing is accepted, changes no traffic, and leaves a healthy
 	// chain behind -- the one failure that is indistinguishable from success. Refuse to
 	// start rather than report imaginary reorgs for the rest of the run.

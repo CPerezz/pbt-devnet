@@ -69,7 +69,7 @@ func newChainCollector(t *testing.T, genesis uint64, clients ...*chainClient) (*
 		_ = i
 		states = append(states, ns)
 	}
-	col := newCollector(states, nil, nil, nil, classifier(nil), 1, genesis, 6, genesis+1000, 900)
+	col := newCollector(states, nil, nil, nil, classifier(nil), 1, genesis, 6, genesis+1000, 900, nil)
 	var out strings.Builder
 	log := migmon.NewLog(io.MultiWriter(&out, col))
 	return col, log, &out
@@ -171,5 +171,72 @@ func TestCollectorDocument(t *testing.T) {
 	}
 	if s.Nodes[0].CursorNumber != 0 || s.Nodes[0].Lag != 0 {
 		t.Fatalf("node 1 without a follower cursor = %+v, want no cursor and no lag", s.Nodes[0])
+	}
+}
+
+// The document surfaces offline state once pushed: an exported producer
+// adds an anchor mark, and a consumer's pushed step reaches both its own
+// nodeView and the swap-queue row, in swap order.
+func TestCollectorOfflineDocument(t *testing.T) {
+	genesis := uint64(time.Now().Unix()) - 600
+	blocks := []*migmon.Header{{Hash: "g", Number: 0, Time: genesis}}
+	for i := 1; i <= 2; i++ {
+		blocks = append(blocks, &migmon.Header{Hash: "b" + string(rune('0'+i)), Parent: blocks[i-1].Hash, Number: uint64(i), Time: genesis + uint64(6*i)})
+	}
+	names := []string{"el-1-geth-lighthouse", "el-2-nethermind-lighthouse"}
+	n1 := &chainClient{shadowFake: shadowFake{name: names[0], introspects: true}, blocks: blocks, head: 2, shadowOK: true}
+	n2 := &chainClient{shadowFake: shadowFake{name: names[1], introspects: true}, blocks: blocks, head: 2, shadowOK: true}
+	var states []*nodeState
+	for _, c := range []*chainClient{n1, n2} {
+		ns := newNodeState(c.Name(), "http://127.0.0.1:1", genesis+1000)
+		ns.rpc = c
+		states = append(states, ns)
+	}
+	const miniOffline = `{"enabled":true,"export_after_seconds":10,"margin_seconds":5,
+ "producers":[{"node":1,"kind":"geth-convert","consumers":[2]}],
+ "consumers":[{"node":2,"expected_seconds":60,"timeout_seconds":300}],
+ "online_only":[]}`
+	off, err := parseOffline(miniOffline, names)
+	if err != nil {
+		t.Fatalf("parseOffline: %v", err)
+	}
+	col := newCollector(states, nil, nil, nil, classifier(nil), 1, genesis, 6, genesis+1000, 900, off)
+	var out strings.Builder
+	log := migmon.NewLog(io.MultiWriter(&out, col))
+	off.apply(log, 1, "exported", 1, "0xa1", "")
+	off.apply(log, 2, "replaying", 0, "", "")
+	col.tick(context.Background(), log)
+
+	var s apiState
+	if err := json.Unmarshal(col.document(), &s); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Anchors) != 1 || s.Anchors[0].Node != 1 || s.Anchors[0].Number != 1 || s.Anchors[0].Hash != "0xa1" {
+		t.Fatalf("anchors = %+v, want one mark for node 1 at #1/0xa1", s.Anchors)
+	}
+	if len(s.Swaps) != 1 || s.Swaps[0].Node != 2 || s.Swaps[0].Producer != 1 || s.Swaps[0].Importer != "replaying" {
+		t.Fatalf("swaps = %+v, want node 2 (producer 1) replaying", s.Swaps)
+	}
+	if s.Nodes[1].Importer != "replaying" || s.Nodes[1].Anchor != 1 {
+		t.Fatalf("node 2's view = %+v, want importer=replaying anchor=1", s.Nodes[1])
+	}
+	if !s.Nodes[0].Producer || s.Nodes[0].ProducerStep != "exported" {
+		t.Fatalf("node 1's view = %+v, want producer=true producer_step=exported", s.Nodes[0])
+	}
+}
+
+// --offline unset: the document must be byte-identical to before this
+// feature existed - no anchors/swaps keys, no per-node offline fields.
+func TestCollectorDocumentOfflineAbsent(t *testing.T) {
+	genesis := uint64(time.Now().Unix()) - 600
+	n1 := &chainClient{shadowFake: shadowFake{name: "el-1-geth-lighthouse", introspects: true},
+		blocks: []*migmon.Header{{Hash: "g", Number: 0, Time: genesis}}, head: 0, shadowOK: true}
+	col, log, _ := newChainCollector(t, genesis, n1)
+	col.tick(context.Background(), log)
+	doc := col.document()
+	for _, key := range []string{`"anchors"`, `"swaps"`, `"importer"`, `"producer"`, `"producer_step"`, `"importer_reason"`, `"step_detail"`} {
+		if strings.Contains(string(doc), key) {
+			t.Fatalf("document with --offline unset must not carry %s, got %s", key, doc)
+		}
 	}
 }

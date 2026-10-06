@@ -42,6 +42,7 @@ func main() {
 	var (
 		els       elFlag
 		protected cli.IntsFlag
+		observers cli.IntsFlag
 		api       = flag.String("disruptoor", "", "disruptoor native API base URL")
 		genesisTS = flag.Int64("genesis-time", 0, "chain genesis unix time")
 		forkTS    = flag.Int64("binary-trie-time", 0, "tree activation unix time")
@@ -56,6 +57,7 @@ func main() {
 	flag.Var(&keys, "key", "hex private key of a prefunded account for straddle state injection (repeatable; 2+ enables the injector)")
 	flag.Var(&els, "el", "execution client as name=url, repeatable; order is the participant index")
 	flag.Var(&protected, "protect-node", "participant index never isolated, repeatable")
+	flag.Var(&observers, "observer", "non-validating participant index outside the schedule; every partition keeps it on the anchor's side, repeatable")
 	flag.Parse()
 
 	if *genesisTS == 0 || *forkTS == 0 || *profile == "" || len(els.names) == 0 {
@@ -105,6 +107,7 @@ func main() {
 	}
 
 	d := disruptoor.New(*api, 15*time.Second)
+	d.Observers = observers
 	// A selector matching nothing looks like success; refuse to start.
 	n, err := d.Containers()
 	if err != nil || n == 0 {

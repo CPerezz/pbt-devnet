@@ -9,7 +9,7 @@
   header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   header .kv { color: #555; } header .kv b { color: #222; font-weight: 600; }
   header .spacer { flex: 1; }
-  header .legend { display: flex; gap: 10px; color: #555; font-size: 11px; white-space: nowrap; }
+  header .legend { display: flex; flex-wrap: wrap; gap: 2px 10px; color: #555; font-size: 11px; white-space: nowrap; }
   header .legend .grp { color: #999; margin-right: -4px; }
   .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: -1px; margin-right: 3px; }
   #root { padding: 6px 12px 12px; }
@@ -72,6 +72,59 @@
   #moves li { padding: 2px 0; cursor: pointer; border-top: 1px solid #f0f0f0; } #moves li:hover { background: #f6f6f6; }
   #controls { display: flex; gap: 10px; align-items: center; color: #555; margin: 4px 12px 10px; }
   #controls input[type=range] { width: 320px; }
+  /* Offline-migration: the importer step rings/arcs/checks the chip; the
+     producer badge and no_importer lock are additive, not a fill change.
+     Colour lives once per step, in --step; the strip's left bar reads the
+     same variable so the two views cannot drift apart. */
+  .chip .step-ring, .chip .step-arc, .chip .step-check, .chip .step-strike, .chip .lock-glyph, .chip .producer-badge { display: none; }
+  .chip .step-ring, .chip .step-arc { fill: none; }
+  .step-ring { stroke: var(--step); }
+  .step-arc { stroke: var(--step); }
+  .step-check { fill: var(--step); }
+  .step-strike { stroke: var(--step); }
+  .step-bar { fill: var(--step); }
+  .step-pending { --step: #999; }
+  .step-disconnecting { --step: #8d8d8d; }
+  .step-importing { --step: #4c8dff; }
+  .step-reconnecting { --step: #2fa84f; }
+  .step-replaying { --step: #ffc27a; }
+  .step-caught_up { --step: #2fa84f; }
+  .step-failed, .step-timeout { --step: #e0433d; }
+  .step-skipped { --step: #999; }
+  .chip.step-pending .step-ring { display: block; stroke-dasharray: 2 2; stroke-width: 1.5; }
+  .chip.step-disconnecting .step-ring { display: block; stroke-width: 2; }
+  .chip.step-importing .step-ring { display: block; stroke-dasharray: 3 2; stroke-width: 2; }
+  .chip.step-reconnecting .step-ring { display: block; stroke-width: 2; }
+  .chip.step-failed .step-ring, .chip.step-timeout .step-ring { display: block; stroke-width: 3; }
+  .chip.step-skipped .step-strike { display: block; stroke-width: 2; }
+  .chip .step-arc { stroke-width: 3; }
+  .chip.step-replaying .step-arc { display: block; }
+  .chip .step-check { font-size: 13px; font-weight: 700; }
+  .chip.step-caught_up .step-check { display: block; }
+  .chip .lock-glyph { font-size: 9px; }
+  .chip.has-lock .lock-glyph { display: block; }
+  .chip.has-producer .producer-badge { display: block; }
+  .producer-badge { stroke-width: 1.3; }
+  .producer-badge.producer-pending { fill: #ccc; stroke: #fff; }
+  .producer-badge.producer-exporting { fill: #fff; stroke: #f0a500; stroke-dasharray: 3 2; }
+  .producer-badge.producer-exported { fill: #f0a500; stroke: #fff; }
+  .producer-badge.producer-export_failed { fill: #e0433d; stroke: #fff; }
+  .anchor-rule { stroke: #555; stroke-width: 1.4; stroke-dasharray: 4 3; }
+  .anchor-label { font-size: 10px; font-weight: 700; fill: #fff; }
+  .step-label { font-size: 9px; fill: #8a6d00; font-variant-numeric: tabular-nums; }
+  #swaps { display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px; color: #555; }
+  #swaps .swap { padding: 2px 6px; border-radius: 3px; background: #f4f4f4; }
+  #swaps .swap b { color: #222; }
+  @media (prefers-reduced-motion: no-preference) {
+    .chip.step-disconnecting { animation: pulse-opacity 1s ease-in-out infinite; }
+    .chip.step-importing .step-ring { animation: march 0.6s linear infinite; }
+    .chip.step-reconnecting .step-ring { animation: pulse-green 1s ease-in-out infinite; }
+    .producer-badge.producer-exporting { animation: badge-spin 1.2s linear infinite; }
+  }
+  @keyframes pulse-opacity { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  @keyframes march { to { stroke-dashoffset: -10; } }
+  @keyframes pulse-green { 0%, 100% { stroke: #9fd6a3; } 50% { stroke: #2fa84f; } }
+  @keyframes badge-spin { to { stroke-dashoffset: -10; } }
 </style>
 <body>
 <header>
@@ -92,12 +145,22 @@
     <span><i class="sw" style="border:2px solid #e0433d"></i>split</span>
     <span class="grp">node</span>
     <span><i class="sw" style="background:#2fa84f"></i>synced</span>
+    <span><i class="sw" style="background:#9fd6a3"></i>following</span>
     <span><i class="sw" style="background:#ffc27a"></i>window</span>
     <span><i class="sw" style="background:#ff8a1f"></i>done</span>
+    <span><i class="sw" style="background:#8d8d8d"></i>parked (frozen at I*)</span>
+    <span><i class="sw" style="background:#b5b5b5"></i>idle (never ran)</span>
+    <span><i class="sw" style="background:#5a5a5a"></i>opaque (no progress RPC)</span>
+    <span><i class="sw" style="background:#c8c8c8"></i>unknown</span>
     <span><i class="sw" style="background:repeating-linear-gradient(45deg,#999 0 2px,transparent 2px 5px)"></i>cut off</span>
     <span class="grp">move</span>
     <span style="color:#e0433d">⤺ rewind</span><span style="color:#2fa84f">▸ catch-up</span>
+    <span class="grp">offline step</span>
+    <span>⬡ pending</span><span>⬡ disconnecting</span><span>⬡ importing</span><span>⬡ reconnecting</span>
+    <span>◔ replaying</span><span>✓ caught up</span><span style="color:#e0433d">⬡ failed/timeout</span>
+    <span>⊘ skipped</span><span>🔒 no importer</span><span style="color:#f0a500">◐ producer</span>
   </span>
+  <div id="swaps"></div>
 </header>
 <div id="root"></div>
 <div id="controls"></div>
@@ -113,7 +176,7 @@
 <script type="module">
   import { River } from './river.js';
   const root = document.getElementById('root');
-  const river = new River(root, { tip: document.getElementById('tip'), block: document.getElementById('block'), moves: document.getElementById('moves') });
+  const river = new River(root, { tip: document.getElementById('tip'), block: document.getElementById('block'), moves: document.getElementById('moves'), swaps: document.getElementById('swaps') });
   window.river = river; // debugging handle
   const params = new URLSearchParams(location.search);
   const synthetic = params.has('synthetic');
@@ -141,7 +204,7 @@
     let slot = +(params.get('slot') || 60), playing = true;
     const controls = document.getElementById('controls');
     controls.innerHTML = `<button id="play">pause</button> <input id="clock" type="range" min="1" max="520" value="${slot}"> <span id="clock-v"></span> <span>· wheel zooms, drag pans, double-click re-follows</span>`;
-    document.getElementById('k-mode').textContent = '· synthetic lap';
+    document.getElementById('k-mode').textContent = '· synthetic lap' + (params.get('variant') ? ` · variant=${params.get('variant')}` : '');
     const clock = document.getElementById('clock');
     const tick = () => { paint(syntheticLap(slot)); clock.value = slot; document.getElementById('clock-v').textContent = `slot ${slot}`; };
     document.getElementById('play').onclick = (e) => { playing = !playing; e.target.textContent = playing ? 'pause' : 'play'; };

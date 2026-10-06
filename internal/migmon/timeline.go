@@ -49,6 +49,15 @@ func NewTimeline(node string, binaryTrieTime uint64) *Timeline {
 	return &Timeline{node: node, t: binaryTrieTime}
 }
 
+// ResetStall clears both directions' frozen-span bookkeeping: an offline
+// migration import legitimately rewinds the binary cursor to its anchor, and
+// a span measured against the pre-import value would misfire the instant
+// polling resumes. Istar/boundary/done tracking is untouched.
+func (tl *Timeline) ResetStall() {
+	tl.binary = dirState{}
+	tl.merkle = dirState{}
+}
+
 // IStarRecord returns the recorded I*, or nil before one is observed.
 func (tl *Timeline) IStarRecord() *IStar { return tl.istar }
 
@@ -112,12 +121,13 @@ func (tl *Timeline) ObservePoll(p MigrationProgress, head uint64) []Event {
 	evs = append(evs, tl.binary.observe(tl.node, "binary", p.Binary, head)...)
 	evs = append(evs, tl.merkle.observe(tl.node, "merkle", p.Merkle, head)...)
 
-	// After I*, binary must park and merkle must start following (or be
-	// synced) within BoundaryPolls polls or BoundaryBlocks blocks.
+	// After I*, binary must park within BoundaryPolls polls or BoundaryBlocks
+	// blocks. The merkle side is the client's call: erigon and Nethermind keep
+	// following it, geth freezes it at I* and reports no merkle direction. Both
+	// keep a straddle reorg recoverable, which straddle-rewind judges.
 	if tl.istar != nil && !tl.boundaryOK && !tl.boundaryHit {
 		tl.istarPolls++
-		binParked := p.Binary != nil && p.Binary.Phase == DirParked
-		if binParked && Active(p.Merkle) {
+		if p.Binary != nil && p.Binary.Phase == DirParked {
 			tl.boundaryOK = true
 		} else if tl.istarPolls > BoundaryPolls && head > tl.istar.Number+BoundaryBlocks {
 			tl.boundaryHit = true

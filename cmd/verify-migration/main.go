@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -123,6 +124,7 @@ func main() {
 	}
 	if *manifestPath != "" {
 		v.manifest, v.manifestErr = loadManifest(*manifestPath)
+		v.artifactsDir = filepath.Dir(*manifestPath)
 	}
 
 	os.Exit(v.Run(context.Background(), os.Stdout))
@@ -185,6 +187,11 @@ func (v *verifier) Run(ctx context.Context, w io.Writer) int {
 		{"orphan-gone", v.checkOrphanGone},
 		{"completion", v.checkCompletion},
 		{"lap-manifest", v.checkLapManifest},
+		{"artifact-produced", v.checkArtifactProduced},
+		{"import-accepted", v.checkImportAccepted},
+		{"swaps-serialized", v.checkSwapsSerialized},
+		{"replay-caught-up", v.checkReplayCaughtUp},
+		{"offline-coverage", v.checkOfflineCoverage},
 		{"finalized-end-state", v.checkFinalizedEndState},
 		{"postfork-samples", v.checkPostForkSamples},
 		{"injected-state", v.checkInjectedState},

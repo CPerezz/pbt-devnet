@@ -1,11 +1,44 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/CPerezz/pbt-devnet/internal/migmon"
 )
+
+// Drop (set in main.go on the real jsonl Log) is the one place quiet
+// suppression happens: a warn/critical about a node the offline swap has
+// mid-disconnect/import/reconnect/replay never reaches the stream, while the
+// same kind of event about an unrelated, non-quiet node does.
+func TestLogDropSuppressesQuietNodeWarn(t *testing.T) {
+	o, err := parseOffline(testOffline, testNames())
+	if err != nil {
+		t.Fatalf("parseOffline: %v", err)
+	}
+	var buf strings.Builder
+	log := migmon.NewLog(&buf)
+	if err := o.apply(log, 5, "importing", 0, "", ""); err != nil {
+		t.Fatalf("apply importing: %v", err)
+	}
+	buf.Reset()
+	log.Drop = func(e migmon.Event) bool {
+		return (e.Kind == migmon.EvWarn || e.Kind == migmon.EvCritical) && o.quiet(nodeIndex(e.Node))
+	}
+
+	// Node 5 is mid-import on the swap's own say-so: its warn is dropped.
+	log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: "el-5-nethermind-lighthouse", Detail: "rpc unreachable"})
+	if buf.Len() != 0 {
+		t.Fatalf("a quiet node's warn must be dropped, got %s", buf.String())
+	}
+
+	// Node 3 is untouched by the swap: the same kind of warn is kept.
+	log.Emit(migmon.Event{Kind: migmon.EvWarn, Node: "el-3-geth-lighthouse", Detail: "rpc unreachable"})
+	if !strings.Contains(buf.String(), `"kind":"warn"`) {
+		t.Fatalf("a non-quiet node's warn must be kept, got %s", buf.String())
+	}
+}
 
 // A split that heals inside the grace must stay silent: every partition the
 // schedules hold is shorter than this, and reporting one as a fault would

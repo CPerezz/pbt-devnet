@@ -10,16 +10,20 @@ patches: the tree comes in through supported configuration and a genesis-generat
 |---|---|---|
 | **tree at genesis** | `make tree-at-genesis` | EIP-8297: two geth, two besu, two erigon and one Nethermind, with each pair configured differently, start on the binary tree and stay in agreement through forced reorgs and state scenarios |
 | **live migration** | `make migration`, `make migration-smoke` | EIP-8347: two geth, erigon, besu and Nethermind start on the merkle trie, build the tree in the background and switch at `binaryTrieTime`, with partitions before, across and after the switch |
+| **offline migration** | `make migration-offline` | EIP-8347's offline path on the same live network: geth and erigon export a real PBT snapshot and preimage file at their head, then, once that block has finalized, Nethermind and geth import the other client's artifacts one at a time, replay block access lists to the head and switch with everyone else |
 
-Args files: `args/tree-at-genesis.yaml`, `args/migration.yaml`, `args/migration-smoke.yaml`.
+Args files: `args/tree-at-genesis.yaml`, `args/migration.yaml`, `args/migration-smoke.yaml`,
+`args/migration-offline.yaml`.
 `make help` lists every target, grouped.
 
 ## What you need
 
 Docker, [Kurtosis](https://docs.kurtosis.com/install) 1.20+ (1.15 cannot interpret
 ethereum-package), Python 3, Go, and a JDK 25 for the besu build (`brew install openjdk@25`,
-keg-only). `make build` clones the client forks beside this repo and builds the images the
-chosen args file needs: besu (two Gradle stages) and erigon only when a participant runs them.
+keg-only). `make build` fetches each client fork at its pinned commit into `../pbt-devnet-src/`
+(`scripts/sources.sh` holds the pins: a `PBT_*_REF` moves one, a `PBT_*_SRC` builds your own
+checkout instead) and builds the images the chosen args file needs: besu (two Gradle stages) and
+erigon only when a participant runs them.
 
 ## Tree at genesis
 
@@ -43,8 +47,9 @@ waits until every one sees the whole mesh again. The migration lap does this bef
 here it is on you, and `pbtchaos` refuses a scenario whose majority is already one cut from an
 island rather than measure a forked majority.
 
-Nethermind builds as `nethermind-pbt:local` directly from the `pbt-state` branch of
-[`NethermindEth/nethermind`](https://github.com/NethermindEth/nethermind/tree/pbt-state), or from
+Nethermind builds as `nethermind-pbt:local` from
+[`NethermindEth/nethermind`](https://github.com/NethermindEth/nethermind/tree/pbt-state) at a
+pinned `pbt-state` commit (`PBT_NETHERMIND_REF` moves it), or from
 a local checkout named by `PBT_NETHERMIND_SRC`. `--Pbt.Enabled=true` switches its PBT backend on in
 every profile; the chainspec decides the mode - binary tree from genesis here, a flat-to-PBT
 migration when `binaryTrieTime` is after genesis. `--Sync.FastSync=false` selects full sync.
@@ -63,9 +68,10 @@ merkle root, from it on the binary root. Each client builds the binary tree in t
 geth from block-level access lists, erigon by folding both commitment domains from `erigon init`
 (`COMMITMENT_HEX_BIN=true`), Nethermind by mirroring its flat state into the PBT backend
 (`--Pbt.Enabled`, the chainspec's `binaryTrieTime` selecting the migration, anchor bootstrapped
-from the genesis allocation), besu by swapping the trie per header - and geth and Nethermind keep
-the merkle side as a shadow after I\* until the first post-fork block finalizes. Participants 1 and 3
-run geth, 2 erigon, 4 besu, 5 Nethermind.
+from the genesis allocation), besu by swapping the trie per header. After I\* geth, Nethermind and
+erigon keep their merkle tree so a reorg can still cross back over the fork: geth frozen at I\* until the fork block
+finalizes, Nethermind as a following shadow until then, erigon until 96 blocks past the fork
+(`MAX_REORG_DEPTH`). Participants 1 and 3 run geth, 2 erigon, 4 besu, 5 Nethermind.
 
 The bootnode (participant 1) anchors 29% of the stake and is never partitioned, so every heal
 converges on its chain; the four lights hold 18% each. What a lap does:
@@ -82,6 +88,39 @@ per node, per-victim straddle rewind, heals within their deadlines, orphaned for
 everywhere, shadow-root agreement, completion after the fork block finalized, the lap manifest),
 exit code = number of failures. Logs, JSONL, manifest and `summary.md` land in `OUT`.
 
+## Offline migration
+
+```bash
+make migration-offline                                    # ~1.5 h, judged at the end
+OFFLINE_FAULT=corrupt-preimages make migration-offline    # negative lap: geth's import must fail
+```
+
+`args/migration-offline.yaml` is `migration.yaml` (same network, load and chaos) with
+`binaryTrieTime` 3000 s after genesis and a sixth participant, a geth with no validators. No
+schedule names it, and every partition keeps it on the anchor's side: left out of the groups it
+would stay peered with every island and join them back together. After
+the last pre-fork heal (+940 s, +120 s to converge) `cmd/migration-swap`, started by `lap.sh`:
+
+1. **exports** - participant 6 stops briefly (no stake lost) and `geth bintrie convert` runs on a
+   copy of its datadir; erigon (2) runs `snapshots export-pbt` live. Each artifact is anchored at
+   its producer's head, and its `pbtRoot` is checked against every client's shadow root there;
+2. **swaps**, one at a time, each only once its anchor is finalized and canonical, finality is
+   fresh, every other validator is up, no partition is applied and the chaos schedule leaves a gap
+   long enough: Nethermind (5) stops, gets participant 6's artifacts and restarts importing them
+   (`--Pbt.MigrationSnapshotPath`, its genesis-seeded PBT database wiped); then geth (3) does the
+   same with erigon's (`geth bintrie import --force`). Each replays block access lists from its
+   anchor to the head before the next one starts; after a failed swap, the next waits only for
+   that node's EL to be back at the head.
+
+One light down at a time is 18% of the stake, so finality never stops for a swap. The
+wrappers that run the import live in `images/geth` and `images/nethermind`, layered over the
+client images; without their marker files they are the plain entrypoint. Besu and erigon have no
+importer for another client's artifacts and stay on the online path; participant 1 is never
+taken down. Evidence lands in `OUT/artifacts/` and `OUT/swaps.json`. The judge adds
+`artifact-produced`, `import-accepted`, `swaps-serialized`, `replay-caught-up` and
+`offline-coverage` (inconclusive on the other profiles), and waives a swapping node's
+findings for its own downtime the way it waives a partition victim's.
+
 ## Watching it
 
 ```bash
@@ -94,7 +133,10 @@ make ui-preview   # the monitor page on a synthetic lap, no enclave needed
 The migration monitor draws the chain on a slot axis: canonical chain on lane 0, every competing
 branch on its own lane, blocks coloured by their primary root (merkle blue before I\*, binary
 orange after) and ringed by cross-node agreement on the shadow root. Node chips ride their heads,
-each carrying its client's mark and its participant number;
+each carrying its client's mark and its participant number. On the offline lap each chip also
+shows its step: pending, disconnecting, importing, reconnecting, BAL replay with its progress
+from the anchor, caught up; a lock where a client has no importer, a corner badge on a producer,
+a dashed marker at each anchor and the swap queue beside the legend;
 a reorg leaves a rewind arrow to the common ancestor, a catch-up arrow along the winner and a ghost
 of the node at the tip it left. Partitions and the schedule sit on the same axis. Hover a block for
 its roots, click to pin it in the inspector. Dora is the consensus-side view (finality, proposers);

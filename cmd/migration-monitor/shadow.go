@@ -17,7 +17,8 @@ type shadowTable struct {
 	retryEvery  time.Duration
 	retainSlots uint64
 	blocks      map[string]*shadowBlock
-	warned      map[string]bool // node|error already reported once
+	warned      map[string]bool     // node|error already reported once
+	quiet       func(node int) bool // node mid offline-swap: skip asking, no warn
 }
 
 type shadowBlock struct {
@@ -38,7 +39,7 @@ const backoffCap = 5
 
 func newShadowTable(nodes []migmon.Client, retryEvery time.Duration, retainSlots uint64) *shadowTable {
 	return &shadowTable{nodes: nodes, retryEvery: retryEvery, retainSlots: retainSlots,
-		blocks: map[string]*shadowBlock{}, warned: map[string]bool{}}
+		blocks: map[string]*shadowBlock{}, warned: map[string]bool{}, quiet: func(int) bool { return false }}
 }
 
 // track adds a block to sample; re-tracking keeps its answers.
@@ -69,7 +70,7 @@ func (t *shadowTable) step(ctx context.Context, log *migmon.Log, now time.Time, 
 		return pending[i] < pending[j]
 	})
 	for i, n := range t.nodes {
-		if !n.Introspects() {
+		if !n.Introspects() || t.quiet(i+1) {
 			continue
 		}
 		asked := 0

@@ -7,8 +7,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BESU="${PBT_BESU_ROOT:-$ROOT/../besu-pbt}"
-STATELESS="${PBT_BESU_STATELESS:-$ROOT/../besu-stateless}"
+BESU="${PBT_BESU_ROOT:-${PBT_SRC_DIR:-$ROOT/../pbt-devnet-src}/besu}"
+STATELESS="${PBT_BESU_STATELESS:-${PBT_SRC_DIR:-$ROOT/../pbt-devnet-src}/besu-stateless}"
 IMAGE="${PBT_BESU_IMAGE:-besu-pbt:local}"
 PLATFORM="${PBT_PLATFORM:-linux/arm64}"
 SKIP_GRADLE=0

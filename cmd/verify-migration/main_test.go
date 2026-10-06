@@ -180,6 +180,23 @@ func TestCheckPartitionsHealedScheduleDrivenDeadlines(t *testing.T) {
 		}
 	})
 
+	// The hold keeps a straddle victim isolated past End until it crosses; the
+	// driver's "crossed" record re-states that isolation, it is not a new one
+	// (the 2026-10-05 offline lap failed here with the record 66s past End).
+	t.Run("straddle hold's crossed record past End is the same isolation", func(t *testing.T) {
+		chaos, monitor := baselineChaosAndMonitor()
+		crossed := ev(migmon.EvIsolate, "node-2", testFork+50+66)
+		crossed.Detail = "crossed the fork on its own branch"
+		chaos[7].Time = time.Unix(testFork+150, 0).UTC() // node-2's straddle heal after the hold
+		chaos = append(chaos[:7], append([]migmon.Event{crossed}, chaos[7:]...)...)
+		monitor[3] = reorgEv("node-2", testFork+155, 8)
+		v := &verifier{T: uint64(testFork), chaos: withSchedule(t, dump, chaos), monitor: monitor}
+		r, evidence := v.checkPartitionsHealed(context.Background())
+		if r != verdictPass {
+			t.Fatalf("want pass, got %s: %s", r, evidence)
+		}
+	})
+
 	t.Run("post-migration isolation after the quiet instant is noted, not failed", func(t *testing.T) {
 		// The gate applies its own window once the schedule is finished;
 		// it is deliberately absent from the pre-fork schedule, and the
@@ -947,6 +964,33 @@ func TestCheckLapManifestRequested(t *testing.T) {
 			t.Fatalf("want pass, got %s: %s", r, evidence)
 		}
 	})
+}
+
+// pbtchaos's "inconclusive" means the condition was never created (lap 4 on 2026-10-05:
+// the erigon island drew no proposer slot in 2 minutes; a peer count dipped after a heal).
+// That is untested, not failed; a "finding" still fails the lap.
+func TestCheckLapManifestScenarioOutcomes(t *testing.T) {
+	dump := migsched.Dump{Profile: "p", Fork: testFork}
+	scheduleRaw, err := json.Marshal(dump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chaos := []migmon.Event{{Kind: migmon.EvSchedule, Time: time.Unix(0, 0).UTC(), Raw: scheduleRaw}}
+	judge := func(t *testing.T, second string) (verdict, string) {
+		path := filepath.Join(t.TempDir(), "manifest.json")
+		writeFile(t, path, `{"profile":"p","scenarios":[{"name":"a","outcome":"ok"},{"name":"b","outcome":"`+second+`"}]}`)
+		manifest, err := loadManifest(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return (&verifier{manifestPath: path, manifest: manifest, chaos: chaos}).checkLapManifest(context.Background())
+	}
+	if r, evidence := judge(t, "inconclusive"); r != verdictInconclusive || !strings.Contains(evidence, "1 scenario(s) completed ok") {
+		t.Fatalf("inconclusive scenario: want inconclusive counting 1 ok, got %s: %s", r, evidence)
+	}
+	if r, evidence := judge(t, "finding"); r != verdictFail {
+		t.Fatalf("finding: want fail, got %s: %s", r, evidence)
+	}
 }
 
 func injectEv(t *testing.T, inj migmon.Injection) migmon.Event {

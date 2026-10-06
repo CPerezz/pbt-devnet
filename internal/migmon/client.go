@@ -130,13 +130,19 @@ func erigonProgress(m erigonMigration, head, finalized *Header, shadow string) M
 	}
 	phase := PhaseRunning
 	if finalized != nil && finalized.Time >= uint64(*m.ActivationTime) {
-		// Erigon has no retirement: it keeps folding the shadow domain past the fork
-		// block's finality, so done is reported with the live direction it still has
-		// (registry: RetiresShadow false), not as a blank terminal state.
+		// Erigon retires the merkle shadow on its own clock (MAX_REORG_DEPTH blocks
+		// past the fork), not at finality, so done carries the live direction it
+		// still has until then (registry: RetiresShadow false).
 		phase = PhaseDone
 	}
 	live := &DirectionProgress{Phase: DirSynced, Cursor: FlexUint64(head.Number), CursorHash: head.Hash, ShadowRoot: shadow}
 	if m.ShadowStopped {
+		// After the fork block finalized, a stopped merkle shadow is that retirement.
+		// Any other stop (the binary shadow before the fork, the merkle one before
+		// finality, which EIP-8347 forbids) is a fold that died.
+		if m.Flipped && phase == PhaseDone {
+			return MigrationProgress{Phase: phase, Binary: &DirectionProgress{Phase: DirParked}}
+		}
 		live.Phase, live.Error = DirStalled, "shadow commitment domain stopped"
 	}
 	if !m.Flipped {

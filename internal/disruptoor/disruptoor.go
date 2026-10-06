@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,10 @@ import (
 type Client struct {
 	base string
 	hc   *http.Client
+	// Observers are nodes no schedule names (the offline lap's non-validating exporter).
+	// Partition puts them in its first group, the side every caller keeps the anchor on;
+	// left out of every group, an observer stays peered with each island and bridges them.
+	Observers []int
 }
 
 // New returns a client for the disruptoor at base.
@@ -109,6 +114,9 @@ func (d *Client) Partition(name string, groups ...[]int) error {
 	}
 	sides := make([]any, len(groups))
 	for i, g := range groups {
+		if i == 0 {
+			g = append(slices.Clip(g), d.Observers...)
+		}
 		sides[i] = nodes(g...)
 	}
 	_, err := d.do(http.MethodPut, "/v1/state", map[string]any{
