@@ -9,12 +9,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARGS="${1:-$ROOT/args/tree-at-genesis.yaml}"
 PLATFORM="${PBT_PLATFORM:-linux/arm64}"
 
-# Where the forks live. Defaults assume they sit beside this repo.
-GETH_SRC="${PBT_GETH_SRC:-$ROOT/../go-ethereum}"
-ERIGON_SRC="${PBT_ERIGON_SRC:-$ROOT/../erigon-pbt}"
-EGG_SRC="${PBT_EGG_SRC:-$ROOT/../egg-pbt}"
-# Nethermind builds from GitHub unless a local checkout is named.
+# Where the forks live: the pinned checkouts scripts/sources.sh keeps, or yours.
+SRC="${PBT_SRC_DIR:-$ROOT/../pbt-devnet-src}"
+GETH_SRC="${PBT_GETH_SRC:-$SRC/geth}"
+ERIGON_SRC="${PBT_ERIGON_SRC:-$SRC/erigon}"
+EGG_SRC="${PBT_EGG_SRC:-$SRC/egg}"
+# Nethermind builds from GitHub at a pinned pbt-state commit (the branch moves; this is
+# its tip with the anchor-import fix, #14260), unless a local checkout is named.
 NETHERMIND_SRC="${PBT_NETHERMIND_SRC:-}"
+NETHERMIND_REF="${PBT_NETHERMIND_REF:-323217bcba8038269064550e5a71cb009807bc6f}"
+# The offline lap needs every producer and consumer on the same artifact format.
+OFFLINE=""
+grep -qE '^\s*offline:' "$ARGS" && OFFLINE=1
 
 echo "==> platform:  $PLATFORM"
 echo "==> args file: $ARGS"
@@ -60,6 +66,13 @@ build_from() {
   echo
 }
 
+# The offline-migration hook goes on as one thin layer over the client image.
+wrap() {
+  echo "==> $2 (offline-migration hook over $1)"
+  docker build --platform "$PLATFORM" --build-arg "BASE=$1" -t "$2" "$ROOT/images/$3"
+  echo
+}
+
 # IMAGES defaults to what the args file names: a client image is built only when a
 # participant runs it, so the migration profiles never build besu or erigon.
 needed() {
@@ -91,9 +104,13 @@ require_capability "geth (EIP-8347 follower)" "$GETH_SRC" 'newBintrieFollower' "
   "fix: git -C $GETH_SRC checkout pbt (needs the online state-migration merge)"
 require_capability "geth (migration window)" "$GETH_SRC" 'MigrationWindowBlocks' "core/blockchain.go" \
   "fix: git -C $GETH_SRC checkout pbt (needs the online state-migration merge)"
-build_from "geth (EIP-8297)" "pbt-geth:local" "$GETH_SRC" \
-  "clone CPerezz/go-ethereum at branch pbt, or set PBT_GETH_SRC"
-echo
+if [[ -n "$OFFLINE" ]]; then
+require_capability "geth (EIP-8347 tagged snapshot)" "$GETH_SRC" 'tagStorageSingle' "cmd/geth/bintrie_artifacts.go" \
+  "fix: point PBT_GETH_SRC at a pbt checkout at or past fbfd486b (CPerezz/go-ethereum#47)"
+fi
+build_from "geth (EIP-8297)" "pbt-geth:base" "$GETH_SRC" \
+  "run scripts/sources.sh, or set PBT_GETH_SRC"
+wrap pbt-geth:base pbt-geth:local geth
 fi
 
 if want besu; then
@@ -106,20 +123,25 @@ if want erigon; then
 # Needle is the genesis path: parsing binaryTrieTime alone isn't enough without COMMITMENT_BIN.
 require_capability "erigon (EIP-8297)" "$ERIGON_SRC" 'ResolveErigonDBSettingsForGenesis' \
   "execution/state/genesiswrite/genesis_write.go" "fix: git -C $ERIGON_SRC checkout binary-trie && git -C $ERIGON_SRC pull"
+if [[ -n "$OFFLINE" ]]; then
+require_capability "erigon (EIP-8347 export)" "$ERIGON_SRC" '"export-pbt"' "cmd/utils/app/export_pbt_cmd.go" \
+  "fix: point PBT_ERIGON_SRC at a binary-trie checkout at or past 0467984f"
+fi
 build_from "erigon (EIP-8297)" "erigon-pbt:local" "$ERIGON_SRC" \
-  "clone erigontech/erigon at branch binary-trie, or set PBT_ERIGON_SRC"
+  "run scripts/sources.sh, or set PBT_ERIGON_SRC"
 fi
 
 if want nethermind; then
 if [[ -n "$NETHERMIND_SRC" ]]; then
-build_from "nethermind (EIP-8297)" "nethermind-pbt:local" "$NETHERMIND_SRC" \
+build_from "nethermind (EIP-8297)" "nethermind-pbt:base" "$NETHERMIND_SRC" \
   "set PBT_NETHERMIND_SRC to a NethermindEth/nethermind checkout, or unset it to build from GitHub"
 else
-echo "==> nethermind (EIP-8297) -> nethermind-pbt:local"
-echo "    source: https://github.com/NethermindEth/nethermind.git#pbt-state"
-docker build --platform "$PLATFORM" -t nethermind-pbt:local \
-  "https://github.com/NethermindEth/nethermind.git#pbt-state"
+echo "==> nethermind (EIP-8297) -> nethermind-pbt:base"
+echo "    source: https://github.com/NethermindEth/nethermind.git#$NETHERMIND_REF"
+docker build --platform "$PLATFORM" -t nethermind-pbt:base \
+  "https://github.com/NethermindEth/nethermind.git#$NETHERMIND_REF"
 fi
+wrap nethermind-pbt:base nethermind-pbt:local nethermind
 echo
 fi
 
@@ -127,7 +149,7 @@ if want egg; then
 require_capability "genesis generator" "$EGG_SRC" '"binaryTrieTime":' "apps/el-gen/generate_genesis.sh" \
   "fix: git -C $EGG_SRC checkout pbt"
 build_from "genesis generator" "pbt-egg:local" "$EGG_SRC" \
-  "clone CPerezz/ethereum-genesis-generator at branch pbt, or set PBT_EGG_SRC"
+  "run scripts/sources.sh, or set PBT_EGG_SRC"
 fi
 
 # Our three services come out of one Dockerfile and one module; only the command differs.

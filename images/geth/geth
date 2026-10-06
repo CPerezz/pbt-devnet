@@ -1,0 +1,26 @@
+#!/bin/sh
+# Offline-migration hook for the pbt-devnet lap. cmd/migration-swap stops this
+# node, drops an EIP-8347 snapshot and preimage file into pbt-swap/ beside a
+# `pending` marker naming the anchor block hash, and starts it again: the
+# import runs here, before the node opens its datadir. A failed import still
+# starts the node - its `failed` marker and import.log are the lap's evidence.
+# Every other invocation passes straight through.
+D=/data/geth/execution-data
+S=$D/pbt-swap
+if [ -f "$S/pending" ]; then
+  anchor=$(cat "$S/pending")
+  rm -f "$S/done" "$S/failed"
+  echo "pbt-swap: importing $S/pbt-snapshot.bin at anchor $anchor"
+  geth.real --datadir "$D" bintrie import --force \
+    "$S/pbt-snapshot.bin" "$S/preimages.bin" "$anchor" >"$S/import.log" 2>&1
+  rc=$?
+  cat "$S/import.log"
+  if [ "$rc" -eq 0 ]; then
+    mv "$S/pending" "$S/done"
+    echo "pbt-swap: import done"
+  else
+    mv "$S/pending" "$S/failed"
+    echo "pbt-swap: import failed (exit $rc)"
+  fi
+fi
+exec geth.real "$@"

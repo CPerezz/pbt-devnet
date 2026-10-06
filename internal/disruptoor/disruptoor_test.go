@@ -50,3 +50,30 @@ func TestPartitionGroupsRoundTrip(t *testing.T) {
 		t.Fatalf("Partitions() = %+v, want %+v", applied, want)
 	}
 }
+
+// An observer left out of every group stays peered with every island and joins
+// them back into one network (the 2026-10-05 offline lap: no partition took).
+func TestPartitionPutsObserversWithTheFirstGroup(t *testing.T) {
+	var put map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &put); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer srv.Close()
+	d := New(srv.URL, time.Second)
+	d.Observers = []int{6}
+
+	if err := d.Partition("p", []int{1}, []int{2}, []int{3}); err != nil {
+		t.Fatal(err)
+	}
+	groups := put["partitions"].([]any)[0].(map[string]any)["groups"].([]any)
+	got := make([]any, len(groups))
+	for i, g := range groups {
+		got[i] = g.(map[string]any)["node-index"]
+	}
+	if want := []any{[]any{1.0, 6.0}, []any{2.0}, []any{3.0}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("groups sent = %v, want %v", got, want)
+	}
+}

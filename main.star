@@ -56,7 +56,15 @@ DEFAULT_MIGRATION = {
     "post_op": "deep-pair",
     # The monitor's live view. Empty disables it.
     "monitor_http_port": 8080,
+    # Offline EIP-8347 path (args/migration-offline.yaml): exports at a finalized
+    # block, then serial stop/import/restart swaps driven by cmd/migration-swap.
+    "offline": {"enabled": False},
 }
+
+# Who can produce the EIP-8347 artifacts on a live chain, and who can import them
+# into a synced datadir (hive#1614's capability matrix, minus genesis-only paths).
+OFFLINE_PRODUCERS = {"geth-convert": "geth", "erigon-export": "erigon"}
+OFFLINE_IMPORTERS = ["geth", "nethermind"]
 
 DEFAULT_HAMMER = {
     "enabled": True,
@@ -193,9 +201,15 @@ def run(plan, args={}):
                       "Onboarding a client needs its bootstrap + a registry entry " +
                       "(see README, 'Adding a client to the migration devnet').").format(
                     MIGRATION_READY_CLIENTS, el.client_name))
-        t, genesis_time = _launch_migration(plan, migration, args, els, net)
+        # Chaos, the gate and the stake math see validating participants only: an observer
+        # (the offline lap's exporter) would dilute every light's share in migsched.
+        validating = _validating_count(upstream_args.get("participants", []), len(els))
+        vnet = struct(all_participants=net.all_participants[:validating],
+                      pre_funded_accounts=net.pre_funded_accounts)
+        t, genesis_time = _launch_migration(plan, migration, args, els, net, validating, vnet)
         if chaos["enabled"] and chaos["gate"]:
-            _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer["senders"], t, genesis_time)
+            _launch_gated_chaos(plan, migration, chaos, args, vnet, els[:validating], hammer["senders"], t, genesis_time,
+                                _observer_flags(validating, len(els)))
         elif chaos["enabled"]:
             plan.print("pbtchaos SKIPPED: its reorg cadence knows nothing about the fork " +
                        "boundary. Set pbt_chaos.gate: true to run it after the switchover, " +
@@ -363,7 +377,9 @@ def _weight_participants(participants, cfg):
     out = []
     for i, p in enumerate(participants):
         weighted = dict(p)
-        if i + 1 == anchor:
+        if p.get("validator_count", None) == 0:
+            pass  # an observer stays one: the offline lap's exporter
+        elif i + 1 == anchor:
             weighted["validator_count"] = cfg["anchor_validators"]
         else:
             weighted["validator_count"] = cfg["light_validators"]
@@ -371,15 +387,74 @@ def _weight_participants(participants, cfg):
     return out
 
 
-def _anchor_share(cfg, els):
+def _validating_count(participants, n_els):
+    """How many leading participants hold validators. Observers must come last, so the
+    participant numbers chaos, the gate and the swap driver use stay one range: 1..n."""
+    n = 0
+    for i, p in enumerate(participants):
+        if p.get("validator_count", None) == 0:
+            continue
+        if n != i:
+            fail(("participant {0} runs validators after a non-validating one; put " +
+                  "validator_count: 0 participants last").format(i + 1))
+        n += 1
+    return n if participants else n_els
+
+
+def _observer_flags(validating, n_els):
+    """Non-validating participants come after the validators and are outside every
+    schedule; each partition keeps them on the anchor's side, or they stay peered with
+    every island and join the islands back into one network."""
+    flags = []
+    for i in range(validating, n_els):
+        flags += ["--observer", str(i + 1)]
+    return flags
+
+
+def _anchor_share(cfg, validating):
     """The anchor's share of the validator set, derived from the same numbers that render
     validator_count so the chaos driver's admission math cannot drift."""
     anchor = cfg["anchor_validators"]
-    total = anchor + (len(els) - 1) * cfg["light_validators"]
+    total = anchor + (validating - 1) * cfg["light_validators"]
     return float(anchor) / float(total)
 
 
-def _launch_migration(plan, cfg, args, els, net):
+def _check_offline(cfg, els):
+    """Refuses an offline block the swap driver could only fail on, at plan time."""
+    off = cfg["offline"]
+    importers = {}
+    for c in off.get("consumers", []):
+        n = c["node"]
+        if n < 1 or n > len(els) or els[n - 1].client_name not in OFFLINE_IMPORTERS:
+            fail("pbt_migration.offline consumer {0} must be one of the {1} participants running {2}".format(
+                n, len(els), OFFLINE_IMPORTERS))
+        if n == cfg["anchor_node"]:
+            fail("pbt_migration.offline consumer {0} is the anchor, which is never taken down".format(n))
+        if c.get("expected_seconds", 0) <= 0 or c.get("timeout_seconds", 0) <= 0:
+            fail("pbt_migration.offline consumer {0} needs positive expected_seconds and timeout_seconds".format(n))
+        importers[n] = 0
+    if not importers:
+        fail("pbt_migration.offline is enabled with no consumers")
+    for p in off.get("producers", []):
+        n, kind = p["node"], p["kind"]
+        want = OFFLINE_PRODUCERS.get(kind, "")
+        if want == "" or n < 1 or n > len(els) or els[n - 1].client_name != want:
+            fail("pbt_migration.offline producer {0} ({1}) must be a {2} participant; kinds: {3}".format(
+                n, kind, want, OFFLINE_PRODUCERS))
+        # geth-convert stops its producer: never the anchor.
+        if kind == "geth-convert" and n == cfg["anchor_node"]:
+            fail("pbt_migration.offline producer {0} is the anchor; geth-convert takes its node down".format(n))
+        for c in p["consumers"]:
+            if c not in importers:
+                fail("pbt_migration.offline producer {0} feeds {1}, which is not a listed consumer".format(n, c))
+            importers[c] += 1
+    for c in importers:
+        if importers[c] != 1:
+            fail("pbt_migration.offline consumer {0} must be fed by exactly one producer, not {1}".format(
+                c, importers[c]))
+
+
+def _launch_migration(plan, cfg, args, els, net, validating, vnet):
     profile = cfg["chaos_profile"]
     if profile not in MIGRATION_PROFILES:
         fail("pbt_migration.chaos_profile must be one of {0}, got {1}".format(
@@ -390,28 +465,35 @@ def _launch_migration(plan, cfg, args, els, net):
     genesis_time = _genesis_field(plan, "read-genesis-time", ".timestamp", "%d")
     plan.print("migration fork: binaryTrieTime={0} genesis_time={1}".format(t, genesis_time))
 
-    _launch_migration_monitor(plan, cfg, args, els, net, t, genesis_time)
+    if cfg["offline"].get("enabled", False):
+        _check_offline(cfg, els)
+        # Validators sit on 1..validating: the swap driver's stake gates must not count observers.
+        cfg["offline"] = dict(cfg["offline"], validating=validating)
+        # One line for lap.sh, which hands it to cmd/migration-swap verbatim.
+        plan.print("pbt_offline=" + json.encode(cfg["offline"]))
+    _launch_migration_monitor(plan, cfg, args, els, net, t, genesis_time, validating)
 
     if profile == "none":
         plan.print("migration-chaos not launched: pbt_migration.chaos_profile is none")
         return t, genesis_time
 
     anchor = cfg["anchor_node"]
-    if anchor < 1 or anchor > len(els):
-        fail("pbt_migration.anchor_node is {0}, outside the {1} execution clients".format(
-            anchor, len(els)))
+    if anchor < 1 or anchor > validating:
+        fail("pbt_migration.anchor_node is {0}, outside the {1} validating participants".format(
+            anchor, validating))
     if anchor not in cfg["protect_nodes"]:
         fail(("pbt_migration.anchor_node is {0} but protect_nodes is {1}: the anchor holds the " +
               "heavy stake and must never be partitioned, or an island could win a heal").format(
             anchor, cfg["protect_nodes"]))
-    if len(els) - len(cfg["protect_nodes"]) < 2:
-        fail("the migration profiles need at least two disruptable lights; {0} clients, {1} protected".format(
-            len(els), cfg["protect_nodes"]))
-    _launch_migration_chaos(plan, cfg, args, els, t, genesis_time, net)
+    if validating - len(cfg["protect_nodes"]) < 2:
+        fail("the migration profiles need at least two disruptable lights; {0} validating, {1} protected".format(
+            validating, cfg["protect_nodes"]))
+    _launch_migration_chaos(plan, cfg, args, els[:validating], t, genesis_time, vnet,
+                            _observer_flags(validating, len(els)))
     return t, genesis_time
 
 
-def _launch_migration_monitor(plan, cfg, args, els, net, t, genesis_time):
+def _launch_migration_monitor(plan, cfg, args, els, net, t, genesis_time, validating):
     cmd = []
     for el in els:
         cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
@@ -436,10 +518,15 @@ def _launch_migration_monitor(plan, cfg, args, els, net, t, genesis_time):
                 "--disruptoor", "http://{0}:{1}".format(disruptoor.ip_address, DISRUPTOOR_PORT),
                 "--profile", cfg["chaos_profile"],
                 "--anchor-node", str(cfg["anchor_node"]),
-                "--anchor-share", str(_anchor_share(cfg, els)),
+                "--anchor-share", str(_anchor_share(cfg, validating)),
             ]
             for n in cfg["protect_nodes"]:
                 cmd += ["--protect-node", str(n)]
+            # The ribbon must resolve the schedule chaos runs, which never sees observers.
+            if validating < len(els):
+                cmd += ["--schedule-participants", str(validating)]
+        if cfg["offline"].get("enabled", False):
+            cmd += ["--offline", json.encode(cfg["offline"])]
         ports["http"] = PortSpec(
             number=cfg["monitor_http_port"], transport_protocol="TCP", application_protocol="http")
     plan.add_service(
@@ -449,7 +536,7 @@ def _launch_migration_monitor(plan, cfg, args, els, net, t, genesis_time):
     plan.print("started migration-monitor: {0} execution clients, JSONL on stdout".format(len(els)))
 
 
-def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time, net):
+def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time, net, observer_flags):
     # Same refusal as _launch_chaos: no-op without disruptoor looks like success.
     if DISRUPTOOR_SERVICE not in args.get("additional_services", []):
         fail("pbt_migration.chaos_profile needs the '" + DISRUPTOOR_SERVICE + "' additional " +
@@ -461,6 +548,7 @@ def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time, net):
         cmd += ["--el", "{0}={1}".format(el.service_name, el.rpc_http_url)]
     for n in cfg["protect_nodes"]:
         cmd += ["--protect-node", str(n)]
+    cmd += observer_flags
     # Two senders for the straddle injector, from accounts 10-11 (between assertoor's
     # hardcoded 9 and spamoor's hardcoded 13, so neither collides).
     prefunded = net.pre_funded_accounts
@@ -473,7 +561,7 @@ def _launch_migration_chaos(plan, cfg, args, els, t, genesis_time, net):
         "--binary-trie-time", t,
         "--profile", cfg["chaos_profile"],
         "--anchor-node", str(cfg["anchor_node"]),
-        "--anchor-share", str(_anchor_share(cfg, els)),
+        "--anchor-share", str(_anchor_share(cfg, len(els))),
         "--seconds-per-slot", str(_slot_seconds(args)),
         "--jsonl", "/dev/stdout",
     ]
@@ -489,7 +577,7 @@ def _slot_seconds(args):
     return int(args.get("network_params", {}).get("seconds_per_slot", 12))
 
 
-def _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer_senders, t, genesis_time):
+def _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer_senders, t, genesis_time, observer_flags):
     """Runs the tree-at-genesis reorg service behind the migration gate: waits for every
     client to finish, runs one partition, then execs the service with no overlap."""
     disruptoor = plan.get_service(name=DISRUPTOOR_SERVICE)
@@ -508,11 +596,11 @@ def _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer_senders, 
         "--binary-trie-time", t,
         "--profile", migration["chaos_profile"],
         "--anchor-node", str(migration["anchor_node"]),
-        "--anchor-share", str(_anchor_share(migration, els)),
+        "--anchor-share", str(_anchor_share(migration, len(els))),
         "--seconds-per-slot", str(_slot_seconds(args)),
         "--post-op", migration["post_op"],
         "--jsonl", "/dev/stdout",
-    ]
+    ] + observer_flags
 
     # From here on: the command the gate execs once it hands over. Every test node is a
     # light, so its scenarios need no extra protection beyond the anchor.
@@ -524,7 +612,7 @@ def _launch_gated_chaos(plan, migration, chaos, args, net, els, hammer_senders, 
             counts.append(str(migration["light_validators"]))
     cmd += ["pbtchaos"] + _chaos_cmd(
         plan, chaos, args, net, els, hammer_senders,
-        [], ",".join(counts))
+        [], ",".join(counts)) + observer_flags
 
     # No ports declared: kurtosis would wait for one to accept connections before
     # calling the service started, and this one binds only once it hands over.

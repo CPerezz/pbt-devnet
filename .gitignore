@@ -15,6 +15,7 @@ __pycache__/
 /migration-*
 /verify-migration
 
-# omp writes a session transcript into the working directory when a session is
-# forked; it is not part of the package and must never be committed.
+# omp writes session transcripts and browser recordings into the working directory;
+# they are not part of the package and must never be committed.
 /*.jsonl
+/omp-browser-recording-*/

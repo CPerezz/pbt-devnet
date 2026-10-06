@@ -175,7 +175,10 @@ func scheduleView(s *migsched.Schedule, genesis, slotSeconds uint64) []scheduleO
 	return out
 }
 
-// dirPhase: the binary direction's phase before the fork.
+// dirPhase: the binary direction's phase before the fork. idle is split from
+// parked: parked is DirParked, the required freeze at I*, almost always
+// correct; idle (DirIdle, "no handle yet, nothing runs") is a direction that
+// never started. Same grey family, different legend swatch.
 func dirPhase(d *migmon.DirectionProgress) string {
 	if d.Error != "" || d.Phase == migmon.DirStalled {
 		return "stalled"
@@ -185,8 +188,10 @@ func dirPhase(d *migmon.DirectionProgress) string {
 		return "following"
 	case migmon.DirSynced:
 		return "synced"
-	case migmon.DirParked, migmon.DirIdle: // idle: no handle yet, nothing runs
+	case migmon.DirParked:
 		return "parked"
+	case migmon.DirIdle:
+		return "idle"
 	default:
 		return "unknown"
 	}
@@ -200,8 +205,11 @@ func merklePhase(d *migmon.DirectionProgress) string {
 	if migmon.Active(d) {
 		return "window"
 	}
-	if d.Phase == migmon.DirParked || d.Phase == migmon.DirIdle {
+	if d.Phase == migmon.DirParked {
 		return "parked"
+	}
+	if d.Phase == migmon.DirIdle {
+		return "idle"
 	}
 	return "unknown"
 }

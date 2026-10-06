@@ -142,6 +142,29 @@ func TestNullTrackerInactiveNeverFires(t *testing.T) {
 	}
 }
 
+// Reset: an offline-migration import rewinds the node's state underneath the
+// tracker; the old streak must not carry over and misfire on the first poll
+// after the node reconnects.
+func TestNullTrackerReset(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	nt := NewNullTracker("n")
+	// Build a streak old enough that, without Reset, the next null poll
+	// would immediately cross the critical threshold.
+	nt.Observe(base, true, true)
+	if evs := nt.Observe(base.Add(11*time.Minute), true, true); !hasFinding(evs, EvCritical, FindingNullCritical) {
+		t.Fatalf("setup: want the streak to have crossed critical, got %+v", evs)
+	}
+	nt.Reset()
+	// Long after the reset (wall-clock time the import actually took), the
+	// first poll back must read as a fresh streak, not an instant critical.
+	if evs := nt.Observe(base.Add(30*time.Minute), true, true); len(evs) != 0 {
+		t.Fatalf("reset streak baseline poll must not fire, got %+v", evs)
+	}
+	if evs := nt.Observe(base.Add(30*time.Minute+4*time.Minute), true, true); len(evs) != 0 {
+		t.Fatalf("reset streak under warn threshold must not fire, got %+v", evs)
+	}
+}
+
 func TestReorgMemory(t *testing.T) {
 	m := NewReorgMemory("n")
 	if evs := m.Observe(100, "0xa", 110); len(evs) != 0 {

@@ -39,6 +39,10 @@ type verifier struct {
 	manifest     *lapManifest
 	manifestErr  error
 
+	// artifactsDir is $OUT: the manifest's own directory. Producer/swap dir and
+	// evidence_dir fields in the manifest are relative to it.
+	artifactsDir string
+
 	istar    istarResult
 	istarErr error
 
@@ -239,7 +243,11 @@ func (v *verifier) chaosWindows() []chaosWindow {
 	for _, ev := range v.chaos {
 		switch ev.Kind {
 		case migmon.EvIsolate:
-			open[ev.Node] = &chaosWindow{node: ev.Node, from: ev.Time}
+			// A second isolate for an open window is a status record of the same cut
+			// (the straddle hold's "crossed the fork on its own branch"), not a new one.
+			if _, ok := open[ev.Node]; !ok {
+				open[ev.Node] = &chaosWindow{node: ev.Node, from: ev.Time}
+			}
 		case migmon.EvHeal:
 			if ev.Node == "" {
 				for n, w := range open {
@@ -289,22 +297,42 @@ type opWindow struct {
 }
 
 // waiverWindows is chaosWindows with each straddle-attributed window's close
-// extended by migmon.SplitGrace, the bound the monitor's split criticals fire against.
+// extended by migmon.SplitGrace, the bound the monitor's split criticals fire
+// against, plus — for an offline lap — each consumer's stop-to-caught-up
+// window and each producer's downtime window, same grace.
 func (v *verifier) waiverWindows() []chaosWindow {
 	windows := v.chaosWindows()
-	dump, err := v.scheduleDump()
-	if err != nil {
-		return windows
-	}
-	for i, w := range windows {
-		if w.to.IsZero() {
-			continue
-		}
-		for _, op := range dump.Admitted() {
-			if migsched.Class(op.Class) == migsched.ClassStraddle && opOwns(op, w) {
-				windows[i].to = w.to.Add(migmon.SplitGrace)
-				break
+	if dump, err := v.scheduleDump(); err == nil {
+		for i, w := range windows {
+			if w.to.IsZero() {
+				continue
 			}
+			for _, op := range dump.Admitted() {
+				if migsched.Class(op.Class) == migsched.ClassStraddle && opOwns(op, w) {
+					windows[i].to = w.to.Add(migmon.SplitGrace)
+					break
+				}
+			}
+		}
+	}
+	if v.manifest != nil && v.manifest.Offline != nil && v.manifest.Offline.Enabled {
+		for _, s := range v.manifest.Swaps {
+			if s.StopAt == 0 || s.CaughtUpAt == 0 {
+				continue // a swap that never caught up has nothing to close its window
+			}
+			windows = append(windows, chaosWindow{
+				node: fmt.Sprintf("node-%d", s.Node), from: time.Unix(s.StopAt, 0),
+				to: time.Unix(s.CaughtUpAt, 0).Add(migmon.SplitGrace), healed: true,
+			})
+		}
+		for _, p := range v.manifest.Producers {
+			if p.DownFrom == 0 || p.DownTo == 0 {
+				continue
+			}
+			windows = append(windows, chaosWindow{
+				node: fmt.Sprintf("node-%d", p.Node), from: time.Unix(p.DownFrom, 0),
+				to: time.Unix(p.DownTo, 0).Add(migmon.SplitGrace), healed: true,
+			})
 		}
 	}
 	return windows

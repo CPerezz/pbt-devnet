@@ -7,10 +7,13 @@ const NS = 'http://www.w3.org/2000/svg';
 const LANE_H = 38, BLOCK_R = 6, STRIP_ROW = 26, RIBBON_H = 22, AGREE_H = 8, AXIS_H = 18, TOP_PAD = 26;
 const FORMAT = { mpt: '#4c8dff', pbt: '#ff9a3c' };
 const OTHER = { mpt: 'pbt', pbt: 'mpt' };
-const PHASE = { following: '#9fd6a3', synced: '#2fa84f', parked: '#8d8d8d', window: '#ffc27a', done: '#ff8a1f', stalled: '#e0433d', opaque: '#5a5a5a', unknown: '#c8c8c8' };
+const PHASE = { following: '#9fd6a3', synced: '#2fa84f', parked: '#8d8d8d', idle: '#b5b5b5', window: '#ffc27a', done: '#ff8a1f', stalled: '#e0433d', opaque: '#5a5a5a', unknown: '#c8c8c8' };
 const AGREE = { pending: '#8a8a8a', partial: '#8a8a8a', all: '#2fa84f', single: '#8a8a8a', split: '#e0433d', gone: 'none', none: 'none' };
 const SEGMENT_HUES = ['#2b2b2b', '#b04ad6', '#1eaaa0', '#d67f1e', '#d6478f', '#5e73d6'];
 const CLASS = { deep: '#b04ad6', short: '#1eaaa0', straddle: '#e0433d', window: '#d6478f', scenario: '#5e73d6' };
+// Offline-migration step colours now live once, in --step (index.html's
+// .step-* rules); the strip's left bar and the chip ring both read it.
+const STEP_RINGED = new Set(['pending', 'disconnecting', 'importing', 'reconnecting', 'replaying', 'failed', 'timeout', 'skipped']);
 const CLASS_DOC = {
   deep: 'Deep partition: the victim is cut off (EL+CL p2p) long enough to mint its own branch well below the majority. On heal it must rewind ≥10 blocks and its PBT follower must re-anchor on the winning chain.',
   short: 'Short partition: a light node is isolated briefly, so the branch is shallow and the rewind small. Checks the follower survives a shallow reorg.',
@@ -106,9 +109,11 @@ export class River {
     const prev = this.prev;
     const width = this.root.clientWidth || 1200;
     if (this.view.follow) {
-      // keep ~90px of room right of "now" so the head chips never clip
+      // keep room right of "now" for every node's head chip (they stack at +16 + i*(2r+3)),
+      // step ring included, so the node mid-swap is never the one clipped
       const span = this.view.to - this.view.from;
-      this.view.to = s.now_slot + Math.max(3, Math.ceil(90 / ((width - 48) / span)));
+      const room = 16 + s.nodes.length * (CHIP_R * 2 + 3) + 8;
+      this.view.to = s.now_slot + Math.max(3, Math.ceil(room / ((width - 48) / span)));
       this.view.from = this.view.to - span;
     }
     this.pxPerSlot = (width - 48) / (this.view.to - this.view.from);
@@ -141,6 +146,7 @@ export class River {
     this.drawStrip(s, segById, width, stripH);
     this.animateReorgs(s, prev);
     this.renderMoves(s, segById);
+    this.renderSwaps(s);
     this.refreshCard();
     this.refreshTip();
     this.prev = s;
@@ -352,6 +358,7 @@ export class River {
     const g = this.layers.chips; const cg = this.layers.cursors; cg.replaceChildren();
     const byHead = {};
     for (const n of s.nodes) (byHead[n.head] ||= []).push(n);
+    const tip = (s.nodes.find(n => n.id === 1) || { head_number: 0 }).head_number;
     const seen = new Set();
     for (const [hash, nodes] of Object.entries(byHead)) {
       const b = blockByHash[hash]; const seg = b ? segById[b.segment] : segById[nodes[0].segment];
@@ -365,6 +372,16 @@ export class River {
           chip = el('g', { id, class: 'chip', 'data-tip': 'node:' + n.id }, g);
           el('circle', { r: CHIP_R, class: 'chip-body' }, chip);
           el('circle', { r: CHIP_R + 3, class: 'chip-istar' }, chip);
+          // Offline-migration step decorations: a ring (pending/disconnecting/
+          // importing/reconnecting/failed/timeout/skipped), a progress arc
+          // (replaying), a checkmark (caught_up, ~3s), a strike (skipped).
+          // CSS (.step-* in index.html) drives colour/animation by class.
+          el('circle', { r: CHIP_R + 6, class: 'step-ring' }, chip);
+          el('path', { class: 'step-arc' }, chip);
+          el('text', { class: 'step-check', y: 4, 'text-anchor': 'middle' }, chip).textContent = '\u2713';
+          el('path', { class: 'step-strike', d: `M${-CHIP_R},${-CHIP_R} L${CHIP_R},${CHIP_R}` }, chip);
+          el('text', { class: 'lock-glyph', x: -CHIP_R - 3, y: CHIP_R + 3, 'text-anchor': 'middle' }, chip).textContent = '\u{1F512}';
+          el('circle', { r: 4.5, cx: CHIP_R - 1, cy: -CHIP_R + 1, class: 'producer-badge' }, chip);
           if (LOGOS[n.client]) {
             const s = CHIP_R * 1.5;
             el('use', { href: '#logo-' + n.client, class: 'chip-logo', x: -s / 2, y: -s / 2, width: s, height: s }, chip);
@@ -392,6 +409,28 @@ export class River {
           el('line', { x1: cx, y1: y + 14, x2: this.x(slot), y2: y + 14, class: 'tether' }, cg);
           el('path', { d: `M${cx},${y + 9} L${cx + 5},${y + 14} L${cx},${y + 19} Z`, fill: PHASE[n.phase] || '#888', class: 'cursor' + (n.cursor_detached ? ' detached' : '') }, cg);
         }
+        // Offline-migration step: the importer step rings/pulses/arcs the
+        // chip; no_importer/producer are additive badges, not a fill change.
+        const importer = n.importer || '';
+        const fresh = importer === 'caught_up' && (Date.now() / 1000 - (n.step_since || 0)) < 3;
+        for (const c of Array.from(chip.classList)) if (c.startsWith('step-')) chip.classList.remove(c);
+        if (STEP_RINGED.has(importer)) chip.classList.add('step-' + importer);
+        else if (fresh) chip.classList.add('step-caught_up');
+        chip.classList.toggle('has-lock', importer === 'no_importer');
+        chip.classList.toggle('has-producer', !!n.producer);
+        const arc = chip.querySelector('.step-arc');
+        // Replay runs to the chain tip (node 1's head), as the backend's caught_up does:
+        // right after the restart the node's own head is as stale as its cursor.
+        const to = Math.max(n.head_number, tip);
+        if (importer === 'replaying' && to > n.anchor) {
+          const p = Math.min(1, Math.max(0, (n.cursor_number - n.anchor) / (to - n.anchor)));
+          const r = CHIP_R + 6, a = Math.PI * 2 * p;
+          arc.setAttribute('d', `M0,${-r} A${r},${r} 0 ${a > Math.PI ? 1 : 0} 1 ${r * Math.sin(a)},${-r * Math.cos(a)}`);
+          el('text', { x, y: y + CHIP_R + 15, class: 'step-label', 'text-anchor': 'middle' }, cg).textContent = `BAL replay ${n.cursor_number}\u2192${to}`;
+        } else {
+          arc.removeAttribute('d');
+        }
+        chip.querySelector('.producer-badge').setAttribute('class', 'producer-badge producer-' + (n.producer_step || 'pending'));
       });
     }
     for (const c of Array.from(g.children)) if (!seen.has(c.id)) c.remove();
@@ -409,6 +448,25 @@ export class River {
       const txt = el('text', { x: 4, y: 13, class: 'fork-label' }, lbl);
       txt.textContent = `I* · slot ${s.fork_slot} · ${clock(s.fork_slot, s)} · MPT → PBT`;
       box.setAttribute('width', txt.getComputedTextLength() + 12);
+    }
+    // Offline-migration anchor marks: one per exported producer snapshot,
+    // styled like the I* rule but dashed and grey, never heavy. Producers
+    // often anchor a few blocks apart, so a label that would overlap the
+    // previous one drops a row.
+    let labelEdge = -Infinity, row = 0;
+    for (const a of (s.anchors || []).slice().sort((p, q) => p.number - q.number)) {
+      const blk = s.blocks.find(b => b.hash === a.hash);
+      if (!blk) continue;
+      const ax = this.x(blk.slot);
+      if (ax < -100 || ax > width + 100) continue;
+      el('line', { x1: ax, x2: ax, y1: 0, y2: riverH - AXIS_H, class: 'anchor-rule' }, g);
+      row = ax < labelEdge ? row + 1 : 0;
+      const albl = el('g', { transform: `translate(${ax},${2 + row * 18})` }, g);
+      const abox = el('rect', { x: -2, y: 0, width: 160, height: 16, rx: 3, fill: '#555' }, albl);
+      const atxt = el('text', { x: 4, y: 12, class: 'anchor-label' }, albl);
+      atxt.textContent = `anchor ${a.number} (P${a.node})`;
+      abox.setAttribute('width', atxt.getComputedTextLength() + 10);
+      labelEdge = ax + atxt.getComputedTextLength() + 12;
     }
     const nx = this.x(s.now_slot);
     el('line', { x1: nx, x2: nx, y1: 0, y2: riverH - AXIS_H, class: 'now-rule' }, g);
@@ -450,6 +508,14 @@ export class River {
       el('text', { class: 'strip-text', x: LOGOS[n.client] ? 13 : 0 }, label).textContent = `${n.id}  #${n.head_number}  lag ${n.lag}`;
       this.peerBars(label, 118, n.el_peers, 3, '#4c8dff'); this.peerBars(label, 144, n.cl_peers, 3, '#8a5cff');
       if (n.status !== 'ok') el('rect', { x: 0, y, width, height: STRIP_ROW - 3, fill: 'url(#hatch-red)', rx: 3 }, g);
+      // Offline-migration: same treatment as the chip, compacted - a left
+      // bar for the importer step, a lock for no_importer, a dot for producer.
+      if (n.importer && n.importer !== 'no_importer') el('rect', { x: 0, y, width: 4, height: STRIP_ROW - 3, class: 'step-bar step-' + n.importer, rx: 1 }, g);
+      if (n.importer === 'no_importer') el('text', { x: width - 8, y: y + 15, class: 'strip-text', 'text-anchor': 'end' }, g).textContent = '\u{1F512}';
+      if (n.producer) {
+        const mark = n.producer_step === 'exported' ? '\u25CF' : n.producer_step === 'export_failed' ? '\u2715' : '\u25D0';
+        el('text', { x: width - 24, y: y + 15, class: 'strip-text', fill: n.producer_step === 'export_failed' ? '#e0433d' : '#f0a500', 'text-anchor': 'end' }, g).textContent = mark;
+      }
     });
     el('line', { x1: this.x(s.fork_slot), x2: this.x(s.fork_slot), y1: 0, y2: stripH, class: 'fork-rule heavy' }, g);
   }
@@ -518,13 +584,34 @@ export class River {
     if (!s.reorgs.length) p.innerHTML = '<li class="muted">no head moves yet</li>';
   }
 
+  // Swap-queue panel: node, producer, step, time in step, in swap order.
+  renderSwaps(s) {
+    const p = this.panels.swaps; if (!p) return;
+    if (!s.swaps || !s.swaps.length) { p.replaceChildren(); return; }
+    const now = Date.now() / 1000;
+    p.innerHTML = s.swaps.map(sw => {
+      const elapsed = sw.step_since ? Math.max(0, Math.round(now - sw.step_since)) : 0;
+      return `<span class="swap"><b>${sw.node}</b> \u2190 P${sw.producer} \u00b7 ${esc(sw.importer || 'pending')} \u00b7 ${elapsed}s</span>`;
+    }).join('');
+  }
+
   title(text) { const t = el('title'); t.textContent = text; return t; }
 
   // Tooltip and card are keyed (kind:id), never element-bound: a re-render
   // replaces the SVG under a still pointer, so both are rebuilt from the
   // current snapshot on every tick and go away when the key disappears.
   nodeTip(n, s) {
-    return `<b>node ${n.id}</b> · ${n.phase}${n.isolated ? ' · <span class="bad">isolated</span>' : ''}${n.status !== 'ok' ? ' · <span class="bad">' + n.status + '</span>' : ''}<div>head #${n.head_number} ${short(n.head)} on ${n.segment}</div><div>PBT cursor #${n.cursor_number} (lag ${n.lag}) · I*: ${n.istar}</div><div>peers EL ${n.el_peers} · CL ${n.cl_peers} · finalized slot ${n.finalized_slot}</div>`;
+    let off = '';
+    if (n.producer) off += `<div>producer: ${esc(n.producer_step || 'pending')}</div>`;
+    if (n.importer) {
+      const bits = [esc(n.importer)];
+      if (n.importer === 'no_importer') bits.push(esc(n.importer_reason));
+      if (n.anchor) bits.push(`anchor #${n.anchor}`);
+      if (n.importer === 'replaying') bits.push(`replay ${n.cursor_number}\u2192${n.head_number} from ${n.anchor}`);
+      off += `<div>importer: ${bits.join(' \u00b7 ')}</div>`;
+    }
+    if (n.step_detail) off += `<div class="muted">${esc(n.step_detail)}</div>`;
+    return `<b>node ${n.id}</b> · ${n.phase}${n.isolated ? ' · <span class="bad">isolated</span>' : ''}${n.status !== 'ok' ? ' · <span class="bad">' + n.status + '</span>' : ''}<div>head #${n.head_number} ${short(n.head)} on ${n.segment}</div><div>PBT cursor #${n.cursor_number} (lag ${n.lag}) · I*: ${n.istar}</div><div>peers EL ${n.el_peers} · CL ${n.cl_peers} · finalized slot ${n.finalized_slot}</div>${off}`;
   }
   tipHtml(key) {
     const s = this.s; if (!s || !key) return null;

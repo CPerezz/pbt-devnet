@@ -14,7 +14,7 @@ DEPTH ?= 10
 MINORITY ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help tree-at-genesis migration migration-smoke up down logs ui ui-preview status \
+.PHONY: help tree-at-genesis migration migration-smoke migration-offline up down logs ui ui-preview status \
         compare forks proposals diagnose split heal repeer chaos-status scenario \
         build sources bin genesis check
 
@@ -35,6 +35,9 @@ migration: ## Scenarios: EIP-8347 - two geth, erigon, besu and Nethermind switch
 
 migration-smoke: ## Scenarios: the short migration lap (~45 min)
 	$(MAKE) lap ARGS=args/migration-smoke.yaml
+
+migration-offline: ## Scenarios: the full lap plus the offline path - real snapshot+preimage export, serial import swaps (~1.5 h)
+	$(MAKE) lap ARGS=args/migration-offline.yaml
 
 up: check build ## Scenarios: start ARGS as a plain network and follow its monitor (no lap driver)
 	@kurtosis enclave rm -f $(ENCLAVE) >/dev/null 2>&1 || true
@@ -105,7 +108,7 @@ scenario: ## Chaos by hand: run one reorg scenario (NAME=code-shared DEPTH=20 [M
 build: sources ## Building: every image ARGS needs (besu, two Gradle stages, only when a participant runs it)
 	scripts/build-images.sh $(ARGS)
 
-sources: ## Building: clone the forks this builds from, if they are not already beside this repo
+sources: ## Building: fetch each client fork at its pinned commit into ../pbt-devnet-src (scripts/sources.sh)
 	@scripts/sources.sh
 
 bin: ## Building: every command as a host binary into bin/

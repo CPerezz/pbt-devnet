@@ -73,6 +73,7 @@ func main() {
 		els       elFlag
 		cls       elFlag
 		protected cli.IntsFlag
+		observers cli.IntsFlag
 		api       = flag.String("disruptoor", "", "disruptoor native API base URL")
 		genesisTS = flag.Int64("genesis-time", 0, "chain genesis unix time")
 		forkTS    = flag.Int64("binary-trie-time", 0, "tree activation unix time")
@@ -86,6 +87,7 @@ func main() {
 	flag.Var(&els, "el", "execution client as name=url, repeatable; order is the participant index")
 	flag.Var(&cls, "cl", "consensus client beacon API as name=url, repeatable")
 	flag.Var(&protected, "protect-node", "participant index never isolated, repeatable")
+	flag.Var(&observers, "observer", "non-validating participant index outside the schedule; every partition keeps it on the anchor's side, repeatable")
 	flag.Parse()
 
 	wrapped := flag.Args()
@@ -136,6 +138,7 @@ func main() {
 	var d *disruptoor.Client
 	if *api != "" {
 		d = disruptoor.New(*api, 15*time.Second)
+		d.Observers = observers
 	}
 
 	// Watchdog runs for this process's whole life, including before done.

@@ -26,6 +26,12 @@ type lapManifest struct {
 	Requested        []string `json:"requested"` // scenario names the lap asked for, regardless of outcome
 	HandoverExpected bool     `json:"handover_expected"`
 	QuiescedAt       int64    `json:"quiesced_at"` // unix seconds, 0 = never quiesced
+
+	// Offline lap: the config main.star printed, and migration-swap's evidence.
+	// Producer/Swap Dir and EvidenceDir are relative to the manifest's own directory.
+	Offline   *migmon.Offline         `json:"offline"`
+	Producers []migmon.ProducerRecord `json:"producers"`
+	Swaps     []migmon.SwapRecord     `json:"swaps"`
 }
 
 func loadManifest(path string) (*lapManifest, error) {
@@ -90,8 +96,18 @@ func (v *verifier) checkLapManifest(ctx context.Context) (verdict, string) {
 			problems = append(problems, "manifest expects a handover but records zero scenarios: the post-switchover suite never ran")
 		}
 	}
+	// pbtchaos says "inconclusive" when it could not create the condition (no proposer
+	// slot on the island, a degraded mesh, a partition that did not bite): untested, not
+	// failed. "finding" and "error" are faults.
+	ok := 0
+	var untested []string
 	for _, s := range m.Scenarios {
-		if s.Outcome != "ok" {
+		switch s.Outcome {
+		case "ok":
+			ok++
+		case "inconclusive":
+			untested = append(untested, fmt.Sprintf("scenario %s ended inconclusive", s.Name))
+		default:
 			problems = append(problems, fmt.Sprintf("scenario %s ended %q, want ok", s.Name, s.Outcome))
 		}
 	}
@@ -107,8 +123,8 @@ func (v *verifier) checkLapManifest(ctx context.Context) (verdict, string) {
 			problems = append(problems, fmt.Sprintf("requested scenario %s has no recorded outcome", name))
 		}
 	}
-	if n := len(m.Scenarios); n > 0 {
-		notes = append(notes, fmt.Sprintf("%d scenario(s) completed ok", n))
+	if ok > 0 {
+		notes = append(notes, fmt.Sprintf("%d scenario(s) completed ok", ok))
 	}
 
 	if m.QuiescedAt != 0 {
@@ -124,6 +140,9 @@ func (v *verifier) checkLapManifest(ctx context.Context) (verdict, string) {
 
 	if len(problems) > 0 {
 		return verdictFail, strings.Join(problems, "; ")
+	}
+	if len(untested) > 0 {
+		return verdictInconclusive, strings.Join(append(untested, notes...), "; ")
 	}
 	if len(notes) == 0 {
 		notes = append(notes, "manifest present, nothing scheduled to reconcile")

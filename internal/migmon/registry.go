@@ -16,8 +16,8 @@ type ClientSpec struct {
 	ForbiddenWindowLog string // substring that must never appear during the forbidden window
 	// RetiresShadow: once the fork block finalizes the client stops maintaining the
 	// other tree, so a shadow root or an active direction after done is a regression.
-	// A client that keeps both (erigon folds both commitment domains until an error
-	// stops one) reports done with its shadow still live, and is not judged on it.
+	// A client that retires later (erigon stops the merkle shadow MAX_REORG_DEPTH
+	// blocks past the fork) reports done with its shadow still live, and is not judged on it.
 	RetiresShadow bool
 }
 

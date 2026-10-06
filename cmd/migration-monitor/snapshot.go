@@ -20,6 +20,26 @@ type apiState struct {
 	Partitions    []partition  `json:"partitions"`
 	Schedule      []scheduleOp `json:"schedule"`
 	Alerts        []alert      `json:"alerts"`
+	// Offline migration lap only; omitted entirely (not even `[]`) when --offline is unset,
+	// so an online lap's document is byte-identical to before this field existed.
+	Anchors []anchorMark `json:"anchors,omitempty"`
+	Swaps   []swapView   `json:"swaps,omitempty"`
+}
+
+// anchorMark is one producer's exported anchor, drawn as a marker on the river.
+type anchorMark struct {
+	Node   int    `json:"node"`
+	Number uint64 `json:"number"`
+	Hash   string `json:"hash"`
+}
+
+// swapView is one consumer's swap-queue row, in swap order.
+type swapView struct {
+	Node      int    `json:"node"`
+	Producer  int    `json:"producer"`
+	Importer  string `json:"importer"`
+	Anchor    uint64 `json:"anchor"`
+	StepSince int64  `json:"step_since"`
 }
 
 type nodeView struct {
@@ -30,7 +50,7 @@ type nodeView struct {
 	HeadNumber     uint64 `json:"head_number"`
 	HeadSlot       uint64 `json:"head_slot"`
 	Segment        string `json:"segment"`
-	Phase          string `json:"phase"` // synced|following|parked|window|done|stalled|opaque|unknown
+	Phase          string `json:"phase"` // synced|following|parked|idle|window|done|stalled|opaque|unknown
 	CursorNumber   uint64 `json:"cursor_number"`
 	CursorHash     string `json:"cursor_hash"`
 	Lag            uint64 `json:"lag"`
@@ -41,6 +61,15 @@ type nodeView struct {
 	FinalizedSlot  uint64 `json:"finalized_slot"`
 	Status         string `json:"status"` // ok|unreachable
 	Isolated       bool   `json:"isolated"`
+
+	// Offline migration lap only; all zero/"" and omitted when --offline is unset.
+	Producer       bool   `json:"producer,omitempty"`        // this node is an EIP-8347 producer
+	ProducerStep   string `json:"producer_step,omitempty"`   // exporting|exported|export_failed
+	Importer       string `json:"importer,omitempty"`        // no_importer|pending|disconnecting|importing|reconnecting|replaying|caught_up|failed|timeout|skipped
+	ImporterReason string `json:"importer_reason,omitempty"` // no_importer: why (seeded from online_only)
+	StepSince      int64  `json:"step_since,omitempty"`      // unix seconds the current producer_step/importer step started
+	Anchor         uint64 `json:"anchor,omitempty"`          // this node's own anchor, or its producer's
+	StepDetail     string `json:"step_detail,omitempty"`     // free text from the pushing step, or the derived reading
 }
 
 // segment is a maximal single-lineage run; lane 0 is the canonical chain.

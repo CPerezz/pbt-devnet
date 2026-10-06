@@ -1,0 +1,25 @@
+#!/bin/bash
+# Offline-migration hook for the pbt-devnet lap. Nethermind imports an EIP-8347
+# snapshot during its own startup, from Pbt.Migration* settings, and refuses a
+# PBT database seeded from another source. So cmd/migration-swap leaves:
+#   pbt-swap/wipe   one-shot: delete the native PBT database seeded at genesis
+#   pbt-swap/flags  one flag per line, replacing --Pbt.MigrationGenesisBootstrap;
+#                   kept, so every later restart reuses the same import
+# Without either marker this is the image's own entrypoint.
+D=/data/nethermind/execution-data
+S=$D/pbt-swap
+if [ -f "$S/wipe" ]; then
+  find "$D" -mindepth 1 -maxdepth 3 -type d \( -name pbt -o -name migration-work \) -prune \
+    -print -exec rm -rf {} + | sed 's/^/pbt-swap: wiped /'
+  rm -f "$S/wipe"
+fi
+if [ -f "$S/flags" ]; then
+  args=()
+  for a in "$@"; do
+    [ "$a" = "--Pbt.MigrationGenesisBootstrap=true" ] || args+=("$a")
+  done
+  mapfile -t extra < "$S/flags"
+  echo "pbt-swap: starting with ${extra[*]}"
+  set -- "${args[@]}" "${extra[@]}"
+fi
+exec ./entrypoint.sh "$@"

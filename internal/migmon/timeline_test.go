@@ -114,6 +114,31 @@ func TestStallSlowBurn(t *testing.T) {
 	})
 }
 
+// ResetStall: an offline-migration import rewinds the binary cursor to its
+// anchor; without a reset, the frozen-span bookkeeping would read the
+// rewind as a frozen cursor and fire the instant polling resumes.
+func TestResetStallClearsFrozenSpan(t *testing.T) {
+	tl := NewTimeline("n", 1000)
+	// Freeze the binary cursor at 50 for StallPolls-1 polls - one short of
+	// firing, so the span is live but has not yet latched.
+	head := uint64(0)
+	for range StallPolls - 1 {
+		tl.ObservePoll(MigrationProgress{Phase: PhaseRunning, Binary: &DirectionProgress{Phase: DirFollowing, Cursor: 50}}, head)
+		head += StallHeadDelta
+	}
+	tl.ResetStall()
+	// The import rewound the cursor to the anchor (12); without the reset
+	// this would look like the same frozen span continuing, not a fresh one.
+	var all []Event
+	for range StallPolls + 2 {
+		all = append(all, tl.ObservePoll(MigrationProgress{Phase: PhaseRunning, Binary: &DirectionProgress{Phase: DirFollowing, Cursor: 12}}, head)...)
+		head += StallHeadDelta
+	}
+	if countKind(all, EvCritical) != 1 {
+		t.Fatalf("want exactly one fresh stall after the reset, got %+v", all)
+	}
+}
+
 // boundary boundary: compliant within the window fires nothing; never complying
 // past both clocks fires exactly one critical.
 func TestBoundaryFinding(t *testing.T) {
@@ -127,6 +152,22 @@ func TestBoundaryFinding(t *testing.T) {
 		}, 101)
 		if hasFinding(evs, EvCritical, FindingBoundary) {
 			t.Fatalf("compliant boundary must not fire, got %+v", evs)
+		}
+	})
+	// geth freezes the merkle tree at I*: binary parked with no merkle direction
+	// complies (the 2026-10-03 laps flagged every geth node here).
+	t.Run("merkle frozen at I*", func(t *testing.T) {
+		tl := NewTimeline("n", 1000)
+		tl.ObserveIStar(IStar{Number: 100, Hash: "0xb"})
+		var all []Event
+		for _, h := range []uint64{101, 102, 104, 105} {
+			all = append(all, tl.ObservePoll(MigrationProgress{
+				Phase:  PhaseRunning,
+				Binary: &DirectionProgress{Phase: DirParked},
+			}, h)...)
+		}
+		if hasFinding(all, EvCritical, FindingBoundary) {
+			t.Fatalf("binary parked with merkle frozen must not fire, got %+v", all)
 		}
 	})
 	t.Run("never complies, fires once after both clocks expire", func(t *testing.T) {

@@ -21,6 +21,10 @@ const (
 	EvIStarReorged = "istar-reorged" // Detail=old->new, the recorded fork block was orphaned
 	EvIStarFinal   = "istar-final"   // the node's fork block is finalized and settled
 
+	// Offline migration (cmd/migration-swap drives it, the monitor records it):
+	// Node=service, Phase=step, Number=anchor block, Hash=anchor hash.
+	EvLifecycle = "lifecycle"
+
 	// Chaos driver kinds, same stream shape, separate file.
 	EvSchedule = "schedule" // resolved schedule, once at startup, Raw=migsched.Dump
 	EvIsolate  = "isolate"  // Node=victim, Detail=window
@@ -56,16 +60,21 @@ type Event struct {
 	Plan    bool              `json:"plan,omitempty"`    // dry-run: this isolate/skip was never executed
 }
 
-// Log serialises events to one writer, one JSON object per line.
+// Log serialises events to one writer, one JSON object per line. Drop, when
+// set before the first Emit, discards the events it reports true for.
 type Log struct {
-	mu  sync.Mutex
-	enc *json.Encoder
+	mu   sync.Mutex
+	enc  *json.Encoder
+	Drop func(Event) bool
 }
 
 func NewLog(w io.Writer) *Log { return &Log{enc: json.NewEncoder(w)} }
 
 // Emit writes one event, stamping the time if unset.
 func (l *Log) Emit(ev Event) error {
+	if l.Drop != nil && l.Drop(ev) {
+		return nil
+	}
 	if ev.Time.IsZero() {
 		ev.Time = time.Now().UTC()
 	}

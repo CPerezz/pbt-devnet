@@ -10,8 +10,8 @@ const (
 	// stall: a direction reports stalled/error, or its cursor freezes while the head advances.
 	FindingStall = "stall"
 
-	// boundary: the binary direction must park and the merkle direction must
-	// start following within BoundaryPolls polls or BoundaryBlocks blocks of I*; "done" must come strictly after I*.
+	// boundary: the binary direction must park within BoundaryPolls polls or
+	// BoundaryBlocks blocks of I*; "done" must come strictly after I*.
 	FindingBoundary = "boundary"
 
 	// no-convergence: a partition healed but heads still disagree past ConvergenceGrace.

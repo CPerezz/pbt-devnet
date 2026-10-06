@@ -93,6 +93,13 @@ type NullTracker struct {
 
 func NewNullTracker(node string) *NullTracker { return &NullTracker{node: node} }
 
+// Reset clears the active streak the same way going inactive does: an
+// offline migration import rewound this node's state, so a streak measured
+// since before the stop would otherwise misfire the instant sampling resumes.
+func (n *NullTracker) Reset() {
+	n.active, n.warnFired, n.critFired = false, false, false
+}
+
 // Observe records one sample's null/non-null outcome at time now.
 func (n *NullTracker) Observe(now time.Time, active bool, null bool) []Event {
 	if !active {

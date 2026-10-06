@@ -1,12 +1,19 @@
-// Synthetic lap: a scripted four-node migration run that exercises every
-// glyph the page draws. Deterministic (seeded), so a review compares the
-// same picture; produces the same snapshot shape /api/state will serve.
+// Synthetic lap: a scripted six-node migration run that exercises every
+// glyph the page draws, including the offline-migration lifecycle (`make
+// ui-preview`). Deterministic (seeded), so a review compares the same
+// picture; produces the same snapshot shape /api/state will serve.
 //
-// Timeline (slots, 6s each): genesis 0; deep partitions on node 2 (40-72,
-// 90-122); short on node 3 (132-157); node 4 unreachable 200-215; straddle
-// on node 3 across I*=300 (285-315: two I* candidates, node 3's orphaned);
-// window partition on node 4 (340-365); post-fork deep and two scenarios.
-// One injected shadow-root split at block #150 (node 4 dissents).
+// Timeline (slots, 6s each): genesis 0; offline lap first (node 6 exports
+// 2-8, node 2 exports live 4-10, node 5 swaps node 6's artifacts 8-28, node
+// 3 swaps node 2's artifacts serially after 16-48; ?variant=fail replaces
+// node 5's swap with a terminal failure and node 3's with a stuck-reconnect
+// timeout). Then the original four-node chaos drama on nodes 1-4: deep
+// partitions on node 2 (40-72, 90-122); short on node 3 (132-157); node 4
+// unreachable 200-215; straddle on node 3 across I*=300 (285-315: two I*
+// candidates, node 3's orphaned); window partition on node 4 (340-365);
+// post-fork deep and two scenarios. One injected shadow-root split at block
+// #150 (node 4 dissents). Nodes 5/6 never fork: they ride the spine, their
+// chip driven by the offline importer/producer step instead.
 
 export function syntheticLap(nowSlot) {
   let seed = 7;
@@ -18,12 +25,15 @@ export function syntheticLap(nowSlot) {
     for (let i = 0; i < 8; i++) { s = (s * 1664525 + 1013904223) >>> 0; out += s.toString(16).padStart(8, '0'); }
     return out;
   };
+  const variant = (typeof location !== 'undefined' && new URLSearchParams(location.search).get('variant')) || 'happy';
 
   const T = 300, FINALITY_LAG = 30, SLOT_SECONDS = 6;
   const stake = { 1: 0.2, 2: 0.4, 3: 0.2, 4: 0.2 };
-  const nodes = [1, 2, 3, 4];
+  const CHAOS_NODES = [1, 2, 3, 4]; // only these fork/partition; 5/6 ride the spine
+  const ALL_NODES = [1, 2, 3, 4, 5, 6];
   // The migration profile's own layout, so the preview shows the marks the live page does.
-  const CLIENTS = ['geth', 'erigon', 'geth', 'besu'];
+  // Node 6: non-validating producer (geth-convert). Node 5: nethermind, consumer of node 6.
+  const CLIENTS = ['geth', 'erigon', 'geth', 'besu', 'nethermind', 'geth'];
 
   const plan = [
     { name: 'deep-1', class: 'deep', victims: [2], start: 40, end: 72 },
@@ -45,7 +55,7 @@ export function syntheticLap(nowSlot) {
   const reorgs = [];
   const alerts = [];
   let number = 0;
-  const spineSeg = { id: 's0', lane: 0, ancestor: null, first_slot: 0, last_slot: 0, blocks: 0, tip: null, state: 'live', holders: [1, 2, 3, 4], lost_by: [] };
+  const spineSeg = { id: 's0', lane: 0, ancestor: null, first_slot: 0, last_slot: 0, blocks: 0, tip: null, state: 'live', holders: ALL_NODES.slice(), lost_by: [] };
   segments.push(spineSeg);
   let prevHash = hex('g', 0);
 
@@ -74,13 +84,13 @@ export function syntheticLap(nowSlot) {
 
   for (let slot = 1; slot <= nowSlot; slot++) {
     const victims = activeVictims(slot);
-    const majorityStake = nodes.filter(n => !victims.includes(n)).reduce((a, n) => a + stake[n], 0);
+    const majorityStake = CHAOS_NODES.filter(n => !victims.includes(n)).reduce((a, n) => a + stake[n], 0);
     const format = slot >= T ? 'pbt' : 'mpt';
 
     if (rnd() < majorityStake) {
       number++;
       const b = mint(slot, spineSeg, prevHash, number, format);
-      if (!crossedT && slot >= T) { b.istar = true; crossedT = true; nodes.filter(n => !victims.includes(n)).forEach(n => istarByNode[n] = 'provisional'); }
+      if (!crossedT && slot >= T) { b.istar = true; crossedT = true; CHAOS_NODES.filter(n => !victims.includes(n)).forEach(n => istarByNode[n] = 'provisional'); }
       prevHash = b.hash;
     }
     for (const v of victims) {
@@ -132,8 +142,62 @@ export function syntheticLap(nowSlot) {
     alerts.push({ slot: splitAt.slot, kind: 'critical', node: 4, expected: false, detail: 'PBT shadow root mismatch at block #150 (node 4 vs majority)' });
   }
 
+  // Offline-migration lifecycle for nodes 2/6 (producers) and 5/3 (consumers,
+  // swapped serially, in config order). step_since is back-computed from the
+  // simulated elapsed-in-step, not real wall time, so the client-side "fresh
+  // for 3s" check on caught_up lines up with the scrubbed slot, not the clock.
+  const spineBlockAt = (slot) => {
+    let best = null;
+    for (const b of blocks) if (b.segment === 's0' && b.slot <= slot && (!best || b.number > best.number)) best = b;
+    return best;
+  };
+  const since = (startSlot) => Math.floor(Date.now() / 1000) - Math.max(0, nowSlot - startSlot) * SLOT_SECONDS;
+  const anchor6Block = nowSlot >= 8 ? spineBlockAt(8) : null;
+  const anchor2Block = nowSlot >= 10 ? spineBlockAt(10) : null;
+  const anchor6 = anchor6Block ? anchor6Block.number : 0;
+  const anchor2 = anchor2Block ? anchor2Block.number : 0;
+  const producerStep = (fromSlot, exportedSlot, anchor) => {
+    if (nowSlot < fromSlot) return { producer: true, producer_step: '' };
+    if (nowSlot < exportedSlot) return { producer: true, producer_step: 'exporting', step_since: since(fromSlot) };
+    return { producer: true, producer_step: 'exported', step_since: since(exportedSlot), anchor };
+  };
+  const onlineOnly = { 1: 'protected anchor: stays on the online path', 2: 'erigon has no cross-client importer', 4: 'besu has no importer' };
+
+  // One consumer's disconnecting->importing->reconnecting->replaying->caught_up
+  // ladder, parameterised by its start slot and which failure variant (if
+  // any) it shows instead of settling.
+  const swapSteps = (start, fail) => {
+    const at = (importer, from, step_detail = '') => ({ importer, step_since: since(from), step_detail });
+    if (nowSlot < start) return { importer: 'pending', step_since: 0 };
+    if (nowSlot < start + 3) return at('disconnecting', start);
+    if (nowSlot < start + 8) return at('importing', start + 3);
+    if (fail === 'failed') return at('failed', start + 8, 'import exited: native PBT database holds no state');
+    if (nowSlot < start + 10) return at('reconnecting', start + 8);
+    if (fail === 'timeout') return at('timeout', start + 10, 'reconnect exceeded timeout_seconds=900');
+    if (nowSlot < start + 18) return at('replaying', start + 10);
+    return at('caught_up', start + 18);
+  };
+  const s5 = swapSteps(8, variant === 'fail' && 'failed');
+  const s3 = swapSteps(variant === 'fail' ? 16 : 26, variant === 'fail' && 'timeout'); // node 3's swap queues behind node 5's
+
+  const anchors = [];
+  if (anchor6Block) anchors.push({ node: 6, number: anchor6, hash: anchor6Block.hash });
+  if (anchor2Block) anchors.push({ node: 2, number: anchor2, hash: anchor2Block.hash });
+  const swaps = [
+    { node: 5, producer: 6, importer: s5.importer, anchor: anchor6, step_since: s5.step_since },
+    { node: 3, producer: 2, importer: s3.importer, anchor: anchor2, step_since: s3.step_since },
+  ];
+  const offByNode = {
+    1: { importer: 'no_importer', importer_reason: onlineOnly[1] },
+    2: { ...producerStep(4, 10, anchor2), importer: 'no_importer', importer_reason: onlineOnly[2] },
+    3: { ...s3, anchor: anchor2 },
+    4: { importer: 'no_importer', importer_reason: onlineOnly[4] },
+    5: { ...s5, anchor: anchor6 },
+    6: producerStep(2, 8, anchor6),
+  };
+
   const finalized = Math.max(0, nowSlot - FINALITY_LAG);
-  const nodeViews = nodes.map(n => {
+  const nodeViews = ALL_NODES.map(n => {
     const isolated = activeVictims(nowSlot).includes(n);
     const isl = islands.find(i => i.victim === n && !i.closed);
     const seg = isl ? isl.seg : spineSeg;
@@ -146,12 +210,13 @@ export function syntheticLap(nowSlot) {
       istar: nowSlot < T ? 'none' : (finalized >= T ? 'final' : (istarByNode[n] || 'provisional')),
       el_peers: isolated ? 0 : 3, cl_peers: isolated ? 0 : 3, finalized_slot: isolated ? Math.max(0, seg.first_slot - 5) : finalized,
       status: nowSlot > 200 && nowSlot < 215 && n === 4 ? 'unreachable' : 'ok', isolated,
+      ...offByNode[n],
     };
   });
   for (const s of segments) if (s.state === 'live' && s.id !== 's0') s.holders = nodeViews.filter(v => v.segment === s.id).map(v => v.id);
 
   return {
     seq: nowSlot, now_slot: nowSlot, slot_seconds: SLOT_SECONDS, fork_slot: T, finalized_slot: finalized,
-    nodes: nodeViews, segments, blocks, reorgs, partitions, schedule, alerts,
+    nodes: nodeViews, segments, blocks, reorgs, partitions, schedule, alerts, anchors, swaps,
   };
 }

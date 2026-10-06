@@ -17,8 +17,10 @@ import (
 var uiFS embed.FS
 
 // serveHTTP starts the live page in the background; a bind failure is a
-// warn, not fatal - the JSONL stream is the monitor's real output.
-func serveHTTP(addr string, document func() []byte, log *migmon.Log) {
+// warn, not fatal - the JSONL stream is the monitor's real output. off nil
+// (the --offline flag unset) leaves /api/lifecycle unregistered: migration-swap
+// has nothing to push to, and the route 404s rather than silently accepting steps.
+func serveHTTP(addr string, document func() []byte, log *migmon.Log, off *offline) {
 	ui, err := fs.Sub(uiFS, "ui")
 	if err != nil {
 		panic(err) // the embed directive above guarantees the directory
@@ -34,6 +36,9 @@ func serveHTTP(addr string, document func() []byte, log *migmon.Log) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Write(doc)
 	})
+	if off != nil {
+		mux.HandleFunc("POST /api/lifecycle", lifecycleHandler(off, log))
+	}
 	mux.Handle("GET /", http.FileServerFS(ui))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {

@@ -38,6 +38,8 @@ func main() {
 	anchor := flag.Int("anchor-node", 1, "participant holding the heavy validator share, never partitioned (with --profile)")
 	anchorShare := flag.Float64("anchor-share", 0.40, "that participant's share of the validator set")
 	flag.Var(&protect, "protect-node", "participant never partitioned (repeatable)")
+	scheduleParticipants := flag.Int("schedule-participants", 0, "participants for the schedule ribbon's light share; 0 = every --el entry (lower this when some are non-validating, e.g. an offline-migration producer, so they do not change migsched's light share)")
+	offlineFlag := flag.String("offline", "", "the pbt_offline JSON main.star prints (migmon.Offline) (default off: the page is unchanged)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -59,6 +61,23 @@ func main() {
 		states = append(states, newNodeState(name, url, binaryTrieT))
 	}
 
+	participants := len(states)
+	if *scheduleParticipants > 0 {
+		participants = *scheduleParticipants
+	}
+	names := make([]string, len(states))
+	for i, ns := range states {
+		names[i] = ns.name
+	}
+	var off *offline
+	if *offlineFlag != "" {
+		o, err := parseOffline(*offlineFlag, names)
+		if err != nil {
+			cli.Fatal(log, "--offline: %v", err)
+		}
+		off = o
+	}
+
 	var w io.Writer = os.Stdout
 	if *jsonlPath != "" {
 		f, err := os.Create(*jsonlPath)
@@ -69,20 +88,27 @@ func main() {
 		w = f
 	}
 	jsonl := migmon.NewLog(w)
+	// A node the offline swap has down or rewound raises no findings. Every warn/critical
+	// names the node it observed, so one predicate covers every finding site.
+	dropQuiet := func(e migmon.Event) bool {
+		return (e.Kind == migmon.EvWarn || e.Kind == migmon.EvCritical) && off.quiet(nodeIndex(e.Node))
+	}
+	jsonl.Drop = dropQuiet
 	var col *collector
 	if *httpAddr != "" {
 		if *genesisTime <= 0 || *slotSeconds == 0 {
 			cli.Fatal(log, "--http needs --genesis-time and --seconds-per-slot for the slot axis")
 		}
-		sched, classOf := resolveSchedule(jsonl, *profile, *anchor, *anchorShare, protect, len(states), *genesisTime, *binaryTrieTime, *slotSeconds)
+		sched, classOf := resolveSchedule(jsonl, *profile, *anchor, *anchorShare, protect, participants, *genesisTime, *binaryTrieTime, *slotSeconds)
 		var d *disruptoor.Client
 		if *disruptoorURL != "" {
 			d = disruptoor.New(*disruptoorURL, 5*time.Second)
 		}
-		col = newCollector(states, beacons(log, cls), d, sched, classOf, *anchor, uint64(*genesisTime), *slotSeconds, binaryTrieT, *windowSlots)
+		col = newCollector(states, beacons(log, cls), d, sched, classOf, *anchor, uint64(*genesisTime), *slotSeconds, binaryTrieT, *windowSlots, off)
 		// The collector decodes the same JSONL lines as w: the page's alerts stay in lockstep with the stream.
 		jsonl = migmon.NewLog(io.MultiWriter(w, col))
-		serveHTTP(*httpAddr, col.document, jsonl)
+		jsonl.Drop = dropQuiet
+		serveHTTP(*httpAddr, col.document, jsonl, off)
 	}
 	quorum := migmon.NewIStarQuorum(binaryTrieT)
 	split := &splitWatch{}
@@ -102,8 +128,18 @@ func main() {
 	defer sampleTick.Stop()
 
 	doPoll := func() {
-		for _, ns := range states {
+		for i, ns := range states {
+			node := i + 1
+			if off.takeReset(node) {
+				// The import rewound the binary cursor to the anchor: stall and null
+				// streaks restart, and derive waits for a reading taken after the stop.
+				ns.timeline.ResetStall()
+				ns.nullTr.Reset()
+				ns.haveProgress, ns.haveHead = false, false
+			}
 			pollOnce(ctx, jsonl, binaryTrieT, ns, quorum, resample)
+			// Node 1 polls first, so its head is this round's chain tip.
+			off.derive(jsonl, node, ns, states[0].lastHead)
 		}
 		if col != nil {
 			col.tick(ctx, jsonl)
@@ -119,7 +155,7 @@ func main() {
 		case <-pollTick.C:
 			doPoll()
 		case <-sampleTick.C:
-			sampleOnce(ctx, jsonl, states, split, resample)
+			sampleOnce(ctx, jsonl, states, split, resample, off)
 		}
 	}
 }

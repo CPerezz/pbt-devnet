@@ -27,6 +27,7 @@ type collector struct {
 	anchor                                      int
 	states                                      []*nodeState
 	beacons                                     map[int]string // node -> beacon API base
+	offline                                     *offline       // nil: feature off
 
 	lin    *lineage
 	shadow *shadowTable
@@ -56,10 +57,10 @@ const (
 )
 
 func newCollector(states []*nodeState, beacons map[int]string, d *disruptoor.Client, sched []scheduleOp, classOf func(string) string,
-	anchor int, genesis, slotSeconds, forkTime, windowSlots uint64) *collector {
+	anchor int, genesis, slotSeconds, forkTime, windowSlots uint64, off *offline) *collector {
 	c := &collector{
 		genesis: genesis, slotSeconds: slotSeconds, forkTime: forkTime, windowSlots: windowSlots, anchor: anchor,
-		states: states, beacons: beacons, sched: sched,
+		states: states, beacons: beacons, sched: sched, offline: off,
 		elPeers: map[int]int{}, clPeers: map[int]int{}, finalized: map[int]uint64{},
 	}
 	c.lin = newLineage(forkTime, c.slotOf, retainSlots, anchor)
@@ -68,6 +69,7 @@ func newCollector(states []*nodeState, beacons map[int]string, d *disruptoor.Cli
 		clients[i] = ns.rpc
 	}
 	c.shadow = newShadowTable(clients, 10*time.Second, retainSlots)
+	c.shadow.quiet = off.quiet // bound method value, nil-safe even with off == nil
 	if d != nil {
 		c.parts = newPartitionTracker(d, classOf, anchor)
 	}
@@ -256,6 +258,7 @@ func (c *collector) state(now uint64) apiState {
 		if c.parts != nil {
 			v.Isolated = c.parts.isolated(node)
 		}
+		c.offline.fill(node, &v)
 		nodes = append(nodes, v)
 	}
 
@@ -293,11 +296,13 @@ func (c *collector) state(now uint64) apiState {
 	}
 	alerts := append([]alert(nil), c.alerts...)
 	sort.SliceStable(alerts, func(i, j int) bool { return alerts[i].Slot < alerts[j].Slot })
+	anchors, swaps := c.offline.views()
 	return apiState{
 		Seq: c.seq, NowSlot: now, SlotSeconds: c.slotSeconds, ForkSlot: c.slotOf(c.forkTime), FinalizedSlot: finalized,
 		Truncated: c.lin.truncated,
 		Nodes:     nodes, Segments: nonNil(segs), Blocks: nonNil(blocks), Reorgs: nonNil(c.lin.reorgs()),
 		Partitions: nonNil(parts), Schedule: nonNil(c.sched), Alerts: nonNil(alerts),
+		Anchors: anchors, Swaps: swaps,
 	}
 }
 

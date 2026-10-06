@@ -14,6 +14,7 @@ watch_starved() {
   local seen=""
   while :; do
     sleep 30
+    [ -e "$OUT/swap.lock" ] && continue
     for svc in $(kurtosis service logs "$ENCLAVE" migration-gate -a 2>/dev/null \
         | grep '"finding":"cl-starved"' | grep -oE '"node":"[^"]+"' | cut -d'"' -f4 | sort -u); do
       case " $seen " in *" $svc "*) continue;; esac
@@ -46,6 +47,7 @@ say() { printf '%s  %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 # Build the judge first: a lap whose verdict cannot be computed is wasted.
 go build -o bin/verify-migration ./cmd/verify-migration
+go build -o bin/migration-swap ./cmd/migration-swap
 say "starting $ENCLAVE from $ARGS"
 kurtosis enclave rm -f "$ENCLAVE" >/dev/null 2>&1 || true
 kurtosis run . --enclave "$ENCLAVE" --args-file "$ARGS" --privileged > "$OUT/run.log" 2>&1 || {
@@ -59,16 +61,28 @@ fi
 say "genesis=$GENESIS fork=$FORK (offset $((FORK - GENESIS))s)"
 printf 'enclave=%s\nargs=%s\ngenesis=%s\nfork=%s\n' "$ENCLAVE" "$ARGS" "$GENESIS" "$FORK" > "$OUT/lap.env"
 
+# main.star prints this on one offline-migration lap; absent on an online one.
+OFFLINE_JSON=$( { grep -oE 'pbt_offline=.*' "$OUT/run.log" || true; } | head -1 | sed 's/^pbt_offline=//')
+SWAP_PID=""
+if [ -n "$OFFLINE_JSON" ]; then
+  say "offline migration lap: starting migration-swap"
+  rm -f "$OUT/swap.lock" "$OUT/swaps.json"
+  bin/migration-swap --enclave "$ENCLAVE" --genesis "$GENESIS" --fork "$FORK" \
+    --offline "$OFFLINE_JSON" --out "$OUT" ${OFFLINE_FAULT:+--fault "$OFFLINE_FAULT"} \
+    > "$OUT/migration-swap.log" 2>&1 &
+  SWAP_PID=$!
+fi
+
 if port=$(kurtosis port print "$ENCLAVE" migration-monitor http 2>/dev/null); then
   say "live view: $port"
 fi
 watch_starved & WATCH=$!
-trap 'kill $WATCH 2>/dev/null || true' EXIT
+trap 'kill $WATCH $SWAP_PID 2>/dev/null || true' EXIT
 
 
 # The published RPC port changes across a restart; never cache URLs past this point.
 restart_at_unix=""
-if [ -n "$RESTART_NODE" ] && [ "$RESTART_NODE" != "0" ]; then
+if [ -z "$OFFLINE_JSON" ] && [ -n "$RESTART_NODE" ] && [ "$RESTART_NODE" != "0" ]; then
   target=$((GENESIS + RESTART_AT))
   now=$(date +%s)
   if [ "$target" -gt "$now" ]; then sleep $((target - now)); fi
@@ -160,6 +174,10 @@ PYEOF
   fi
 fi
 
+if [ -n "$SWAP_PID" ]; then
+  say "waiting for migration-swap to finish"
+  wait "$SWAP_PID" || true
+fi
 say "dumping evidence"
 for svc in $(cd scripts && python3 -c "import pbt; print(' '.join(pbt.services('$ENCLAVE','el-') + pbt.services('$ENCLAVE','cl-')))"); do
   kurtosis service logs "$ENCLAVE" "$svc" -a 2>/dev/null | sed 's/^\[[^]]*\] //' > "$OUT/$svc.log"
@@ -170,9 +188,9 @@ for svc in migration-chaos migration-gate; do
 done
 
 # The manifest records what this driver did and asked for, for the verifier to reconcile.
-python3 - "$OUT/manifest.json" "$ARGS" "${RESTART_NODE:-0}" "${restart_at_unix:-0}" "${quiesced_at}" "${scenario_results}" "$SCENARIOS" <<'PYEOF'
+python3 - "$OUT/manifest.json" "$ARGS" "${RESTART_NODE:-0}" "${restart_at_unix:-0}" "${quiesced_at}" "${scenario_results}" "$SCENARIOS" "$OUT/swaps.json" "$OFFLINE_JSON" <<'PYEOF'
 import json, re, sys
-out, args_file, rnode, rat, quiesced, scenarios, requested = sys.argv[1:8]
+out, args_file, rnode, rat, quiesced, scenarios, requested, swaps_file, offline_json = sys.argv[1:10]
 args = open(args_file).read()
 m = re.search(r'chaos_profile:\s*"?([a-z-]+)"?', args)
 manifest = {
@@ -183,11 +201,21 @@ manifest = {
     "handover_expected": re.search(r'^\s*gate:\s*true', args, re.M) is not None,
     "quiesced_at": int(quiesced),
 }
+if offline_json:
+    manifest["offline"] = json.loads(offline_json)
+    try:
+        swaps = json.load(open(swaps_file))
+        manifest["producers"] = swaps.get("producers", [])
+        manifest["swaps"] = swaps.get("swaps", [])
+    except FileNotFoundError:
+        pass
 json.dump(manifest, open(out, "w"))
 PYEOF
 
 say "judging the run"
-els=$(cd scripts && python3 -c "import pbt; print(' '.join('--el ' + n + '=' + pbt.url('$ENCLAVE', n, 'rpc') for n in pbt.services('$ENCLAVE','el-')))")
+# A stopped EL (crashed, OOM-killed) publishes no port: hand the judge an unreachable URL so
+# every check that needs it fails with evidence, rather than no verdict at all.
+els=$(cd scripts && python3 -c "import pbt; print(' '.join('--el ' + n + '=' + (pbt.url('$ENCLAVE', n, 'rpc') or 'http://127.0.0.1:9') for n in pbt.services('$ENCLAVE','el-')))")
 # One driver stream for the judge: the chaos schedule first, then the gate; the
 # dumped files themselves stay as captured.
 cat "$OUT/migration-chaos.jsonl" > "$OUT/driver.jsonl"
