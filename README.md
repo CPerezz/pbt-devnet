@@ -92,7 +92,7 @@ exit code = number of failures. Logs, JSONL, manifest and `summary.md` land in `
 
 ```bash
 make migration-offline                                    # ~1.5 h, judged at the end
-OFFLINE_FAULT=corrupt-preimages make migration-offline    # negative lap: geth's import must fail
+OFFLINE_FAULT=corrupt-preimages make migration-offline    # negative lap: geth's import must fail, geth keeps following
 ```
 
 `args/migration-offline.yaml` is `migration.yaml` (same network, load and chaos) with
@@ -107,19 +107,24 @@ the last pre-fork heal (+940 s, +120 s to converge) `cmd/migration-swap`, starte
 2. **swaps**, one at a time, each only once its anchor is finalized and canonical, finality is
    fresh, every other validator is up, no partition is applied and the chaos schedule leaves a gap
    long enough: Nethermind (5) stops, gets participant 6's artifacts and restarts importing them
-   (`--Pbt.MigrationSnapshotPath`, its genesis-seeded PBT database wiped); then geth (3) does the
-   same with erigon's (`geth bintrie import --force`). Each replays block access lists from its
-   anchor to the head before the next one starts; after a failed swap, the next waits only for
-   that node's EL to be back at the head.
+   (`--Pbt.MigrationSnapshotPath`, its genesis-seeded PBT database wiped); then geth (3) restarts
+   with erigon's (`--pbt.import.*`, `--pbt.import.force` replacing its genesis-seeded tree) and
+   imports them in the background while it keeps following the chain. Each replays block access
+   lists from its anchor to the head before the next one starts; after a failed swap, the next
+   waits only for that node's EL to be back at the head.
 
 One light down at a time is 18% of the stake, so finality never stops for a swap. The
-wrappers that run the import live in `images/geth` and `images/nethermind`, layered over the
-client images; without their marker files they are the plain entrypoint. Besu and erigon have no
-importer for another client's artifacts and stay on the online path; participant 1 is never
-taken down. Evidence lands in `OUT/artifacts/` and `OUT/swaps.json`. The judge adds
-`artifact-produced`, `import-accepted`, `swaps-serialized`, `replay-caught-up` and
-`offline-coverage` (inconclusive on the other profiles), and waives a swapping node's
-findings for its own downtime the way it waives a partition victim's.
+wrappers in `images/geth` and `images/nethermind`, layered over the client images, add the
+import flags from `pbt-swap/flags`, kept so a later restart reuses the import; without that file
+they are the plain entrypoint. A failed import is read from `debug_migrationProgress`
+(`importFailed`). Besu and erigon have no importer for another client's artifacts and stay on the
+online path; participant 1 is never taken down. Evidence lands in `OUT/artifacts/` and
+`OUT/swaps.json`. The judge adds `artifact-produced`, `import-accepted` (for geth: one boot with
+the flags, RPC served before the import began, the producer's root, nothing logged at ERROR or
+CRIT, and the head kept within reach of node 1's while the monitor saw it importing),
+`swaps-serialized`, `replay-caught-up` and `offline-coverage` (inconclusive on the other
+profiles), and waives a swapping node's findings for its own downtime the way it waives a
+partition victim's.
 
 ## Watching it
 

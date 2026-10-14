@@ -31,7 +31,7 @@ pin() {
 }
 
 pin geth           https://github.com/CPerezz/go-ethereum.git \
-    "${PBT_GETH_REF:-fbfd486b126fcdfe131dd94ac467ace881e0b31b}"           "${PBT_GETH_SRC:-}"           # pbt
+    "${PBT_GETH_REF:-ef9126d630261ed1ce5d227be0d1edd3f00ab3ca}"           "${PBT_GETH_SRC:-}"           # pbt-online-import (#61)
 pin erigon         https://github.com/erigontech/erigon.git \
     "${PBT_ERIGON_REF:-7b675afb4bfe4cc40c1fc8128b85702106a58767}"         "${PBT_ERIGON_SRC:-}"         # binary-trie
 pin egg            https://github.com/CPerezz/ethereum-genesis-generator.git \

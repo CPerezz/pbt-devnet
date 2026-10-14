@@ -1,26 +1,18 @@
 #!/bin/sh
 # Offline-migration hook for the pbt-devnet lap. cmd/migration-swap stops this
 # node, drops an EIP-8347 snapshot and preimage file into pbt-swap/ beside a
-# `pending` marker naming the anchor block hash, and starts it again: the
-# import runs here, before the node opens its datadir. A failed import still
-# starts the node - its `failed` marker and import.log are the lap's evidence.
-# Every other invocation passes straight through.
+# `flags` file, and starts it again: geth imports the pair in the background
+# while it keeps following the chain (--pbt.import.*), and its follower adopts
+# the anchor once the import attests. The flags are kept, so every later
+# restart finds the import done and reuses it.
+# Without the file this is the client itself.
 D=/data/geth/execution-data
 S=$D/pbt-swap
-if [ -f "$S/pending" ]; then
-  anchor=$(cat "$S/pending")
-  rm -f "$S/done" "$S/failed"
-  echo "pbt-swap: importing $S/pbt-snapshot.bin at anchor $anchor"
-  geth.real --datadir "$D" bintrie import --force \
-    "$S/pbt-snapshot.bin" "$S/preimages.bin" "$anchor" >"$S/import.log" 2>&1
-  rc=$?
-  cat "$S/import.log"
-  if [ "$rc" -eq 0 ]; then
-    mv "$S/pending" "$S/done"
-    echo "pbt-swap: import done"
-  else
-    mv "$S/pending" "$S/failed"
-    echo "pbt-swap: import failed (exit $rc)"
-  fi
+if [ -f "$S/flags" ]; then
+  # One flag per line, none holding a space.
+  extra=$(cat "$S/flags")
+  echo "pbt-swap: starting with" $extra
+  # shellcheck disable=SC2086 # the flags split on purpose
+  exec geth.real "$@" $extra
 fi
 exec geth.real "$@"

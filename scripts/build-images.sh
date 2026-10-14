@@ -107,6 +107,9 @@ require_capability "geth (migration window)" "$GETH_SRC" 'MigrationWindowBlocks'
 if [[ -n "$OFFLINE" ]]; then
 require_capability "geth (EIP-8347 tagged snapshot)" "$GETH_SRC" 'tagStorageSingle' "cmd/geth/bintrie_artifacts.go" \
   "fix: point PBT_GETH_SRC at a pbt checkout at or past fbfd486b (CPerezz/go-ethereum#47)"
+# The swap restarts geth with the import flags: it imports while it keeps following.
+require_capability "geth (EIP-8347 online import)" "$GETH_SRC" 'pbt.import.snapshot' "cmd/utils/flags.go" \
+  "fix: keep the default geth pin, or point PBT_GETH_REF at a commit with --pbt.import.* (CPerezz/go-ethereum#61)"
 fi
 build_from "geth (EIP-8297)" "pbt-geth:base" "$GETH_SRC" \
   "run scripts/sources.sh, or set PBT_GETH_SRC"

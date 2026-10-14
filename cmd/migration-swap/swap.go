@@ -160,7 +160,12 @@ func (r *runner) swapBody(c migmon.OfflineConsumer, sw *migmon.SwapRecord, prod 
 	}
 	switch client {
 	case "geth":
-		if err := os.WriteFile(filepath.Join(local, "pending"), []byte(prod.AnchorHash), 0o644); err != nil {
+		// geth imports in the background while it keeps following the chain; force
+		// replaces the tree it seeded from genesis.
+		flags := fmt.Sprintf(
+			"--pbt.import.snapshot=%s/pbt-swap/pbt-snapshot.bin\n--pbt.import.preimages=%s/pbt-swap/preimages.bin\n--pbt.import.anchor=%s\n--pbt.import.force\n",
+			datadir, datadir, prod.AnchorHash)
+		if err := os.WriteFile(filepath.Join(local, "flags"), []byte(flags), 0o644); err != nil {
 			return fail(err.Error())
 		}
 	case "nethermind":
@@ -217,12 +222,6 @@ func (r *runner) swapBody(c migmon.OfflineConsumer, sw *migmon.SwapRecord, prod 
 		} else if !running {
 			return fail("container is not running")
 		}
-		// The wrapper finishes the import before the client opens its RPC, so the marker is
-		// final by the time the node answers; a failed import that falls back to the online
-		// seed still catches up, and must not read as a good swap.
-		if _, err := r.dockerExec(cid, "test", "-e", datadir+"/pbt-swap/failed"); err == nil {
-			return fail("pbt-swap/failed marker present")
-		}
 		if url, err := r.portURL(n.EL, "rpc"); err == nil {
 			el := migmon.NewClient(n.EL, url)
 			r.elClients[c.Node] = el
@@ -234,7 +233,17 @@ func (r *runner) swapBody(c migmon.OfflineConsumer, sw *migmon.SwapRecord, prod 
 				}
 			}
 			if reachable {
-				if caughtUp, err := r.migrationCaughtUp(el); err == nil && caughtUp {
+				// The import runs in the background of a node that keeps following,
+				// so a refused or failed one is read from the client, not a marker.
+				prog, err := r.progress(el)
+				if err == nil && prog.Phase == migmon.PhaseImportFailed {
+					detail := "import failed"
+					if prog.Binary != nil && prog.Binary.Error != "" {
+						detail += ": " + prog.Binary.Error
+					}
+					return fail(detail)
+				}
+				if caughtUp, err := r.migrationCaughtUp(prog, err); err == nil && caughtUp {
 					r.ev.update(func() { sw.CaughtUpAt, sw.Status, sw.Detail = time.Now().Unix(), "ok", "" })
 					r.postLifecycle(c.Node, migmon.StepCaughtUp, prod.Anchor, prod.AnchorHash, "")
 					return "ok"
@@ -253,17 +262,21 @@ func (r *runner) swapBody(c migmon.OfflineConsumer, sw *migmon.SwapRecord, prod 
 	}
 }
 
-// migrationCaughtUp reads debug_migrationProgress and reports the binary cursor within
-// CaughtUpLag of the chain tip, node 1's head. The consumer's own head is no reference:
-// right after the restart it is as stale as the cursor.
-func (r *runner) migrationCaughtUp(el migmon.Client) (bool, error) {
+// progress reads one debug_migrationProgress report.
+func (r *runner) progress(el migmon.Client) (migmon.MigrationProgress, error) {
 	raw, err := el.Progress(ctx)
 	if err != nil {
-		return false, err
+		return migmon.MigrationProgress{}, err
 	}
-	prog, err := migmon.DecodeProgress(raw)
-	if err != nil || prog.Binary == nil {
-		return false, err
+	return migmon.DecodeProgress(raw)
+}
+
+// migrationCaughtUp reports the binary cursor of a progress report within
+// CaughtUpLag of the chain tip, node 1's head. The consumer's own head is no
+// reference: right after the restart it is as stale as the cursor.
+func (r *runner) migrationCaughtUp(prog migmon.MigrationProgress, progErr error) (bool, error) {
+	if progErr != nil || prog.Binary == nil {
+		return false, progErr
 	}
 	tip, err := r.elClients[1].HeadNumber(ctx)
 	if err != nil {
