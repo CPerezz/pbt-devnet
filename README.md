@@ -133,9 +133,13 @@ persisted state: `cmd/migration-swap` writes geth's flags file without
 `--pbt.import.snapshot`, naming only erigon's preimage file and anchor hash
 (`--pbt.import.preimages`, `--pbt.import.anchor`, `--pbt.import.force`), and copies no
 snapshot in. geth converts the merkle state at its own persisted block P >= A in the
-background, using the post-A preimages from erigon's file, and logs `Conversion complete`
-(`anchor=<P>`, `hash=<P's hash>`, `binaryRoot=<root>`) instead of `Import complete`; the
-same one-restart, keep-following and `importFailed`-on-failure contract applies. Since P is
+background, with the keys of erigon's file plus those the access lists of A+1..P wrote, and
+logs `Conversion complete` (`anchor=<P>`, `hash=<P's hash>`, `binaryRoot=<root>`) instead of
+`Import complete`; the same one-restart, keep-following and `importFailed`-on-failure
+contract applies. The flags file also carries `--history.state=8`: pathdb persists a state
+only when its write buffer fills, which this devnet's traffic never does in a lap, and the
+bounded state history makes geth persist whenever it trails the head by 128+8 blocks, so P
+passes A about 136 blocks after A. Since P is
 geth's own block, not erigon's anchor A, there is no capture window to hit - the swap gate's
 existing finality/serialization timing is unchanged, but import-accepted no longer checks the
 binary root against the producer's: EIP-8347 l.203 makes replay from A to P bit-identical to

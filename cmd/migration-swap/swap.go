@@ -74,6 +74,10 @@ func (r *runner) waitSwapGate(c migmon.OfflineConsumer, sw *migmon.SwapRecord, p
 			Gap:        chaosFree(r.dump, time.Unix(now, 0), gapHorizon),
 			PrevBehind: prevNode != 0 && r.elBehind(prevNode), PrevFailed: anyFailed,
 		}
+		if migmon.ClientType(r.nodes[c.Node].EL) == "geth" && r.gethSwap == "convert" {
+			st.MinHead = prod.Anchor + convertLead
+			st.Head, _ = r.elClients[1].HeadNumber(ctx)
+		}
 		v, reason := decideSwap(st)
 		switch v {
 		case proceed:
@@ -123,9 +127,14 @@ func datadirFor(client string) string {
 // names only the producer's preimages. Either way --force replaces the tree geth seeded
 // from genesis, and the import/conversion runs in the background while geth keeps
 // following the chain.
+//
+// A conversion reads the state geth last persisted, which must be at or past the anchor.
+// pathdb persists only when its write buffer (256 MiB) fills, which this devnet's traffic
+// never does in a lap (geth logs layers=241 at head 241: still genesis). --history.state=8
+// makes it persist whenever it trails the head by 128+8 blocks.
 func gethFlags(datadir, anchorHash string, convert bool) string {
 	if convert {
-		return fmt.Sprintf("--pbt.import.preimages=%s/pbt-swap/preimages.bin\n--pbt.import.anchor=%s\n--pbt.import.force\n",
+		return fmt.Sprintf("--pbt.import.preimages=%s/pbt-swap/preimages.bin\n--pbt.import.anchor=%s\n--pbt.import.force\n--history.state=8\n",
 			datadir, anchorHash)
 	}
 	return fmt.Sprintf(
