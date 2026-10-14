@@ -68,6 +68,7 @@ type SwapRecord struct {
 	ReachableAt     int64  `json:"reachable_at"`
 	CaughtUpAt      int64  `json:"caught_up_at"`
 	EvidenceDir     string `json:"evidence_dir"`
+	Mode            string `json:"mode,omitempty"` // geth: "convert" for a self-conversion swap, "" for an import
 }
 
 // Lifecycle is POST /api/lifecycle's body: Node moved to Step (anchor/hash set once known).

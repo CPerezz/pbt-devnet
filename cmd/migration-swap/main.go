@@ -70,6 +70,7 @@ type runner struct {
 	genesis, fork int64
 	out           string
 	fault         string
+	gethSwap      string // import | convert
 	ev            *Evidence
 	lock          *opLock
 
@@ -206,6 +207,7 @@ func main() {
 	offlineJSON := flag.String("offline", "", "the pbt_offline JSON main.star prints (migmon.Offline)")
 	outDir := flag.String("out", "", "evidence output directory")
 	fault := flag.String("fault", "", "fault to inject: '' or corrupt-preimages (truncates the geth consumer's preimage file)")
+	gethSwap := flag.String("geth-swap", "import", "geth consumer: import (the producer's snapshot+preimages) or convert (its own state, with the producer's preimages and anchor)")
 	plan := flag.Bool("plan", false, "print the resolved timeline and exit without acting")
 	flag.Parse()
 
@@ -217,6 +219,9 @@ func main() {
 	}
 	if *fault != "" && *fault != "corrupt-preimages" {
 		die("--fault must be '' or corrupt-preimages, got %q", *fault)
+	}
+	if *gethSwap != "import" && *gethSwap != "convert" {
+		die("--geth-swap must be import or convert, got %q", *gethSwap)
 	}
 
 	cfg, err := parseOffline(*offlineJSON)
@@ -253,7 +258,7 @@ func main() {
 	r := &runner{
 		enc: *enclave, cfg: cfg, nodes: nodes, services: services, dump: dump,
 		total: len(nodes), validating: validating,
-		genesis: *genesisTS, fork: *forkTS, out: *outDir, fault: *fault,
+		genesis: *genesisTS, fork: *forkTS, out: *outDir, fault: *fault, gethSwap: *gethSwap,
 		ev: ev, lock: &opLock{path: filepath.Join(*outDir, "swap.lock")},
 	}
 	if err := r.init(); err != nil {

@@ -189,6 +189,7 @@ func (v *verifier) Run(ctx context.Context, w io.Writer) int {
 		{"lap-manifest", v.checkLapManifest},
 		{"artifact-produced", v.checkArtifactProduced},
 		{"import-accepted", v.checkImportAccepted},
+		{"convert-shadow-agreement", v.checkGethConvertShadowFromP},
 		{"swaps-serialized", v.checkSwapsSerialized},
 		{"replay-caught-up", v.checkReplayCaughtUp},
 		{"offline-coverage", v.checkOfflineCoverage},

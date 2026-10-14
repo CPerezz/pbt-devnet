@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -223,7 +224,11 @@ func (v *verifier) checkImportAccepted(ctx context.Context) (verdict, string) {
 				pp = append(pp, `no "pbt-swap: starting" line: no swap boot to judge`)
 				break
 			}
-			pp = append(pp, gethOnlineImport(text, s, m.Producers)...)
+			if s.Mode == "convert" {
+				pp = append(pp, gethOnlineConvert(text, s)...)
+			} else {
+				pp = append(pp, gethOnlineImport(text, s, m.Producers)...)
+			}
 			followed, note := v.followedThroughImport(s)
 			pp = append(pp, followed...)
 			notes = append(notes, fmt.Sprintf("consumer node %d (geth) %s", s.Node, note))
@@ -303,6 +308,144 @@ func gethOnlineImport(text string, s migmon.SwapRecord, producers []migmon.Produ
 		}
 	}
 	return pp
+}
+
+// gethConversionCompleteLineRe isolates geth's self-conversion success line; Go's "."
+// never crosses a newline, so this already stops at end of line.
+var gethConversionCompleteLineRe = regexp.MustCompile(`Conversion complete\b.*`)
+var (
+	gethConvAnchorRe = regexp.MustCompile(`\banchor=(\d+)`)
+	gethConvHashRe   = regexp.MustCompile(`\bhash=(\S+)`)
+	gethConvRootRe   = regexp.MustCompile(`\bbinaryRoot=(\S+)`)
+)
+
+// gethConversionComplete reads geth's self-conversion success line: "Conversion
+// complete" with anchor=<P>, hash=<P's hash>, binaryRoot=<root>, field order not
+// assumed. ok is false when the line, or any of its three fields, is missing.
+func gethConversionComplete(text string) (anchor uint64, hash, root string, ok bool) {
+	line := gethConversionCompleteLineRe.FindString(text)
+	if line == "" {
+		return 0, "", "", false
+	}
+	am, hm, rm := gethConvAnchorRe.FindStringSubmatch(line), gethConvHashRe.FindStringSubmatch(line), gethConvRootRe.FindStringSubmatch(line)
+	if am == nil || hm == nil || rm == nil {
+		return 0, "", "", false
+	}
+	anchor, _ = strconv.ParseUint(am[1], 10, 64)
+	return anchor, hm[1], rm[1], true
+}
+
+// gethOnlineConvert judges a geth consumer's swap boot in convert mode: self-conversion,
+// fed only the producer's preimages and anchor hash, no snapshot. There is no producer
+// root to compare against - the self-converter's root is its own persisted block P, not
+// the exporter's anchor A (EIP-8347 l.203 makes replay from A to P bit-identical to
+// converting P; checked instead by checkGethConvertShadowFromP's shadow-root agreement).
+func gethOnlineConvert(text string, s migmon.SwapRecord) []string {
+	var pp []string
+	if n := strings.Count(text, "pbt-swap: starting"); n != 1 {
+		pp = append(pp, fmt.Sprintf("%d boots with the import flags, want 1: the node restarted after the swap", n))
+	}
+	if _, _, _, ok := gethConversionComplete(text); !ok {
+		pp = append(pp, `no "Conversion complete ... anchor= ... hash= ... binaryRoot=" line`)
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "ERROR[") || strings.HasPrefix(line, "CRIT [") {
+			pp = append(pp, "logged: "+line)
+		}
+	}
+	return pp
+}
+
+// checkGethConvertShadowFromP asserts, for every geth consumer swapped in convert mode,
+// that from its own converted anchor P on - read from its "Conversion complete" line, not
+// the manifest's producer anchor A - its shadow root agrees with every other reporting
+// node's at the same monitor-sampled block. This is the devnet's stand-in for "root =
+// producer's root": the self-converter is judged against its peers at its own anchor
+// instead (plan.md §9, "the devnet proof is shadow-root agreement from P on").
+func (v *verifier) checkGethConvertShadowFromP(ctx context.Context) (verdict, string) {
+	m, r, msg := v.requireOffline()
+	if m == nil {
+		return r, msg
+	}
+	var converters []migmon.SwapRecord
+	for _, s := range m.Swaps {
+		if s.Mode == "convert" {
+			converters = append(converters, s)
+		}
+	}
+	if len(converters) == 0 {
+		return verdictInconclusive, "no geth convert-mode swap recorded"
+	}
+
+	var problems, notes []string
+	for _, s := range converters {
+		el, ok := v.elByIndex(s.Node)
+		if !ok {
+			problems = append(problems, fmt.Sprintf("consumer node %d: no --el: cannot name it in the shadow samples", s.Node))
+			continue
+		}
+		if client := clientOf(el.name); client != "geth" {
+			problems = append(problems, fmt.Sprintf("consumer node %d: convert mode recorded for client %q, want geth", s.Node, client))
+			continue
+		}
+		if s.Status == migmon.StepSkipped {
+			problems = append(problems, fmt.Sprintf("consumer node %d (geth): swap skipped: %s", s.Node, s.Detail))
+			continue
+		}
+		raw, err := os.ReadFile(v.artifactPath(s.EvidenceDir, "docker.log"))
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("consumer node %d (geth): docker.log: %v", s.Node, err))
+			continue
+		}
+		text, ok := swapBoot(raw)
+		if !ok {
+			problems = append(problems, fmt.Sprintf("consumer node %d (geth): no \"pbt-swap: starting\" line: no swap boot to judge", s.Node))
+			continue
+		}
+		p, _, _, ok := gethConversionComplete(text)
+		if !ok {
+			problems = append(problems, fmt.Sprintf("consumer node %d (geth): no \"Conversion complete\" line to read its own anchor P from", s.Node))
+			continue
+		}
+
+		heights := map[uint64]bool{}
+		var mismatches []string
+		for _, ev := range v.monitor {
+			if ev.Kind != migmon.EvSample || ev.Number < p {
+				continue
+			}
+			mine, ok := ev.Roots[el.name]
+			if !ok || mine == "" {
+				continue
+			}
+			others := make([]string, 0, len(ev.Roots))
+			for node := range ev.Roots {
+				if node != el.name && ev.Roots[node] != "" {
+					others = append(others, node)
+				}
+			}
+			sort.Strings(others)
+			for _, node := range others {
+				heights[ev.Number] = true
+				if root := ev.Roots[node]; root != mine {
+					mismatches = append(mismatches, fmt.Sprintf("block %d: %s=%s != %s=%s", ev.Number, el.name, mine, node, root))
+				}
+			}
+		}
+		if len(mismatches) > 0 {
+			problems = append(problems, fmt.Sprintf("consumer node %d (geth): %s", s.Node, strings.Join(mismatches, "; ")))
+			continue
+		}
+		if len(heights) == 0 {
+			problems = append(problems, fmt.Sprintf("consumer node %d (geth): no monitor shadow sample at or after its own anchor %d to cross-check", s.Node, p))
+			continue
+		}
+		notes = append(notes, fmt.Sprintf("consumer node %d (geth) agrees with every other reporting node at %d sampled block(s) >= its own anchor %d", s.Node, len(heights), p))
+	}
+	if len(problems) > 0 {
+		return verdictFail, strings.Join(problems, "; ")
+	}
+	return verdictPass, strings.Join(notes, "; ")
 }
 
 // followedThroughImport reads the monitor stream for the consumer's import

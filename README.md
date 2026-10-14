@@ -93,6 +93,8 @@ exit code = number of failures. Logs, JSONL, manifest and `summary.md` land in `
 ```bash
 make migration-offline                                    # ~1.5 h, judged at the end
 OFFLINE_FAULT=corrupt-preimages make migration-offline    # negative lap: geth's import must fail, geth keeps following
+GETH_SWAP=convert make migration-offline                  # geth (3) self-converts instead of importing erigon's snapshot
+GETH_SWAP=convert OFFLINE_FAULT=corrupt-preimages make migration-offline  # same, negative: self-conversion must fail
 ```
 
 `args/migration-offline.yaml` is `migration.yaml` (same network, load and chaos) with
@@ -125,6 +127,20 @@ CRIT, and the head kept within reach of node 1's while the monitor saw it import
 `swaps-serialized`, `replay-caught-up` and `offline-coverage` (inconclusive on the other
 profiles), and waives a swapping node's findings for its own downtime the way it waives a
 partition victim's.
+
+**`GETH_SWAP=convert`** swaps geth's step 2 from importing erigon's pair to converting its own
+persisted state: `cmd/migration-swap` writes geth's flags file without
+`--pbt.import.snapshot`, naming only erigon's preimage file and anchor hash
+(`--pbt.import.preimages`, `--pbt.import.anchor`, `--pbt.import.force`), and copies no
+snapshot in. geth converts the merkle state at its own persisted block P >= A in the
+background, using the post-A preimages from erigon's file, and logs `Conversion complete`
+(`anchor=<P>`, `hash=<P's hash>`, `binaryRoot=<root>`) instead of `Import complete`; the
+same one-restart, keep-following and `importFailed`-on-failure contract applies. Since P is
+geth's own block, not erigon's anchor A, there is no capture window to hit - the swap gate's
+existing finality/serialization timing is unchanged, but import-accepted no longer checks the
+binary root against the producer's: EIP-8347 l.203 makes replay from A to P bit-identical to
+converting P, so the devnet instead checks `convert-shadow-agreement` - geth (3)'s shadow root
+agrees with every other client's at every monitor-sampled block >= P.
 
 ## Watching it
 
