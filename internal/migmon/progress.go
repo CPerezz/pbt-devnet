@@ -72,11 +72,14 @@ const (
 	DirStalled   = "stalled"
 )
 
-// Chain phase names.
+// Chain phase names. importing and importFailed hold the binary tree for an
+// anchor import running beside the chain (geth's and Nethermind's names).
 const (
-	PhaseInactive = "inactive"
-	PhaseRunning  = "running"
-	PhaseDone     = "done"
+	PhaseInactive     = "inactive"
+	PhaseImporting    = "importing"
+	PhaseImportFailed = "importFailed"
+	PhaseRunning      = "running"
+	PhaseDone         = "done"
 )
 
 // Active reports whether a direction is live and healthy (following or synced).
