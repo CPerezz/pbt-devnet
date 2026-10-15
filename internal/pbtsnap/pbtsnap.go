@@ -1,6 +1,6 @@
 // Package pbtsnap reads what the lap needs from an EIP-8347 PBT snapshot and
-// from geth's conversion log, without decoding records: the pbtRoot trailer
-// (EIPs#12403) and the block and root `geth bintrie convert` reports. The
+// from geth's export log, without decoding records: the pbtRoot trailer
+// (EIPs#12403) and the block and root `geth bintrie export` reports. The
 // clients' importers check everything else.
 package pbtsnap
 
@@ -42,25 +42,18 @@ func Root(path string) (common.Hash, error) {
 }
 
 // geth pads log messages and writes integers past 99,999 with thousands separators.
-var (
-	convertBlock = regexp.MustCompile(`Starting MPT to binary trie conversion\s.*\bblock=([0-9,]+)`)
-	convertRoot  = regexp.MustCompile(`Conversion complete\s+binaryRoot=([0-9a-fA-Fx.]+)`)
-)
+var exportDone = regexp.MustCompile(`Export complete\s.*\bblock=([0-9,]+).*\bbinaryRoot=([0-9a-fA-Fx.]+)`)
 
-// ConvertLog returns the block `geth bintrie convert` converted and the binary root it logged.
-func ConvertLog(log string) (block uint64, root string, err error) {
-	m := convertBlock.FindStringSubmatch(log)
+// ExportLog returns the head block `geth bintrie export` exported and the binary root it logged.
+func ExportLog(log string) (block uint64, root string, err error) {
+	m := exportDone.FindStringSubmatch(log)
 	if m == nil {
-		return 0, "", fmt.Errorf("convert log has no conversion start line")
+		return 0, "", fmt.Errorf("export log has no completion line")
 	}
 	if block, err = strconv.ParseUint(strings.ReplaceAll(m[1], ",", ""), 10, 64); err != nil {
 		return 0, "", err
 	}
-	r := convertRoot.FindStringSubmatch(log)
-	if r == nil {
-		return 0, "", fmt.Errorf("convert log has no completion line")
-	}
-	return block, r[1], nil
+	return block, m[2], nil
 }
 
 // LoggedMatches reports whether a root as geth logged it names root. geth's terminal log

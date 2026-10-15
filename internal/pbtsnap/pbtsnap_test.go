@@ -49,7 +49,7 @@ func TestLoggedMatches(t *testing.T) {
 		logged string
 		want   bool
 	}{
-		{"c45bc4..a7140a", true}, // geth's terminal format, as bintrie convert logs it
+		{"c45bc4..a7140a", true}, // geth's terminal format, as bintrie export logs it
 		{"c45bc4..a7140b", false},
 		{root.Hex(), true},
 		{"0xc45bc4aa00000000000000000000000000000000000000000000000000a7140b", false},
@@ -60,15 +60,15 @@ func TestLoggedMatches(t *testing.T) {
 	}
 }
 
-func TestConvertLog(t *testing.T) {
-	// The shape a real `geth bintrie convert` prints: padded messages, separators past 99,999.
-	log := "INFO [10-03|08:46:48.401] Starting MPT to binary trie conversion   root=2aa6bf..1950e8 block=182,004\n" +
-		"INFO [10-03|08:46:48.687] Conversion complete                      binaryRoot=6dc433..b888a3\n"
-	block, root, err := ConvertLog(log)
+func TestExportLog(t *testing.T) {
+	// The shape a real `geth bintrie export` prints: padded messages, separators past 99,999.
+	log := "INFO [10-03|08:46:48.401] Exporting EIP-8347 artifacts             root=2aa6bf..1950e8 block=182,004\n" +
+		"INFO [10-03|08:46:48.687] Export complete                          block=182,004 root=2aa6bf..1950e8 binaryRoot=6dc433..b888a3\n"
+	block, root, err := ExportLog(log)
 	if err != nil || block != 182004 || root != "6dc433..b888a3" {
-		t.Fatalf("ConvertLog = %d, %q, %v; want 182004, 6dc433..b888a3", block, root, err)
+		t.Fatalf("ExportLog = %d, %q, %v; want 182004, 6dc433..b888a3", block, root, err)
 	}
-	if _, _, err := ConvertLog("INFO Starting MPT to binary trie conversion block=5\n"); err == nil {
-		t.Fatal("ConvertLog accepted a log with no completion line")
+	if _, _, err := ExportLog("INFO Exporting EIP-8347 artifacts block=5\n"); err == nil {
+		t.Fatal("ExportLog accepted a log with no completion line")
 	}
 }

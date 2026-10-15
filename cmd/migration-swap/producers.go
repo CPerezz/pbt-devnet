@@ -170,10 +170,10 @@ func (r *runner) gethConvert(node int) {
 		return
 	}
 	convCID, err := sh("docker", "create", "pbt-geth:local",
-		"--datadir", "/tmp/execution-data", "bintrie", "convert", "--force",
+		"--datadir", "/tmp/execution-data", "bintrie", "export",
 		"--snapshot-out", "/tmp/pbt-snapshot.bin", "--preimages-out", "/tmp/preimages.bin")
 	if err != nil {
-		r.failProducer(node, fmt.Sprintf("creating converter: %v", err))
+		r.failProducer(node, fmt.Sprintf("creating exporter: %v", err))
 		return
 	}
 	defer r.dockerRM(convCID)
@@ -192,15 +192,15 @@ func (r *runner) gethConvert(node int) {
 	}
 	downTo := time.Now().Unix()
 
-	// Combined: geth logs its conversion progress to stderr.
-	convertLog, convErr := shCombined("docker", "start", "-a", convCID)
-	os.WriteFile(filepath.Join(artDir, "convert.log"), []byte(convertLog), 0o644)
+	// Combined: geth logs its export progress to stderr.
+	exportLog, convErr := shCombined("docker", "start", "-a", convCID)
+	os.WriteFile(filepath.Join(artDir, "export.log"), []byte(exportLog), 0o644)
 	if convErr != nil {
-		r.failProducer(node, fmt.Sprintf("converter: %v", convErr))
+		r.failProducer(node, fmt.Sprintf("exporter: %v", convErr))
 		return
 	}
 
-	block, binaryRoot, err := pbtsnap.ConvertLog(convertLog)
+	block, binaryRoot, err := pbtsnap.ExportLog(exportLog)
 	if err != nil {
 		r.failProducer(node, err.Error())
 		return
@@ -215,7 +215,7 @@ func (r *runner) gethConvert(node int) {
 	}
 
 	if block != hdr.Number {
-		r.failProducer(node, fmt.Sprintf("convert log anchor block=%d, frozen head was %d", block, hdr.Number))
+		r.failProducer(node, fmt.Sprintf("export log block=%d, frozen head was %d", block, hdr.Number))
 		return
 	}
 	pbtRoot, err := pbtsnap.Root(filepath.Join(artDir, "pbt-snapshot.bin"))
@@ -224,7 +224,7 @@ func (r *runner) gethConvert(node int) {
 		return
 	}
 	if !pbtsnap.LoggedMatches(binaryRoot, pbtRoot) {
-		r.failProducer(node, fmt.Sprintf("convert log binaryRoot=%s, snapshot trailer pbtRoot=%s", binaryRoot, pbtRoot.Hex()))
+		r.failProducer(node, fmt.Sprintf("export log binaryRoot=%s, snapshot trailer pbtRoot=%s", binaryRoot, pbtRoot.Hex()))
 		return
 	}
 

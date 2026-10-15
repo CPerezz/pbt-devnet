@@ -103,7 +103,7 @@ schedule names it, and every partition keeps it on the anchor's side: left out o
 would stay peered with every island and join them back together. After
 the last pre-fork heal (+940 s, +120 s to converge) `cmd/migration-swap`, started by `lap.sh`:
 
-1. **exports** - participant 6 stops briefly (no stake lost) and `geth bintrie convert` runs on a
+1. **exports** - participant 6 stops briefly (no stake lost) and `geth bintrie export` runs on a
    copy of its datadir; erigon (2) runs `snapshots export-pbt` live. Each artifact is anchored at
    its producer's head, and its `pbtRoot` is checked against every client's shadow root there;
 2. **swaps**, one at a time, each only once its anchor is finalized and canonical, finality is

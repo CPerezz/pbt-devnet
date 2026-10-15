@@ -504,8 +504,8 @@ func TestCheckArtifactProduced(t *testing.T) {
 		dir := t.TempDir()
 		data := append([]byte{0x07}, snapshotTrailer.Bytes()...)
 		writeFile(t, filepath.Join(dir, "node-6", "pbt-snapshot.bin"), string(data))
-		writeFile(t, filepath.Join(dir, "node-6", "convert.log"),
-			"Starting MPT to binary trie conversion block=812\nConversion complete binaryRoot="+rootHex+"\n")
+		writeFile(t, filepath.Join(dir, "node-6", "export.log"),
+			"Export complete block=812 binaryRoot="+rootHex+"\n")
 		producer := migmon.ProducerRecord{
 			Node: 6, Kind: "geth-convert", Status: "ok",
 			Anchor: anchor, AnchorHash: anchorHash, AnchorStateRoot: anchorStateRoot, PbtRoot: rootHex,

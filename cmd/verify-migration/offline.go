@@ -91,12 +91,12 @@ func (v *verifier) checkArtifactProduced(ctx context.Context) (verdict, string) 
 
 		switch p.Kind {
 		case "geth-convert":
-			if raw, err := os.ReadFile(v.artifactPath(p.Dir, "convert.log")); err != nil {
-				pp = append(pp, fmt.Sprintf("convert.log: %v", err))
-			} else if _, root, err := pbtsnap.ConvertLog(string(raw)); err != nil {
-				pp = append(pp, fmt.Sprintf("convert.log: %v", err))
+			if raw, err := os.ReadFile(v.artifactPath(p.Dir, "export.log")); err != nil {
+				pp = append(pp, fmt.Sprintf("export.log: %v", err))
+			} else if _, root, err := pbtsnap.ExportLog(string(raw)); err != nil {
+				pp = append(pp, fmt.Sprintf("export.log: %v", err))
 			} else if !pbtsnap.LoggedMatches(root, common.HexToHash(p.PbtRoot)) {
-				pp = append(pp, fmt.Sprintf("convert.log binaryRoot %s != manifest pbt_root %s", root, p.PbtRoot))
+				pp = append(pp, fmt.Sprintf("export.log binaryRoot %s != manifest pbt_root %s", root, p.PbtRoot))
 			}
 		case "erigon-export":
 			if root, err := readErigonMetaRoot(v.artifactPath(p.Dir, "pbt-snapshot.meta.json")); err != nil {
