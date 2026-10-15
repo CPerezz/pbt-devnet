@@ -74,6 +74,10 @@ func (r *runner) waitSwapGate(c migmon.OfflineConsumer, sw *migmon.SwapRecord, p
 			Gap:        chaosFree(r.dump, time.Unix(now, 0), gapHorizon),
 			PrevBehind: prevNode != 0 && r.elBehind(prevNode), PrevFailed: anyFailed,
 		}
+		if migmon.ClientType(r.nodes[c.Node].EL) == "geth" && r.gethSwap == "convert" {
+			st.MinHead = prod.Anchor + convertLead
+			st.Head, _ = r.elClients[1].HeadNumber(ctx)
+		}
 		v, reason := decideSwap(st)
 		switch v {
 		case proceed:
@@ -117,6 +121,27 @@ func datadirFor(client string) string {
 	return ""
 }
 
+// gethFlags builds the import flags geth's wrapper reads from pbt-swap/flags: the import
+// mode names a producer's snapshot and preimages, both staged in datadir/pbt-swap/; the
+// convert mode (self-conversion: geth's own persisted state) drops the snapshot flag and
+// names only the producer's preimages. Either way --force replaces the tree geth seeded
+// from genesis, and the import/conversion runs in the background while geth keeps
+// following the chain.
+//
+// A conversion reads the state geth last persisted, which must be at or past the anchor.
+// pathdb persists only when its write buffer (256 MiB) fills, which this devnet's traffic
+// never does in a lap (geth logs layers=241 at head 241: still genesis). --history.state=8
+// makes it persist whenever it trails the head by 128+8 blocks.
+func gethFlags(datadir, anchorHash string, convert bool) string {
+	if convert {
+		return fmt.Sprintf("--pbt.import.preimages=%s/pbt-swap/preimages.bin\n--pbt.import.anchor=%s\n--pbt.import.force\n--history.state=8\n",
+			datadir, anchorHash)
+	}
+	return fmt.Sprintf(
+		"--pbt.import.snapshot=%s/pbt-swap/pbt-snapshot.bin\n--pbt.import.preimages=%s/pbt-swap/preimages.bin\n--pbt.import.anchor=%s\n--pbt.import.force\n",
+		datadir, datadir, anchorHash)
+}
+
 // swapBody stages the consumer's pbt-swap/ dir on the host, stops it, copies the dir in, restarts it, and polls to
 // caught_up or failure; it always tries to copy the container's evidence back out.
 func (r *runner) swapBody(c migmon.OfflineConsumer, sw *migmon.SwapRecord, prod *migmon.ProducerRecord) string {
@@ -152,20 +177,24 @@ func (r *runner) swapBody(c migmon.OfflineConsumer, sw *migmon.SwapRecord, prod 
 	defer os.RemoveAll(staging)
 
 	artDir := filepath.Join(r.out, "artifacts", fmt.Sprintf("node-%d", prod.Node))
-	if err := copyFile(filepath.Join(artDir, "pbt-snapshot.bin"), filepath.Join(local, "pbt-snapshot.bin")); err != nil {
-		return fail(err.Error())
+	// A converting geth reads its own state: only the producer's preimages go in.
+	convert := client == "geth" && r.gethSwap == "convert"
+	if !convert {
+		if err := copyFile(filepath.Join(artDir, "pbt-snapshot.bin"), filepath.Join(local, "pbt-snapshot.bin")); err != nil {
+			return fail(err.Error())
+		}
 	}
 	if err := copyFile(filepath.Join(artDir, "preimages.bin"), filepath.Join(local, "preimages.bin")); err != nil {
 		return fail(err.Error())
 	}
 	switch client {
 	case "geth":
-		// geth imports in the background while it keeps following the chain; force
-		// replaces the tree it seeded from genesis.
-		flags := fmt.Sprintf(
-			"--pbt.import.snapshot=%s/pbt-swap/pbt-snapshot.bin\n--pbt.import.preimages=%s/pbt-swap/preimages.bin\n--pbt.import.anchor=%s\n--pbt.import.force\n",
-			datadir, datadir, prod.AnchorHash)
-		if err := os.WriteFile(filepath.Join(local, "flags"), []byte(flags), 0o644); err != nil {
+		// geth imports, or converts its own state, in the background while it keeps
+		// following the chain; force replaces the tree it seeded from genesis.
+		if convert {
+			r.ev.update(func() { sw.Mode = "convert" })
+		}
+		if err := os.WriteFile(filepath.Join(local, "flags"), []byte(gethFlags(datadir, prod.AnchorHash, convert)), 0o644); err != nil {
 			return fail(err.Error())
 		}
 	case "nethermind":

@@ -231,6 +231,62 @@ func TestCheckImportAccepted(t *testing.T) {
 		}
 	})
 
+	// gethConvertBoot is a geth consumer's log from a convert-mode swap boot: fed only
+	// the producer's preimages and anchor, no snapshot, so it self-converts and logs
+	// "Conversion complete" naming its own anchor P, not the manifest's producer anchor.
+	gethConvertBoot := func(p string, extra ...string) map[string]string {
+		lines := []string{
+			"pbt-swap: starting with --pbt.import.preimages=/data/geth/execution-data/pbt-swap/preimages.bin --pbt.import.anchor=0xab --pbt.import.force",
+			"INFO [10-14|12:00:00.000] HTTP server started                      endpoint=127.0.0.1:8545",
+			"INFO [10-14|12:00:02.000] Conversion complete                      anchor=" + p + " hash=0xcc binaryRoot=" + root,
+		}
+		return map[string]string{"docker.log": strings.Join(append(lines, extra...), "\n") + "\n"}
+	}
+	convertSwap := migmon.SwapRecord{Node: 3, Producer: 6, Anchor: 812, FinalizedAtStop: 812, StartAt: 100, EvidenceDir: "consumer-node-3", Mode: "convert"}
+
+	t.Run("geth: convert mode, own anchor past the producer's: accepted, no producer-root check", func(t *testing.T) {
+		r, evidence := run(t, consumer, convertSwap, gethConvertBoot("950"))
+		if r != verdictPass {
+			t.Fatalf("want pass, got %s: %s", r, evidence)
+		}
+	})
+
+	t.Run("geth: convert mode, head left by the restart while the beacon client is silent: accepted", func(t *testing.T) {
+		r, evidence := run(t, consumer, convertSwap, gethConvertBoot("950"),
+			at(migmon.EvHead, tip, 101, 900, ""),
+			at(migmon.EvProgress, consumer, 102, 0, migmon.PhaseImporting),
+			at(migmon.EvHead, consumer, 102, 899, ""), // where the restart left it, within reach
+			at(migmon.EvHead, tip, 120, 905, ""),
+			at(migmon.EvHead, consumer, 120, 899, ""), // no blocks fed yet
+			at(migmon.EvHead, tip, 160, 911, ""),
+			at(migmon.EvHead, consumer, 160, 911, ""), // fed again, caught up, converts
+			at(migmon.EvProgress, consumer, 162, 0, migmon.PhaseRunning))
+		if r != verdictPass {
+			t.Fatalf("want pass, got %s: %s", r, evidence)
+		}
+	})
+
+	t.Run("geth: convert mode, no Conversion complete line: fails", func(t *testing.T) {
+		r, evidence := run(t, consumer, convertSwap, map[string]string{"docker.log": "pbt-swap: starting with --pbt.import.force\n"})
+		if r != verdictFail || !strings.Contains(evidence, `no "Conversion complete`) {
+			t.Fatalf("want a missing-Conversion-complete fail, got %s: %s", r, evidence)
+		}
+	})
+
+	t.Run("geth: convert mode, error logged: fails", func(t *testing.T) {
+		r, evidence := run(t, consumer, convertSwap, gethConvertBoot("950", "ERROR[10-14|12:00:03.000] Binary tree import failed err=boom"))
+		if r != verdictFail || !strings.Contains(evidence, "logged: ERROR[") {
+			t.Fatalf("want an ERROR-logged fail, got %s: %s", r, evidence)
+		}
+	})
+
+	t.Run("geth: convert mode, restarted after the swap: fails", func(t *testing.T) {
+		r, evidence := run(t, consumer, convertSwap, gethConvertBoot("950", "pbt-swap: starting with --pbt.import.force"))
+		if r != verdictFail || !strings.Contains(evidence, "restarted after the swap") {
+			t.Fatalf("want a restart fail, got %s: %s", r, evidence)
+		}
+	})
+
 	for _, tc := range []struct {
 		name, want string
 		files      map[string]string
@@ -247,7 +303,8 @@ func TestCheckImportAccepted(t *testing.T) {
 		{"fell behind while importing", "behind node 1", gethBoot("812"), []migmon.Event{
 			at(migmon.EvHead, tip, 101, 900, ""),
 			at(migmon.EvProgress, consumer, 102, 0, migmon.PhaseImporting),
-			at(migmon.EvHead, consumer, 102, 900, ""),
+			at(migmon.EvHead, consumer, 102, 899, ""),
+			at(migmon.EvHead, consumer, 104, 900, ""), // following again
 			at(migmon.EvHead, tip, 108, 905, ""),
 			at(migmon.EvHead, consumer, 108, 900, ""), // caught up, then stalled while importing
 			at(migmon.EvProgress, consumer, 110, 0, migmon.PhaseRunning)}},
@@ -343,6 +400,85 @@ func TestCheckImportAccepted(t *testing.T) {
 		r, evidence := run(t, "el-5-nethermind-lighthouse", swap, map[string]string{"docker.log": log})
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s: %s", r, evidence)
+		}
+	})
+}
+
+// --- convert-shadow-agreement --------------------------------------------------
+
+func TestCheckGethConvertShadowFromP(t *testing.T) {
+	root := "0x" + strings.Repeat("5", 64)
+	const consumer, other = "el-3-geth-lighthouse", "el-5-nethermind-lighthouse"
+	gethConvertBoot := func(p string) map[string]string {
+		return map[string]string{"docker.log": "pbt-swap: starting with --pbt.import.force\n" +
+			"INFO [10-14|12:00:02.000] Conversion complete anchor=" + p + " hash=0xcc binaryRoot=" + root + "\n"}
+	}
+	swap := migmon.SwapRecord{Node: 3, Producer: 6, Anchor: 812, FinalizedAtStop: 812, EvidenceDir: "consumer-node-3", Mode: "convert"}
+	sample := func(tm int64, number uint64, roots map[string]string) migmon.Event {
+		e := ev(migmon.EvSample, "", tm)
+		e.Number, e.Roots = number, roots
+		return e
+	}
+
+	run := func(t *testing.T, files map[string]string, monitor ...migmon.Event) (verdict, string) {
+		t.Helper()
+		dir := t.TempDir()
+		for name, body := range files {
+			writeFile(t, filepath.Join(dir, swap.EvidenceDir, name), body)
+		}
+		v := &verifier{
+			manifestPath: "x", artifactsDir: dir,
+			els:      []el{{name: consumer, url: "http://el3"}, {name: other, url: "http://el5"}},
+			monitor:  monitor,
+			manifest: &lapManifest{Offline: &migmon.Offline{Enabled: true}, Swaps: []migmon.SwapRecord{swap}},
+		}
+		return v.checkGethConvertShadowFromP(context.Background())
+	}
+
+	t.Run("no convert-mode swap: inconclusive", func(t *testing.T) {
+		v := &verifier{manifestPath: "x", manifest: &lapManifest{Offline: &migmon.Offline{Enabled: true}}}
+		if r, _ := v.checkGethConvertShadowFromP(context.Background()); r != verdictInconclusive {
+			t.Fatalf("want inconclusive, got %s", r)
+		}
+	})
+
+	t.Run("agrees at every sampled block >= its own anchor P: pass", func(t *testing.T) {
+		r, evidence := run(t, gethConvertBoot("950"),
+			sample(900, 940, map[string]string{consumer: "0xaa", other: "0xaa"}), // before P: not checked
+			sample(960, 960, map[string]string{consumer: root, other: root}),
+			sample(970, 980, map[string]string{consumer: root, other: root}))
+		if r != verdictPass {
+			t.Fatalf("want pass, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "2 sampled block(s)") {
+			t.Fatalf("evidence %q missing the sampled-block count", evidence)
+		}
+	})
+
+	t.Run("disagrees at a block >= P: fails", func(t *testing.T) {
+		r, evidence := run(t, gethConvertBoot("950"),
+			sample(960, 960, map[string]string{consumer: root, other: root}),
+			sample(970, 980, map[string]string{consumer: "0xbad", other: root}))
+		if r != verdictFail {
+			t.Fatalf("want fail, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "block 980") || !strings.Contains(evidence, "0xbad") {
+			t.Fatalf("evidence %q missing the mismatch", evidence)
+		}
+	})
+
+	t.Run("no sample at or after P: fails", func(t *testing.T) {
+		r, evidence := run(t, gethConvertBoot("950"),
+			sample(900, 940, map[string]string{consumer: "0xaa", other: "0xaa"}))
+		if r != verdictFail || !strings.Contains(evidence, "no monitor shadow sample") {
+			t.Fatalf("want a no-sample fail, got %s: %s", r, evidence)
+		}
+	})
+
+	t.Run("no Conversion complete line to read P from: fails", func(t *testing.T) {
+		r, evidence := run(t, map[string]string{"docker.log": "pbt-swap: starting with --pbt.import.force\n"})
+		if r != verdictFail || !strings.Contains(evidence, "no \"Conversion complete\" line") {
+			t.Fatalf("want a missing-P fail, got %s: %s", r, evidence)
 		}
 	})
 }

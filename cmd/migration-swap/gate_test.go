@@ -125,6 +125,7 @@ func TestDecideSwapEachFailingConditionBlocks(t *testing.T) {
 		{"disruptoor unreachable", func(s swapState) swapState { s.Partitions = -1; return s }, wait},
 		{"partition applied", func(s swapState) swapState { s.Partitions = 1; return s }, wait},
 		{"gap too short", func(s swapState) swapState { s.Gap = 10; return s }, wait},
+		{"self-conversion before the head passes the anchor", func(s swapState) swapState { s.Head, s.MinHead = 600, 636; return s }, wait},
 		{"previous consumer not caught up", func(s swapState) swapState { s.PrevBehind = true; return s }, wait},
 		{"reorged anchor", func(s swapState) swapState { s.Canonical = "0xdead"; return s }, reorged},
 	}

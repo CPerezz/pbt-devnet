@@ -124,8 +124,10 @@ type swapState struct {
 	Down                        []string // other validating ELs/CLs failing their health check
 	Partitions                  int
 	Gap                         int64
-	PrevBehind                  bool // a failed or timed-out previous consumer's EL is off the head
-	PrevFailed                  bool // an earlier swap failed or timed out
+	PrevBehind                  bool   // a failed or timed-out previous consumer's EL is off the head
+	PrevFailed                  bool   // an earlier swap failed or timed out
+	Head                        uint64 // node 1's head
+	MinHead                     uint64 // the head a self-converting consumer needs; 0 for the others
 }
 
 // decideSwap is the swap gate: skip and reorged are final, wait polls again.
@@ -158,8 +160,16 @@ func decideSwap(s swapState) (verdict, string) {
 		return wait, fmt.Sprintf("%d partitions applied", s.Partitions)
 	case s.Gap < s.Expected+swapSlack:
 		return wait, fmt.Sprintf("chaos-free for %ds, need %ds", s.Gap, s.Expected+swapSlack)
+	case s.Head < s.MinHead:
+		return wait, fmt.Sprintf("head %d below %d: a self-conversion reads a state persisted past the anchor", s.Head, s.MinHead)
 	case s.PrevBehind:
 		return wait, "previous consumer's EL is not back at the head"
 	}
 	return proceed, ""
 }
+
+// convertLead is how far node 1's head must be past the anchor before a geth that converts
+// its own state swaps: geth persists no state of its last 128 blocks (pathdb's diff layers),
+// and --history.state=8 (gethFlags) makes it persist at most 8 blocks later. Swapping
+// earlier only stretches the swap window by the wait.
+const convertLead = 128 + 8

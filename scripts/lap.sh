@@ -39,6 +39,9 @@ SCENARIOS="${SCENARIOS:-code-sole code-shared delegate account storage-add stora
 SCENARIO_DEPTH="${SCENARIO_DEPTH:-8}"
 # The reorg service's API port inside the enclave, matching main.star.
 CHAOS_PORT="${CHAOS_PORT:-7800}"
+# geth consumer mode: import (the producer's snapshot+preimages) or convert (geth converts
+# its own state, fed only the producer's preimages and anchor hash; see README "Offline migration").
+GETH_SWAP="${GETH_SWAP:-import}"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 mkdir -p "$OUT"
@@ -68,7 +71,7 @@ if [ -n "$OFFLINE_JSON" ]; then
   say "offline migration lap: starting migration-swap"
   rm -f "$OUT/swap.lock" "$OUT/swaps.json"
   bin/migration-swap --enclave "$ENCLAVE" --genesis "$GENESIS" --fork "$FORK" \
-    --offline "$OFFLINE_JSON" --out "$OUT" ${OFFLINE_FAULT:+--fault "$OFFLINE_FAULT"} \
+    --offline "$OFFLINE_JSON" --out "$OUT" --geth-swap "$GETH_SWAP" ${OFFLINE_FAULT:+--fault "$OFFLINE_FAULT"} \
     > "$OUT/migration-swap.log" 2>&1 &
   SWAP_PID=$!
 fi

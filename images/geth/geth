@@ -1,10 +1,13 @@
 #!/bin/sh
 # Offline-migration hook for the pbt-devnet lap. cmd/migration-swap stops this
-# node, drops an EIP-8347 snapshot and preimage file into pbt-swap/ beside a
-# `flags` file, and starts it again: geth imports the pair in the background
-# while it keeps following the chain (--pbt.import.*), and its follower adopts
-# the anchor once the import attests. The flags are kept, so every later
-# restart finds the import done and reuses it.
+# node and drops a `flags` file into pbt-swap/, then starts it again. In the
+# default (import) geth-swap mode the dir also holds a snapshot+preimage pair
+# and the flags name both (--pbt.import.snapshot/.preimages/.anchor); in
+# convert mode (GETH_SWAP=convert) it holds only the producer's preimage file
+# and the flags name just that and the anchor, so geth converts its own
+# persisted state instead. Either way geth keeps following the chain while it
+# works (--pbt.import.*) and its follower adopts the anchor once it attests.
+# The flags are kept, so every later restart finds the work done and reuses it.
 # Without the file this is the client itself.
 D=/data/geth/execution-data
 S=$D/pbt-swap
