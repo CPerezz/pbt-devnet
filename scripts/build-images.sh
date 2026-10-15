@@ -14,10 +14,7 @@ SRC="${PBT_SRC_DIR:-$ROOT/../pbt-devnet-src}"
 GETH_SRC="${PBT_GETH_SRC:-$SRC/geth}"
 ERIGON_SRC="${PBT_ERIGON_SRC:-$SRC/erigon}"
 EGG_SRC="${PBT_EGG_SRC:-$SRC/egg}"
-# Nethermind builds from GitHub at a pinned pbt-state commit (the branch moves; this is
-# its tip with the anchor-import fix, #14260), unless a local checkout is named.
-NETHERMIND_SRC="${PBT_NETHERMIND_SRC:-}"
-NETHERMIND_REF="${PBT_NETHERMIND_REF:-323217bcba8038269064550e5a71cb009807bc6f}"
+NETHERMIND_SRC="${PBT_NETHERMIND_SRC:-$SRC/nethermind}"
 # The offline lap needs every producer and consumer on the same artifact format.
 OFFLINE=""
 grep -qE '^\s*offline:' "$ARGS" && OFFLINE=1
@@ -51,8 +48,9 @@ require_capability() {
   exit 1
 }
 
+# build_from name image dir note [dockerfile]: dockerfile defaults to the checkout's own.
 build_from() {
-  local name=$1 image=$2 dir=$3 note=$4
+  local name=$1 image=$2 dir=$3 note=$4 dockerfile=${5:-}
   if [[ ! -d "$dir" ]]; then
     echo "!! $name: no checkout at $dir" >&2
     echo "   $note" >&2
@@ -62,7 +60,7 @@ build_from() {
   echo "    source: $dir ($(provenance "$dir"))"
   # .dockerignore keeps build artifacts and nested worktrees out of the build context.
   [[ -f "$dir/.dockerignore" ]] || echo "    WARNING: no .dockerignore in $dir — context may be huge" >&2
-  docker build --platform "$PLATFORM" -t "$image" "$dir"
+  docker build --platform "$PLATFORM" ${dockerfile:+-f "$dockerfile"} -t "$image" "$dir"
   echo
 }
 
@@ -135,15 +133,24 @@ build_from "erigon (EIP-8297)" "erigon-pbt:local" "$ERIGON_SRC" \
 fi
 
 if want nethermind; then
-if [[ -n "$NETHERMIND_SRC" ]]; then
-build_from "nethermind (EIP-8297)" "nethermind-pbt:base" "$NETHERMIND_SRC" \
-  "set PBT_NETHERMIND_SRC to a NethermindEth/nethermind checkout, or unset it to build from GitHub"
-else
-echo "==> nethermind (EIP-8297) -> nethermind-pbt:base"
-echo "    source: https://github.com/NethermindEth/nethermind.git#$NETHERMIND_REF"
-docker build --platform "$PLATFORM" -t nethermind-pbt:base \
-  "https://github.com/NethermindEth/nethermind.git#$NETHERMIND_REF"
+# NuGet's audit turns advisories published after the pin into NU1903 errors (the
+# repo builds warnings as errors): a pinned commit must build the same way every
+# day, so the audit is off for this image. Upstream's Dockerfile is used as is
+# otherwise.
+nm_dockerfile=""
+if [[ -f "$NETHERMIND_SRC/Dockerfile" ]]; then
+  nm_dockerfile="$(mktemp)"
+  trap 'rm -f "$nm_dockerfile"' EXIT
+  sed 's|dotnet restore --locked-mode|dotnet restore --locked-mode -p:NuGetAudit=false|' \
+    "$NETHERMIND_SRC/Dockerfile" > "$nm_dockerfile"
+  grep -q 'NuGetAudit=false' "$nm_dockerfile" || {
+    echo "!! nethermind: $NETHERMIND_SRC/Dockerfile has no 'dotnet restore --locked-mode' line to patch" >&2
+    echo "   source is at $(provenance "$NETHERMIND_SRC")" >&2
+    exit 1
+  }
 fi
+build_from "nethermind (EIP-8297)" "nethermind-pbt:base" "$NETHERMIND_SRC" \
+  "run scripts/sources.sh, or set PBT_NETHERMIND_SRC" "$nm_dockerfile"
 wrap nethermind-pbt:base nethermind-pbt:local nethermind
 echo
 fi
