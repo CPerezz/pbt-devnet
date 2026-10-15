@@ -450,9 +450,12 @@ func (v *verifier) checkGethConvertShadowFromP(ctx context.Context) (verdict, st
 
 // followedThroughImport reads the monitor stream for the consumer's import
 // window, from its first "importing" progress sample to the first other one.
-// Once its head first comes within CaughtUpLag of node 1's after the restart,
-// it must stay there for the rest of the window: the node keeps following
-// while it imports.
+// Once its head has moved past where the restart left it and come within
+// CaughtUpLag of node 1's, it must stay there for the rest of the window: the
+// node keeps following while it imports. The head the restart left behind is
+// no sign of following: the beacon client takes up to a minute to feed the
+// node again (37 s and 59 s in two laps), and a self-conversion cannot even
+// start before it has.
 func (v *verifier) followedThroughImport(s migmon.SwapRecord) ([]string, string) {
 	var (
 		tip                  uint64
@@ -499,7 +502,7 @@ func (v *verifier) followedThroughImport(s migmon.SwapRecord) ([]string, string)
 		if caughtUp && !within {
 			behind++
 		}
-		caughtUp = caughtUp || within
+		caughtUp = caughtUp || within && ev.Number > firstHead
 	}
 	if samples == 0 {
 		return nil, "imported between monitor polls"

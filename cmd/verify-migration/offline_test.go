@@ -251,6 +251,21 @@ func TestCheckImportAccepted(t *testing.T) {
 		}
 	})
 
+	t.Run("geth: convert mode, head left by the restart while the beacon client is silent: accepted", func(t *testing.T) {
+		r, evidence := run(t, consumer, convertSwap, gethConvertBoot("950"),
+			at(migmon.EvHead, tip, 101, 900, ""),
+			at(migmon.EvProgress, consumer, 102, 0, migmon.PhaseImporting),
+			at(migmon.EvHead, consumer, 102, 899, ""), // where the restart left it, within reach
+			at(migmon.EvHead, tip, 120, 905, ""),
+			at(migmon.EvHead, consumer, 120, 899, ""), // no blocks fed yet
+			at(migmon.EvHead, tip, 160, 911, ""),
+			at(migmon.EvHead, consumer, 160, 911, ""), // fed again, caught up, converts
+			at(migmon.EvProgress, consumer, 162, 0, migmon.PhaseRunning))
+		if r != verdictPass {
+			t.Fatalf("want pass, got %s: %s", r, evidence)
+		}
+	})
+
 	t.Run("geth: convert mode, no Conversion complete line: fails", func(t *testing.T) {
 		r, evidence := run(t, consumer, convertSwap, map[string]string{"docker.log": "pbt-swap: starting with --pbt.import.force\n"})
 		if r != verdictFail || !strings.Contains(evidence, `no "Conversion complete`) {
@@ -288,7 +303,8 @@ func TestCheckImportAccepted(t *testing.T) {
 		{"fell behind while importing", "behind node 1", gethBoot("812"), []migmon.Event{
 			at(migmon.EvHead, tip, 101, 900, ""),
 			at(migmon.EvProgress, consumer, 102, 0, migmon.PhaseImporting),
-			at(migmon.EvHead, consumer, 102, 900, ""),
+			at(migmon.EvHead, consumer, 102, 899, ""),
+			at(migmon.EvHead, consumer, 104, 900, ""), // following again
 			at(migmon.EvHead, tip, 108, 905, ""),
 			at(migmon.EvHead, consumer, 108, 900, ""), // caught up, then stalled while importing
 			at(migmon.EvProgress, consumer, 110, 0, migmon.PhaseRunning)}},
