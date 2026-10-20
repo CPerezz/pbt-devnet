@@ -1395,8 +1395,13 @@ func (v *verifier) orphanedForkBlocks() []orphanBlock {
 	return out
 }
 
-// checkOrphanGone asserts every orphaned fork-block hash is null or non-canonical on
-// every node. INCONCLUSIVE when no istar-reorged event yields an orphan hash.
+// checkOrphanGone asserts that on every node the canonical block at each orphaned fork
+// block's height exists and is not the orphan. It asks each node for its own canonical
+// block, the evidence forkblock-convergence uses: a node with no block at that height has
+// lost or never followed the chain, which proves nothing about the orphan, and another
+// node's canonical block says nothing about this one's. Whether the orphan is still
+// stored as a side block does not matter. INCONCLUSIVE when no istar-reorged event
+// yields an orphan hash.
 func (v *verifier) checkOrphanGone(ctx context.Context) (verdict, string) {
 	orphans := v.orphanedForkBlocks()
 	if len(orphans) == 0 {
@@ -1404,35 +1409,20 @@ func (v *verifier) checkOrphanGone(ctx context.Context) (verdict, string) {
 	}
 
 	var problems []string
-	canonical := map[uint64]string{} // height -> canonical hash, memoised across nodes and orphans
 	for _, orphan := range orphans {
 		for _, e := range v.els {
-			blk, err := v.getBlockByHash(ctx, e, orphan.hash)
+			canon, err := v.getBlock(ctx, e, hexutil.EncodeUint64(orphan.height))
 			if err != nil {
-				problems = append(problems, fmt.Sprintf("%s: eth_getBlockByHash(%s): %v", e.name, orphan.hash, err))
+				problems = append(problems, fmt.Sprintf("%s cannot confirm orphan %s is gone: canonical block %d: %v", e.name, orphan.hash, orphan.height, err))
 				continue
 			}
-			if blk == nil {
-				continue // gone: exactly the expected outcome
-			}
-			height := uint64(blk.Number)
-			canonHash, ok := canonical[height]
-			if !ok {
-				head, err := v.getBlock(ctx, e, hexutil.EncodeUint64(height))
-				if err != nil {
-					problems = append(problems, fmt.Sprintf("%s: canonical block %d: %v", e.name, height, err))
-					continue
-				}
-				canonHash = head.Hash.Hex()
-				canonical[height] = canonHash
-			}
-			if strings.EqualFold(blk.Hash.Hex(), canonHash) {
-				problems = append(problems, fmt.Sprintf("%s still serves orphaned block %s at height %d as canonical", e.name, orphan.hash, height))
+			if strings.EqualFold(canon.Hash.Hex(), orphan.hash) {
+				problems = append(problems, fmt.Sprintf("%s still serves orphaned block %s at height %d as canonical", e.name, orphan.hash, orphan.height))
 			}
 		}
 	}
 	if len(problems) > 0 {
 		return verdictFail, strings.Join(problems, "; ")
 	}
-	return verdictPass, fmt.Sprintf("%d orphaned post-fork block(s) confirmed non-canonical (null or superseded) across %d node(s)", len(orphans), len(v.els))
+	return verdictPass, fmt.Sprintf("%d orphaned post-fork block(s) superseded by each node's own canonical block across %d node(s)", len(orphans), len(v.els))
 }

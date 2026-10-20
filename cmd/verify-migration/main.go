@@ -353,7 +353,7 @@ func (v *verifier) getBlock(ctx context.Context, e el, numberOrTag string) (*rpc
 	return blk, nil
 }
 
-// getBlockByHash tolerates a null result: an absent orphaned hash is expected.
+// getBlockByHash tolerates a null result; the caller decides what an absent hash means.
 func (v *verifier) getBlockByHash(ctx context.Context, e el, hash string) (*rpcBlock, error) {
 	var blk *rpcBlock
 	if err := v.fetch(ctx, e.url, "eth_getBlockByHash", &blk, hash, false); err != nil {
