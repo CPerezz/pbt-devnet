@@ -614,44 +614,57 @@ func TestCheckOrphanGoneOrphanedBranchGone(t *testing.T) {
 		}
 	})
 
-	t.Run("every node reports the orphan gone (null): passes", func(t *testing.T) {
-		fetch := fakeFetcher(t, map[string]json.RawMessage{
-			rpcKey("http://el1", "eth_getBlockByHash", orphanHash, false): json.RawMessage("null"),
-			rpcKey("http://el2", "eth_getBlockByHash", orphanHash, false): json.RawMessage("null"),
+	// canonicalAt stubs each node's canonical block at the orphan's height (500 = 0x1f4);
+	// a JSON null is a node with no block there.
+	canonicalAt := func(t *testing.T, el1, el2 json.RawMessage) fetcher {
+		return fakeFetcher(t, map[string]json.RawMessage{
+			rpcKey("http://el1", "eth_getBlockByNumber", "0x1f4", false): el1,
+			rpcKey("http://el2", "eth_getBlockByNumber", "0x1f4", false): el2,
 		})
-		v := &verifier{els: els, monitor: monitor, fetch: fetch}
+	}
+	superseding := blockJSON(testNewHash, zeroRoot)
+
+	t.Run("every node's canonical block at the height supersedes the orphan: passes", func(t *testing.T) {
+		v := &verifier{els: els, monitor: monitor, fetch: canonicalAt(t, superseding, superseding)}
 		r, evidence := v.checkOrphanGone(context.Background())
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s: %s", r, evidence)
 		}
 	})
 
-	t.Run("orphan still resolvable but non-canonical: passes", func(t *testing.T) {
-		fetch := fakeFetcher(t, map[string]json.RawMessage{
-			rpcKey("http://el1", "eth_getBlockByHash", orphanHash, false): blockJSON(orphanHash, zeroRoot),
-			rpcKey("http://el1", "eth_getBlockByNumber", "0x0", false):    blockJSON(testNewHash, zeroRoot), // canonical differs
-			rpcKey("http://el2", "eth_getBlockByHash", orphanHash, false): json.RawMessage("null"),
-		})
-		v := &verifier{els: els, monitor: monitor, fetch: fetch}
-		r, evidence := v.checkOrphanGone(context.Background())
-		if r != verdictPass {
-			t.Fatalf("want pass (dangling non-canonical block is fine), got %s: %s", r, evidence)
-		}
-	})
-
 	t.Run("orphan still served as canonical: fails", func(t *testing.T) {
-		fetch := fakeFetcher(t, map[string]json.RawMessage{
-			rpcKey("http://el1", "eth_getBlockByHash", orphanHash, false): blockJSON(orphanHash, zeroRoot),
-			rpcKey("http://el1", "eth_getBlockByNumber", "0x0", false):    blockJSON(orphanHash, zeroRoot), // canonical == orphan
-			rpcKey("http://el2", "eth_getBlockByHash", orphanHash, false): json.RawMessage("null"),
-		})
-		v := &verifier{els: els, monitor: monitor, fetch: fetch}
+		v := &verifier{els: els, monitor: monitor, fetch: canonicalAt(t, blockJSON(orphanHash, zeroRoot), superseding)}
 		r, evidence := v.checkOrphanGone(context.Background())
 		if r != verdictFail {
 			t.Fatalf("want fail, got %s: %s", r, evidence)
 		}
-		if !strings.Contains(evidence, "canonical") {
-			t.Fatalf("evidence %q missing canonical reason", evidence)
+		if !strings.Contains(evidence, "el1 still serves orphaned block") {
+			t.Fatalf("evidence %q should name el1 serving the orphan as canonical", evidence)
+		}
+	})
+
+	// A node that lost its chain answers null for every hash. forkblock-convergence fails it
+	// for having no block at the fork height, so orphan-gone must not count it as proof.
+	t.Run("a node with no block at the orphan's height cannot confirm it gone: fails", func(t *testing.T) {
+		v := &verifier{els: els, monitor: monitor, fetch: canonicalAt(t, superseding, json.RawMessage("null"))}
+		r, evidence := v.checkOrphanGone(context.Background())
+		if r != verdictFail {
+			t.Fatalf("want fail, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "el2 cannot confirm orphan") {
+			t.Fatalf("evidence %q should name el2 as unable to confirm", evidence)
+		}
+	})
+
+	// Each node is judged on its own chain: el1 having moved on says nothing about el2.
+	t.Run("one node moved on, another still serves the orphan: fails on that node", func(t *testing.T) {
+		v := &verifier{els: els, monitor: monitor, fetch: canonicalAt(t, superseding, blockJSON(orphanHash, zeroRoot))}
+		r, evidence := v.checkOrphanGone(context.Background())
+		if r != verdictFail {
+			t.Fatalf("want fail, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "el2 still serves orphaned block") || strings.Contains(evidence, "el1") {
+			t.Fatalf("evidence %q should name el2 only", evidence)
 		}
 	})
 }
