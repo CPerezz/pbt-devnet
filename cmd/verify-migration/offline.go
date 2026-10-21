@@ -166,6 +166,7 @@ func (v *verifier) checkArtifactProduced(ctx context.Context) (verdict, string) 
 var (
 	gethImportCompleteRe  = regexp.MustCompile(`Import complete.*\banchor=(\d+)`)
 	nethermindMigrationRe = regexp.MustCompile(`PBT state at StateId \{ BlockNumber = (\d+),`)
+	besuBootstrapRe       = regexp.MustCompile(`PBT migrator bootstrapped from snapshot at block (\d+)`)
 )
 
 var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
@@ -183,6 +184,13 @@ func swapBoot(raw []byte) (string, bool) {
 	return text[i:], true
 }
 
+// besuRefusals are the migrator's own refusal and failure log lines.
+var besuRefusals = []string{
+	"PBT snapshot rejected",
+	"PBT snapshot bootstrap failed",
+	"is past the PBT fork; migrator stopped",
+}
+
 // nethermindRefusals are the client's own refusal log lines; any of
 // these in the evidence means the import never landed cleanly.
 var nethermindRefusals = []string{
@@ -194,7 +202,7 @@ var nethermindRefusals = []string{
 
 // checkImportAccepted asserts, per swap, that the consumer's own log proves
 // a clean import of the manifest's anchor: geth's "Import complete" plus a
-// done marker and no failed one, or nethermind's migration-bootstrap success
+// done marker and no failed one, or nethermind's or besu's bootstrap success
 // line naming the anchor with none of its refusal strings present. Either
 // way the anchor must not be ahead of node 1's finalized height at the stop.
 func (v *verifier) checkImportAccepted(ctx context.Context) (verdict, string) {
@@ -251,6 +259,27 @@ func (v *verifier) checkImportAccepted(ctx context.Context) (verdict, string) {
 				pp = append(pp, `no "EIP-8347 migration: flat state at ..., PBT state at ..." success line`)
 			} else if anchor, _ := strconv.ParseUint(mm[1], 10, 64); anchor != s.Anchor {
 				pp = append(pp, fmt.Sprintf("PBT StateId block %s != manifest anchor %d", mm[1], s.Anchor))
+			}
+		case "besu":
+			raw, err := os.ReadFile(v.artifactPath(s.EvidenceDir, "docker.log"))
+			if err != nil {
+				pp = append(pp, fmt.Sprintf("docker.log: %v", err))
+				break
+			}
+			text, ok := swapBoot(raw)
+			if !ok {
+				pp = append(pp, `no "pbt-swap: starting" line: no swap boot to judge`)
+				break
+			}
+			for _, needle := range besuRefusals {
+				if strings.Contains(text, needle) {
+					pp = append(pp, fmt.Sprintf("refusal logged: %q", needle))
+				}
+			}
+			if mm := besuBootstrapRe.FindStringSubmatch(text); mm == nil {
+				pp = append(pp, `no "PBT migrator bootstrapped from snapshot at block ..." line`)
+			} else if anchor, _ := strconv.ParseUint(mm[1], 10, 64); anchor != s.Anchor {
+				pp = append(pp, fmt.Sprintf("snapshot bootstrapped at block %s != manifest anchor %d", mm[1], s.Anchor))
 			}
 		default:
 			pp = append(pp, fmt.Sprintf("unrecognized consumer client %q for node %d", client, s.Node))

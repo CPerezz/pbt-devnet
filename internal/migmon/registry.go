@@ -39,9 +39,9 @@ var Registry = map[string]ClientSpec{
 		ServesOrphans:   true,
 	},
 	"besu": {
-		// No debug_migrationProgress or debug_shadowStateRoot: besu swaps the trie per
-		// header and has nothing to report about a background build.
-		Introspects: false,
+		// Same debug_migrationProgress / debug_shadowStateRoot wire shape as geth: the
+		// migrator builds the binary column in the background and records its root per block.
+		Introspects: true,
 		// "Chain Reorganization +3 new / -2 old": the old-chain length is the branch
 		// that was dropped. Logged only above --reorg-logging-threshold, which the
 		// migration profiles set to 0.
@@ -50,6 +50,9 @@ var Registry = map[string]ClientSpec{
 		// already dropped. Safe in both directions - a client that stops serving makes
 		// the parent walk error and fall back to its log.
 		ServesOrphans: true,
+		// Migrator retires at I*; the node does not keep a merkle shadow window, so
+		// completion is judged without a retirement-of-shadow check.
+		RetiresShadow: false,
 	},
 	// Same debug_migrationProgress / debug_shadowStateRoot wire shape as geth; its block
 	// tree keeps every branch, so orphans stay readable by hash. No reorg log line carries

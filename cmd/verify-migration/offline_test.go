@@ -233,6 +233,44 @@ func TestCheckImportAccepted(t *testing.T) {
 		}
 	})
 
+	t.Run("besu: the swap boot's snapshot bootstrap is accepted", func(t *testing.T) {
+		swap := migmon.SwapRecord{Node: 4, Anchor: 812, FinalizedAtStop: 812, EvidenceDir: "consumer-node-4"}
+		// besu's first boot built its column from genesis; only the swap boot is judged.
+		log := "INFO | PbtMigrator | PBT migrator bootstrapped at genesis 0x1a\n" +
+			"pbt-swap: starting with --Xpbt-snapshot-anchor-block-hash=0xab\n" +
+			"INFO | PbtMigrator | PBT migrator bootstrapped from snapshot at block 812 (leaves=9, codes=2, root=" + root + ")\n"
+		r, evidence := run(t, "el-4-besu-lighthouse", swap, map[string]string{"docker.log": log})
+		if r != verdictPass {
+			t.Fatalf("want pass, got %s: %s", r, evidence)
+		}
+	})
+
+	t.Run("besu: a rejected snapshot fails", func(t *testing.T) {
+		swap := migmon.SwapRecord{Node: 4, Anchor: 812, FinalizedAtStop: 812, EvidenceDir: "consumer-node-4"}
+		log := "pbt-swap: starting with --Xpbt-snapshot-anchor-block-hash=0xab\n" +
+			"ERROR | PbtMigrator | PBT snapshot rejected, migrator stopped: pbtRoot mismatch\n"
+		r, evidence := run(t, "el-4-besu-lighthouse", swap, map[string]string{"docker.log": log})
+		if r != verdictFail {
+			t.Fatalf("want fail, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "refusal logged") || !strings.Contains(evidence, "no \"PBT migrator bootstrapped") {
+			t.Fatalf("evidence %q missing refusal or missing-success reason", evidence)
+		}
+	})
+
+	t.Run("besu: a bootstrap at another block than the anchor fails", func(t *testing.T) {
+		swap := migmon.SwapRecord{Node: 4, Anchor: 812, FinalizedAtStop: 812, EvidenceDir: "consumer-node-4"}
+		log := "pbt-swap: starting with --Xpbt-snapshot-anchor-block-hash=0xab\n" +
+			"INFO | PbtMigrator | PBT migrator bootstrapped from snapshot at block 700 (leaves=9, codes=2, root=" + root + ")\n"
+		r, evidence := run(t, "el-4-besu-lighthouse", swap, map[string]string{"docker.log": log})
+		if r != verdictFail {
+			t.Fatalf("want fail, got %s: %s", r, evidence)
+		}
+		if !strings.Contains(evidence, "!= manifest anchor") {
+			t.Fatalf("evidence %q missing anchor-mismatch reason", evidence)
+		}
+	})
+
 	t.Run("swap skipped: fails with its detail, no log reading", func(t *testing.T) {
 		// No files given: if the check tried to read a log anyway it would fail with
 		// an "open ...: no such file" error instead of this detail.

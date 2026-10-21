@@ -113,6 +113,8 @@ func datadirFor(client string) string {
 		return "/data/geth/execution-data"
 	case "nethermind":
 		return "/data/nethermind/execution-data"
+	case "besu":
+		return "/data/besu/execution-data"
 	}
 	return ""
 }
@@ -170,6 +172,15 @@ func (r *runner) swapBody(c migmon.OfflineConsumer, sw *migmon.SwapRecord, prod 
 		flags := fmt.Sprintf(
 			"--Pbt.MigrationSnapshotPath=%s/pbt-swap/pbt-snapshot.bin\n--Pbt.MigrationPreimagesPath=%s/pbt-swap/preimages.bin\n--Pbt.MigrationAnchor=%d\n",
 			datadir, datadir, prod.Anchor)
+		if err := os.WriteFile(filepath.Join(local, "flags"), []byte(flags), 0o644); err != nil {
+			return fail(err.Error())
+		}
+	case "besu":
+		// run without --Xpbt-migration-from-genesis, besu has no binary column yet and
+		// starts it from the snapshot on this restart, keeping its chain
+		flags := fmt.Sprintf(
+			"--Xpbt-snapshot-file=%s/pbt-swap/pbt-snapshot.bin\n--Xpbt-preimages-file=%s/pbt-swap/preimages.bin\n--Xpbt-snapshot-anchor-block-hash=%s\n",
+			datadir, datadir, prod.AnchorHash)
 		if err := os.WriteFile(filepath.Join(local, "flags"), []byte(flags), 0o644); err != nil {
 			return fail(err.Error())
 		}

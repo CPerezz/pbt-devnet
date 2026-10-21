@@ -1,0 +1,14 @@
+#!/bin/bash
+# Offline-migration hook for the pbt-devnet lap. A besu run without
+# --Xpbt-migration-from-genesis has no binary column until it gets a snapshot, so
+# cmd/migration-swap leaves:
+#   pbt-swap/flags  one flag per line, the --Xpbt-snapshot-* import; kept, so every
+#                   later restart reuses the same import
+# Without it this is besu itself.
+S=/data/besu/execution-data/pbt-swap
+if [ -f "$S/flags" ]; then
+  mapfile -t extra < "$S/flags"
+  echo "pbt-swap: starting with ${extra[*]}"
+  set -- "$@" "${extra[@]}"
+fi
+exec /opt/besu/bin/besu.real "$@"
