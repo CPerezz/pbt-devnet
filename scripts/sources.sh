@@ -37,6 +37,6 @@ pin erigon         https://github.com/erigontech/erigon.git \
 pin egg            https://github.com/CPerezz/ethereum-genesis-generator.git \
     "${PBT_EGG_REF:-b56f205b9fef22a3d0f590be0c5fdaf4aa576cac}"            "${PBT_EGG_SRC:-}"            # pbt-offset
 pin besu           https://github.com/matkt/besu.git \
-    "${PBT_BESU_REF:-ba419e5f8345cc69c503766f2ddf08e3f1b1b9f8}"           "${PBT_BESU_ROOT:-}"          # glamsterdam-devnet-8-pbt
+    "${PBT_BESU_REF:-39377a2659f63c3bb230a5f57b4ef6846348f876}"           "${PBT_BESU_ROOT:-}"          # main-pbt
 pin besu-stateless https://github.com/besu-eth/besu-stateless.git \
-    "${PBT_BESU_STATELESS_REF:-9a9a981706c499784c6749fb43510d4164117f25}" "${PBT_BESU_STATELESS:-}"     # feat/partitioned-binary-trie
+    "${PBT_BESU_STATELESS_REF:-62b752345cce00d9119f37c37d56eb9566269578}" "${PBT_BESU_STATELESS:-}"     # feat/partitioned-binary-trie

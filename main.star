@@ -64,7 +64,7 @@ DEFAULT_MIGRATION = {
 # Who can produce the EIP-8347 artifacts on a live chain, and who can import them
 # into a synced datadir (hive#1614's capability matrix, minus genesis-only paths).
 OFFLINE_PRODUCERS = {"geth-convert": "geth", "erigon-export": "erigon"}
-OFFLINE_IMPORTERS = ["geth", "nethermind"]
+OFFLINE_IMPORTERS = ["geth", "nethermind", "besu"]
 
 DEFAULT_HAMMER = {
     "enabled": True,

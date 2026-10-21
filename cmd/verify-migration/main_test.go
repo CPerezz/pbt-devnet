@@ -1119,9 +1119,12 @@ func TestLogReorgMatchesReadsBesuStamps(t *testing.T) {
 // counting it would fail every lap it takes part in; with fewer than two
 // clients that can answer there is nothing to cross-check at all.
 func TestCheckShadowSamplesCountsOnlyReportingClients(t *testing.T) {
+	// every client of the profiles answers it now, so the opaque one is registered here
+	migmon.Registry["opaque"] = migmon.ClientSpec{Introspects: false}
+	t.Cleanup(func() { delete(migmon.Registry, "opaque") })
 	els := []el{
 		{name: "el-1-geth-lighthouse"}, {name: "el-2-geth-lighthouse"},
-		{name: "el-3-geth-lighthouse"}, {name: "el-4-besu-lighthouse"},
+		{name: "el-3-besu-lighthouse"}, {name: "el-4-opaque-lighthouse"},
 	}
 	root := testNewHash
 	var monitor []migmon.Event
@@ -1130,7 +1133,7 @@ func TestCheckShadowSamplesCountsOnlyReportingClients(t *testing.T) {
 		e.Number = uint64(100 + i)
 		e.Roots = map[string]string{
 			"el-1-geth-lighthouse": root, "el-2-geth-lighthouse": root,
-			"el-3-geth-lighthouse": root, "el-4-besu-lighthouse": "",
+			"el-3-besu-lighthouse": root, "el-4-opaque-lighthouse": "",
 		}
 		monitor = append(monitor, e)
 	}
@@ -1139,8 +1142,8 @@ func TestCheckShadowSamplesCountsOnlyReportingClients(t *testing.T) {
 		t.Fatalf("three agreeing reporters and one opaque client: want pass, got %s: %s", r, evidence)
 	}
 
-	// One geth beside besu: agreement with nobody is not evidence.
-	v.els = []el{{name: "el-1-geth-lighthouse"}, {name: "el-4-besu-lighthouse"}}
+	// One geth beside the opaque client: agreement with nobody is not evidence.
+	v.els = []el{{name: "el-1-geth-lighthouse"}, {name: "el-4-opaque-lighthouse"}}
 	if r, evidence := v.checkShadowSamples(context.Background()); r != verdictInconclusive {
 		t.Fatalf("one reporter: want inconclusive, got %s: %s", r, evidence)
 	}

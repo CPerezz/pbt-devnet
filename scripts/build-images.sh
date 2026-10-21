@@ -115,8 +115,8 @@ fi
 
 if want besu; then
 # Two Gradle stages then a docker build, all in build-besu.sh; it needs a JDK 25 on the host.
-"$ROOT/scripts/build-besu.sh"
-echo
+PBT_BESU_IMAGE=besu-pbt:base "$ROOT/scripts/build-besu.sh"
+wrap besu-pbt:base besu-pbt:local besu
 fi
 
 if want erigon; then

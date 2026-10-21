@@ -948,7 +948,7 @@ func (v *verifier) shadowReporters() []string {
 //
 // Only clients whose registry entry answers the shadow-root RPC are counted: a
 // node that cannot report one never agrees, and holding the run to every EL
-// would fail a lap for containing a client like besu. Fewer than two reporters
+// would fail a lap for containing a client that cannot. Fewer than two reporters
 // leaves nothing to cross-check, which is inconclusive rather than a pass.
 func (v *verifier) checkShadowSamples(ctx context.Context) (verdict, string) {
 	windows := v.chaosWindows()
