@@ -43,11 +43,6 @@ func (v *verifier) artifactPath(relDir, name string) string {
 	return filepath.Join(v.artifactsDir, relDir, name)
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 // readErigonMetaRoot reads pbtRoot from an erigon `export-pbt` meta.json.
 func readErigonMetaRoot(path string) (string, error) {
 	raw, err := os.ReadFile(path)
@@ -164,13 +159,14 @@ func (v *verifier) checkArtifactProduced(ctx context.Context) (verdict, string) 
 }
 
 var (
-	gethImportCompleteRe  = regexp.MustCompile(`Import complete.*\banchor=(\d+)`)
+	// geth logs its roots abbreviated (see pbtsnap.LoggedMatches).
+	gethImportCompleteRe  = regexp.MustCompile(`Import complete.*\bbinaryRoot=(\S+).*\banchor=(\d+)`)
 	nethermindMigrationRe = regexp.MustCompile(`PBT state at StateId \{ BlockNumber = (\d+),`)
 )
 
 var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
-// swapBoot is the part of a nethermind container log the swap's own boot wrote. Nethermind
+// swapBoot is the part of a consumer's container log the swap's own boot wrote. Nethermind
 // colours its log, and the container's earlier boot (seeded from genesis) logged a success
 // line of its own at block 0; the wrapper marks where the swap's boot begins. The first
 // marker: a later restart reuses the import and logs alignment at its own head.
@@ -193,10 +189,11 @@ var nethermindRefusals = []string{
 }
 
 // checkImportAccepted asserts, per swap, that the consumer's own log proves
-// a clean import of the manifest's anchor: geth's "Import complete" plus a
-// done marker and no failed one, or nethermind's migration-bootstrap success
-// line naming the anchor with none of its refusal strings present. Either
-// way the anchor must not be ahead of node 1's finalized height at the stop.
+// a clean import of the manifest's anchor: geth's online import (see
+// gethOnlineImport, and the monitor's view of it), or nethermind's
+// migration-bootstrap success line naming the anchor with none of its refusal
+// strings present. Either way the anchor must not be ahead of node 1's
+// finalized height at the stop.
 func (v *verifier) checkImportAccepted(ctx context.Context) (verdict, string) {
 	m, r, msg := v.requireOffline()
 	if m == nil {
@@ -216,21 +213,20 @@ func (v *verifier) checkImportAccepted(ctx context.Context) (verdict, string) {
 		}
 		switch client {
 		case "geth":
-			raw, err := os.ReadFile(v.artifactPath(s.EvidenceDir, "import.log"))
+			raw, err := os.ReadFile(v.artifactPath(s.EvidenceDir, "docker.log"))
 			if err != nil {
-				pp = append(pp, fmt.Sprintf("import.log: %v", err))
+				pp = append(pp, fmt.Sprintf("docker.log: %v", err))
 				break
 			}
-			if mm := gethImportCompleteRe.FindSubmatch(raw); mm == nil {
-				pp = append(pp, `import.log has no "Import complete ... anchor=" line`)
-			} else if anchor, _ := strconv.ParseUint(string(mm[1]), 10, 64); anchor != s.Anchor {
-				pp = append(pp, fmt.Sprintf("import.log anchor=%s != manifest anchor %d", mm[1], s.Anchor))
+			text, ok := swapBoot(raw)
+			if !ok {
+				pp = append(pp, `no "pbt-swap: starting" line: no swap boot to judge`)
+				break
 			}
-			if fileExists(v.artifactPath(s.EvidenceDir, "failed")) {
-				pp = append(pp, "a failed marker is present")
-			} else if !fileExists(v.artifactPath(s.EvidenceDir, "done")) {
-				pp = append(pp, "no done marker")
-			}
+			pp = append(pp, gethOnlineImport(text, s, m.Producers)...)
+			followed, note := v.followedThroughImport(s)
+			pp = append(pp, followed...)
+			notes = append(notes, fmt.Sprintf("consumer node %d (geth) %s", s.Node, note))
 		case "nethermind":
 			raw, err := os.ReadFile(v.artifactPath(s.EvidenceDir, "docker.log"))
 			if err != nil {
@@ -270,6 +266,106 @@ func (v *verifier) checkImportAccepted(ctx context.Context) (verdict, string) {
 		return verdictFail, strings.Join(problems, "; ")
 	}
 	return verdictPass, strings.Join(notes, "; ")
+}
+
+// gethOnlineImport judges a geth consumer's swap boot. The node starts once
+// with the import flags and serves RPC before the import begins, so it keeps
+// following the chain while importing. The import ends at the manifest's
+// anchor with the producer's root, and nothing is logged at ERROR or CRIT.
+func gethOnlineImport(text string, s migmon.SwapRecord, producers []migmon.ProducerRecord) []string {
+	var pp []string
+	if n := strings.Count(text, "pbt-swap: starting"); n != 1 {
+		pp = append(pp, fmt.Sprintf("%d boots with the import flags, want 1: the node restarted after the swap", n))
+	}
+	served := strings.Index(text, "HTTP server started")
+	began := strings.Index(text, "Starting binary tree import in the background")
+	switch {
+	case began < 0:
+		pp = append(pp, "no background import began")
+	case served < 0 || served > began:
+		pp = append(pp, "the import began before the node served RPC")
+	}
+	if mm := gethImportCompleteRe.FindStringSubmatch(text); mm == nil {
+		pp = append(pp, `no "Import complete ... binaryRoot= ... anchor=" line`)
+	} else {
+		if anchor, _ := strconv.ParseUint(mm[2], 10, 64); anchor != s.Anchor {
+			pp = append(pp, fmt.Sprintf("imported anchor %s != manifest anchor %d", mm[2], s.Anchor))
+		}
+		if i := slices.IndexFunc(producers, func(p migmon.ProducerRecord) bool { return p.Node == s.Producer }); i < 0 {
+			pp = append(pp, fmt.Sprintf("no record of producer node %d", s.Producer))
+		} else if !pbtsnap.LoggedMatches(mm[1], common.HexToHash(producers[i].PbtRoot)) {
+			pp = append(pp, fmt.Sprintf("imported root %s != producer root %s", mm[1], producers[i].PbtRoot))
+		}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "ERROR[") || strings.HasPrefix(line, "CRIT [") {
+			pp = append(pp, "logged: "+line)
+		}
+	}
+	return pp
+}
+
+// followedThroughImport reads the monitor stream for the consumer's import
+// window, from its first "importing" progress sample to the first other one.
+// Once its head first comes within CaughtUpLag of node 1's after the restart,
+// it must stay there for the rest of the window: the node keeps following
+// while it imports.
+func (v *verifier) followedThroughImport(s migmon.SwapRecord) ([]string, string) {
+	var (
+		tip                  uint64
+		haveTip, inWindow    bool
+		caughtUp             bool
+		samples, behind      int
+		firstHead, lastHead  uint64
+		windowFrom, windowTo time.Time
+	)
+	start := time.Unix(s.StartAt, 0)
+	for _, ev := range v.monitor {
+		i, ok := nodeIndex(ev.Node)
+		if !ok || ev.Time.Before(start) {
+			continue
+		}
+		if ev.Kind == migmon.EvHead && i == 1 {
+			tip, haveTip = ev.Number, true
+			continue
+		}
+		if i != s.Node {
+			continue
+		}
+		if ev.Kind == migmon.EvProgress {
+			if ev.Phase == migmon.PhaseImporting {
+				if !inWindow {
+					windowFrom = ev.Time
+				}
+				inWindow = true
+				windowTo = ev.Time
+			} else if inWindow {
+				break
+			}
+			continue
+		}
+		if ev.Kind != migmon.EvHead || !inWindow || !haveTip {
+			continue
+		}
+		if samples == 0 {
+			firstHead = ev.Number
+		}
+		samples++
+		lastHead = ev.Number
+		within := ev.Number+migmon.CaughtUpLag >= tip
+		if caughtUp && !within {
+			behind++
+		}
+		caughtUp = caughtUp || within
+	}
+	if samples == 0 {
+		return nil, "imported between monitor polls"
+	}
+	note := fmt.Sprintf("imported over %s, head %d -> %d in %d samples", windowTo.Sub(windowFrom).Round(time.Second), firstHead, lastHead, samples)
+	if behind > 0 {
+		return []string{fmt.Sprintf("head fell over %d blocks behind node 1 in %d of %d samples while importing", migmon.CaughtUpLag, behind, samples)}, note
+	}
+	return nil, note
 }
 
 // checkSwapsSerialized asserts the consumer swaps ran one at a time, in

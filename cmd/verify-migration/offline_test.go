@@ -180,7 +180,7 @@ func TestCheckSwapsSerialized(t *testing.T) {
 func TestCheckImportAccepted(t *testing.T) {
 	root := "0x" + strings.Repeat("5", 64)
 
-	run := func(t *testing.T, elName string, swap migmon.SwapRecord, files map[string]string) (verdict, string) {
+	run := func(t *testing.T, elName string, swap migmon.SwapRecord, files map[string]string, monitor ...migmon.Event) (verdict, string) {
 		t.Helper()
 		dir := t.TempDir()
 		for name, body := range files {
@@ -188,48 +188,94 @@ func TestCheckImportAccepted(t *testing.T) {
 		}
 		v := &verifier{
 			manifestPath: "x", artifactsDir: dir,
-			monitor:  []migmon.Event{ev(migmon.EvHead, elName, 0)},
-			manifest: &lapManifest{Offline: &migmon.Offline{Enabled: true}, Swaps: []migmon.SwapRecord{swap}},
+			monitor: append([]migmon.Event{ev(migmon.EvHead, elName, 0)}, monitor...),
+			manifest: &lapManifest{Offline: &migmon.Offline{Enabled: true}, Swaps: []migmon.SwapRecord{swap},
+				Producers: []migmon.ProducerRecord{{Node: 6, PbtRoot: root}}},
 		}
 		return v.checkImportAccepted(context.Background())
 	}
+	// gethBoot is a geth consumer's log from its swap boot: the wrapper's line, the
+	// node serving RPC, then the background import at the given anchor, plus extra.
+	gethBoot := func(anchor string, extra ...string) map[string]string {
+		lines := []string{
+			"INFO [10-14|11:59:00.000] Imported new potential chain segment     number=700",
+			"pbt-swap: starting with --pbt.import.anchor=0xab --pbt.import.force",
+			"INFO [10-14|12:00:00.000] HTTP server started                      endpoint=127.0.0.1:8545",
+			"INFO [10-14|12:00:01.000] Starting binary tree import in the background anchor=812",
+			"INFO [10-14|12:00:02.000] Import complete                          binaryRoot=" + root + " anchor=" + anchor,
+		}
+		return map[string]string{"docker.log": strings.Join(append(lines, extra...), "\n") + "\n"}
+	}
+	gethSwap := migmon.SwapRecord{Node: 3, Producer: 6, Anchor: 812, FinalizedAtStop: 812, StartAt: 100, EvidenceDir: "consumer-node-3"}
+	const tip, consumer = "el-1-geth-lighthouse", "el-3-geth-lighthouse"
+	at := func(kind, node string, tm int64, number uint64, phase string) migmon.Event {
+		e := ev(kind, node, tm)
+		e.Number, e.Phase = number, phase
+		return e
+	}
 
-	t.Run("geth: clean import accepted", func(t *testing.T) {
-		swap := migmon.SwapRecord{Node: 3, Anchor: 812, FinalizedAtStop: 812, EvidenceDir: "consumer-node-3"}
-		r, evidence := run(t, "el-3-geth-lighthouse", swap, map[string]string{
-			"import.log": "INFO Import complete binaryRoot=" + root + " anchor=812\n",
-			"done":       "",
-		})
+	t.Run("geth: clean online import accepted", func(t *testing.T) {
+		r, evidence := run(t, consumer, gethSwap, gethBoot("812"),
+			at(migmon.EvHead, tip, 101, 900, ""),
+			at(migmon.EvProgress, consumer, 102, 0, migmon.PhaseImporting),
+			at(migmon.EvHead, consumer, 102, 895, ""), // still catching up after the restart
+			at(migmon.EvHead, consumer, 104, 899, ""),
+			at(migmon.EvHead, tip, 106, 901, ""),
+			at(migmon.EvHead, consumer, 106, 901, ""),
+			at(migmon.EvProgress, consumer, 108, 0, migmon.PhaseRunning))
 		if r != verdictPass {
 			t.Fatalf("want pass, got %s: %s", r, evidence)
 		}
-	})
-
-	t.Run("geth: failed marker present: fails", func(t *testing.T) {
-		swap := migmon.SwapRecord{Node: 3, Anchor: 812, FinalizedAtStop: 812, EvidenceDir: "consumer-node-3"}
-		r, evidence := run(t, "el-3-geth-lighthouse", swap, map[string]string{
-			"import.log": "INFO Import complete binaryRoot=" + root + " anchor=812\n",
-			"failed":     "",
-		})
-		if r != verdictFail {
-			t.Fatalf("want fail, got %s: %s", r, evidence)
-		}
-		if !strings.Contains(evidence, "failed marker") {
-			t.Fatalf("evidence %q missing failed-marker reason", evidence)
+		if !strings.Contains(evidence, "head 895 -> 901 in 3 samples") {
+			t.Fatalf("evidence %q missing the import window", evidence)
 		}
 	})
 
-	t.Run("geth: import.log anchor mismatch: fails", func(t *testing.T) {
-		swap := migmon.SwapRecord{Node: 3, Anchor: 812, FinalizedAtStop: 812, EvidenceDir: "consumer-node-3"}
-		r, evidence := run(t, "el-3-geth-lighthouse", swap, map[string]string{
-			"import.log": "INFO Import complete binaryRoot=" + root + " anchor=999\n",
-			"done":       "",
+	for _, tc := range []struct {
+		name, want string
+		files      map[string]string
+		monitor    []migmon.Event
+	}{
+		{"anchor mismatch", "!= manifest anchor", gethBoot("999"), nil},
+		{"restarted after the swap", "restarted after the swap", gethBoot("812", "pbt-swap: starting with --pbt.import.force"), nil},
+		{"error logged", "logged: ERROR[", gethBoot("812", "ERROR[10-14|12:00:03.000] Binary tree import failed err=boom"), nil},
+		{"no import began", "no background import began", map[string]string{"docker.log": "pbt-swap: starting with --pbt.import.force\nINFO [10-14|12:00:00.000] HTTP server started\n"}, nil},
+		{"import began before RPC", "began before the node served RPC", map[string]string{"docker.log": "pbt-swap: starting\n" +
+			"INFO [10-14|12:00:01.000] Starting binary tree import in the background\n" +
+			"INFO [10-14|12:00:02.000] HTTP server started\n" +
+			"INFO [10-14|12:00:03.000] Import complete binaryRoot=" + root + " anchor=812\n"}, nil},
+		{"fell behind while importing", "behind node 1", gethBoot("812"), []migmon.Event{
+			at(migmon.EvHead, tip, 101, 900, ""),
+			at(migmon.EvProgress, consumer, 102, 0, migmon.PhaseImporting),
+			at(migmon.EvHead, consumer, 102, 900, ""),
+			at(migmon.EvHead, tip, 108, 905, ""),
+			at(migmon.EvHead, consumer, 108, 900, ""), // caught up, then stalled while importing
+			at(migmon.EvProgress, consumer, 110, 0, migmon.PhaseRunning)}},
+	} {
+		t.Run("geth: "+tc.name+": fails", func(t *testing.T) {
+			r, evidence := run(t, consumer, gethSwap, tc.files, tc.monitor...)
+			if r != verdictFail {
+				t.Fatalf("want fail, got %s: %s", r, evidence)
+			}
+			if !strings.Contains(evidence, tc.want) {
+				t.Fatalf("evidence %q missing %q", evidence, tc.want)
+			}
 		})
-		if r != verdictFail {
-			t.Fatalf("want fail, got %s: %s", r, evidence)
+	}
+
+	t.Run("geth: root mismatch: fails", func(t *testing.T) {
+		dir := t.TempDir()
+		for name, body := range gethBoot("812") {
+			writeFile(t, filepath.Join(dir, gethSwap.EvidenceDir, name), body)
 		}
-		if !strings.Contains(evidence, "!= manifest anchor") {
-			t.Fatalf("evidence %q missing anchor-mismatch reason", evidence)
+		v := &verifier{
+			manifestPath: "x", artifactsDir: dir,
+			monitor: []migmon.Event{ev(migmon.EvHead, consumer, 0)},
+			manifest: &lapManifest{Offline: &migmon.Offline{Enabled: true}, Swaps: []migmon.SwapRecord{gethSwap},
+				Producers: []migmon.ProducerRecord{{Node: 6, PbtRoot: "0x" + strings.Repeat("6", 64)}}},
+		}
+		if r, evidence := v.checkImportAccepted(context.Background()); r != verdictFail || !strings.Contains(evidence, "!= producer root") {
+			t.Fatalf("want a root-mismatch fail, got %s: %s", r, evidence)
 		}
 	})
 
